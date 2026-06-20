@@ -11,13 +11,13 @@ load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
 
 import json
 import time
-import fcntl
 import streamlit as st
+import gspread
+from google.oauth2.service_account import Credentials
 import pandas as pd
 import requests
 import io
 from datetime import datetime, timezone
-from pathlib import Path
 
 from utils import load_master_projects, strip_accents
 
@@ -27,14 +27,14 @@ OTC_WALLET      = os.getenv("OTC_WALLET", "0xce0719ec1bda336ba069c6961ad16776782
 API_KEY         = os.getenv("ETHERSCAN_API_KEY", "")
 ETHERSCAN_BASE  = "https://api.etherscan.io/v2/api"
 POLYGON_CHAIN   = 137
-RESERVAS_PATH   = Path(__file__).parent.parent / "otc_reservas.json"
-CACHE_TTL_SECS  = 3600  # 1 h de caché para balances blockchain
-
+CACHE_TTL_SECS   = 3600
 POLYSCAN_TX_URL  = "https://polygonscan.com/tx/"
-PRECIOS_PATH     = Path(__file__).parent.parent / "otc_precios.json"
-OFERTAS_PATH     = Path(__file__).parent.parent / "otc_ofertas.json"
 EXCHANGE_API_URL = "https://open.er-api.com/v6/latest/EUR"
 OTC_ADMIN_PIN    = os.getenv("OTC_ADMIN_PIN", "1234")
+SPREADSHEET_ID   = "13Q0n7egbAIJSU9UvwwDucd3MUQ48Q44eoMwsPT-PmGs"
+TAB_RESERVAS     = "Reservas"
+TAB_OFERTAS      = "Ofertas"
+TAB_PRECIOS      = "precios_otc"
 
 # ── Página ────────────────────────────────────────────────────────────────────
 
@@ -45,54 +45,62 @@ st.caption(
     "Reservas guardadas en servidor."
 )
 
+# ── Google Sheets — cliente compartido ───────────────────────────────────────
+
+@st.cache_resource
+def _gsheet_client():
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds  = Credentials.from_service_account_info(
+        dict(st.secrets["gcp_service_account"]), scopes=scopes
+    )
+    return gspread.authorize(creds)
+
+def _worksheet(tab: str):
+    return _gsheet_client().open_by_key(SPREADSHEET_ID).worksheet(tab)
+
 # ── Persistencia de reservas ──────────────────────────────────────────────────
 
 def load_reservas() -> list:
-    if not RESERVAS_PATH.exists():
-        return []
     try:
-        return json.loads(RESERVAS_PATH.read_text(encoding="utf-8"))
+        values = _worksheet(TAB_RESERVAS).col_values(1)
+        return [json.loads(v) for v in values if v.strip()]
     except Exception:
         return []
 
-def _atomic_write(path: Path, data: str):
-    lock_path = path.with_suffix(".lock")
-    with open(lock_path, "w") as lf:
-        fcntl.flock(lf, fcntl.LOCK_EX)
-        try:
-            path.write_text(data, encoding="utf-8")
-        finally:
-            fcntl.flock(lf, fcntl.LOCK_UN)
-
 def save_reservas(reservas: list):
-    _atomic_write(RESERVAS_PATH, json.dumps(reservas, ensure_ascii=False, indent=2))
+    ws = _worksheet(TAB_RESERVAS)
+    ws.clear()
+    if reservas:
+        ws.update([[json.dumps(r, ensure_ascii=False)] for r in reservas], "A1")
 
 # ── Persistencia de precios OTC ───────────────────────────────────────────────
 
 def load_precios_otc() -> dict:
-    """Devuelve {token_address_lower: {"precio_otc": float, "updated_at": str, "updated_by": str}}"""
-    if not PRECIOS_PATH.exists():
-        return {}
     try:
-        return json.loads(PRECIOS_PATH.read_text(encoding="utf-8"))
+        val = _worksheet(TAB_PRECIOS).acell("A1").value
+        return json.loads(val) if val else {}
     except Exception:
         return {}
 
 def save_precios_otc(precios: dict):
-    _atomic_write(PRECIOS_PATH, json.dumps(precios, ensure_ascii=False, indent=2))
+    ws = _worksheet(TAB_PRECIOS)
+    ws.clear()
+    ws.update([[json.dumps(precios, ensure_ascii=False)]], "A1")
 
 # ── Persistencia de ofertas de terceros ──────────────────────────────────────
 
 def load_ofertas() -> list:
-    if not OFERTAS_PATH.exists():
-        return []
     try:
-        return json.loads(OFERTAS_PATH.read_text(encoding="utf-8"))
+        values = _worksheet(TAB_OFERTAS).col_values(1)
+        return [json.loads(v) for v in values if v.strip()]
     except Exception:
         return []
 
 def save_ofertas(ofertas: list):
-    _atomic_write(OFERTAS_PATH, json.dumps(ofertas, ensure_ascii=False, indent=2))
+    ws = _worksheet(TAB_OFERTAS)
+    ws.clear()
+    if ofertas:
+        ws.update([[json.dumps(r, ensure_ascii=False)] for r in ofertas], "A1")
 
 # ── Tipo de cambio EUR/USD ────────────────────────────────────────────────────
 
