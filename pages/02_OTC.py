@@ -60,61 +60,47 @@ def _worksheet(tab: str):
 
 # ── Persistencia de reservas ──────────────────────────────────────────────────
 
-def _read_tab(tab: str) -> list:
+def _read_cell(tab: str) -> list | dict:
     for intento in range(3):
         try:
-            values = _worksheet(tab).col_values(1)
-            return [json.loads(v) for v in values if v.strip()]
+            val = _worksheet(tab).acell("A1").value
+            return json.loads(val) if val else []
         except Exception:
             if intento < 2:
                 time.sleep(1)
     return []
 
-def _write_tab(tab: str, rows: list):
+def _write_cell(tab: str, data):
     for intento in range(3):
         try:
-            ws = _worksheet(tab)
-            ws.clear()
-            if rows:
-                ws.update("A1", [[json.dumps(r, ensure_ascii=False)] for r in rows])
+            _worksheet(tab).update("A1", [[json.dumps(data, ensure_ascii=False)]])
             return
         except Exception:
             if intento < 2:
                 time.sleep(1)
 
 def load_reservas() -> list:
-    return _read_tab(TAB_RESERVAS)
+    return _read_cell(TAB_RESERVAS)
 
 def save_reservas(reservas: list):
-    _write_tab(TAB_RESERVAS, reservas)
+    _write_cell(TAB_RESERVAS, reservas)
 
 # ── Persistencia de precios OTC ───────────────────────────────────────────────
 
 def load_precios_otc() -> dict:
-    try:
-        val = _worksheet(TAB_PRECIOS).acell("A1").value
-        return json.loads(val) if val else {}
-    except Exception:
-        return {}
+    result = _read_cell(TAB_PRECIOS)
+    return result if isinstance(result, dict) else {}
 
 def save_precios_otc(precios: dict):
-    for intento in range(3):
-        try:
-            ws = _worksheet(TAB_PRECIOS)
-            ws.clear()
-            ws.update("A1", [[json.dumps(precios, ensure_ascii=False)]])
-            return
-        except Exception:
-            if intento < 2:
-                time.sleep(1)
+    _write_cell(TAB_PRECIOS, precios)
 
 # ── Persistencia de ofertas de terceros ──────────────────────────────────────
 
 def load_ofertas() -> list:
-    return _read_tab(TAB_OFERTAS)
+    return _read_cell(TAB_OFERTAS)
 
 def save_ofertas(ofertas: list):
-    _write_tab(TAB_OFERTAS, ofertas)
+    _write_cell(TAB_OFERTAS, ofertas)
 
 # ── Tipo de cambio EUR/USD ────────────────────────────────────────────────────
 
