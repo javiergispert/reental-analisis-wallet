@@ -60,18 +60,33 @@ def _worksheet(tab: str):
 
 # ── Persistencia de reservas ──────────────────────────────────────────────────
 
+def _read_tab(tab: str) -> list:
+    for intento in range(3):
+        try:
+            values = _worksheet(tab).col_values(1)
+            return [json.loads(v) for v in values if v.strip()]
+        except Exception:
+            if intento < 2:
+                time.sleep(1)
+    return []
+
+def _write_tab(tab: str, rows: list):
+    for intento in range(3):
+        try:
+            ws = _worksheet(tab)
+            ws.clear()
+            if rows:
+                ws.update("A1", [[json.dumps(r, ensure_ascii=False)] for r in rows])
+            return
+        except Exception:
+            if intento < 2:
+                time.sleep(1)
+
 def load_reservas() -> list:
-    try:
-        values = _worksheet(TAB_RESERVAS).col_values(1)
-        return [json.loads(v) for v in values if v.strip()]
-    except Exception:
-        return []
+    return _read_tab(TAB_RESERVAS)
 
 def save_reservas(reservas: list):
-    ws = _worksheet(TAB_RESERVAS)
-    ws.clear()
-    if reservas:
-        ws.update([[json.dumps(r, ensure_ascii=False)] for r in reservas], "A1")
+    _write_tab(TAB_RESERVAS, reservas)
 
 # ── Persistencia de precios OTC ───────────────────────────────────────────────
 
@@ -83,24 +98,23 @@ def load_precios_otc() -> dict:
         return {}
 
 def save_precios_otc(precios: dict):
-    ws = _worksheet(TAB_PRECIOS)
-    ws.clear()
-    ws.update([[json.dumps(precios, ensure_ascii=False)]], "A1")
+    for intento in range(3):
+        try:
+            ws = _worksheet(TAB_PRECIOS)
+            ws.clear()
+            ws.update("A1", [[json.dumps(precios, ensure_ascii=False)]])
+            return
+        except Exception:
+            if intento < 2:
+                time.sleep(1)
 
 # ── Persistencia de ofertas de terceros ──────────────────────────────────────
 
 def load_ofertas() -> list:
-    try:
-        values = _worksheet(TAB_OFERTAS).col_values(1)
-        return [json.loads(v) for v in values if v.strip()]
-    except Exception:
-        return []
+    return _read_tab(TAB_OFERTAS)
 
 def save_ofertas(ofertas: list):
-    ws = _worksheet(TAB_OFERTAS)
-    ws.clear()
-    if ofertas:
-        ws.update([[json.dumps(r, ensure_ascii=False)] for r in ofertas], "A1")
+    _write_tab(TAB_OFERTAS, ofertas)
 
 # ── Tipo de cambio EUR/USD ────────────────────────────────────────────────────
 
