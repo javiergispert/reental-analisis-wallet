@@ -1,0 +1,10 @@
+{
+  "_comment": "Lista de wallets y SAFEs de Reental. Completa con todas las direcciones del documento interno.",
+  "addresses": [
+    "0x5f6d71cd8404e661cb4736e368564c01a7ff9852",
+    "0xe5e9a22e93f6d6ab533e7c699c22c766a2536da0",
+    "0xd6fab0fb6c4d563ddd0cc3e99e6c89b13b6da4ba",
+    "0xff0320fccdebb6d2e8b279e50f6b0c892a8c6aa2",
+    "0x05e74a03af1b3c9ee36ce7d07c8dfddce783419b"
+  ]
+}

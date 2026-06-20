@@ -1,0 +1,7 @@
+.env
+__pycache__/
+*.pyc
+*.lock
+otc_reservas.json
+otc_ofertas.json
+otc_precios.json
