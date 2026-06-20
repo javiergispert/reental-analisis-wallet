@@ -60,11 +60,22 @@ def _worksheet(tab: str):
 
 # ── Persistencia de reservas ──────────────────────────────────────────────────
 
-def _read_cell(tab: str) -> list | dict:
+def _read_cell(tab: str):
     for intento in range(3):
         try:
-            val = _worksheet(tab).acell("A1").value
-            return json.loads(val) if val else []
+            ws  = _worksheet(tab)
+            val = ws.acell("A1").value
+            if not val:
+                return []
+            parsed = json.loads(val)
+            if isinstance(parsed, list):
+                return parsed          # formato nuevo: lista completa en A1
+            # formato antiguo: A1 es un solo registro → leer todas las filas y migrar
+            all_vals = ws.col_values(1)
+            rows = [json.loads(v) for v in all_vals if v.strip()]
+            # Migrar: reescribir en formato nuevo
+            ws.update("A1", [[json.dumps(rows, ensure_ascii=False)]])
+            return rows
         except Exception:
             if intento < 2:
                 time.sleep(1)
