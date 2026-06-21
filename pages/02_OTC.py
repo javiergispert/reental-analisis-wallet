@@ -1083,19 +1083,23 @@ def render_reservas(lista: list, editable: bool = False):
                         st.caption(nota_envio)
 
             if editable:
-                es_tercero_r = r.get("tipo_origen") == "tercero"
                 btn1, btn2, btn3, btn4, _ = st.columns([1, 1, 1, 1.4, 3])
 
-                # Editar número de tokens
                 with btn1:
                     if st.button("✏️ Editar", key=f"edit_{r['id']}"):
                         st.session_state[f"editing_{r['id']}"] = True
 
-                # Forzar completada (solo terceros)
+                with btn2:
+                    if st.button("❌ Cancelar", key=f"cancel_{r['id']}"):
+                        st.session_state[f"confirm_cancel_{r['id']}"] = True
+
+                with btn3:
+                    if st.button("🗑️ Eliminar", key=f"delete_{r['id']}"):
+                        st.session_state[f"confirm_delete_{r['id']}"] = True
+
                 with btn4:
-                    if es_tercero_r:
-                        if st.button("✅ Marcar completada", key=f"force_{r['id']}"):
-                            st.session_state[f"confirm_force_{r['id']}"] = True
+                    if st.button("✅ Marcar completada", key=f"force_{r['id']}"):
+                        st.session_state[f"confirm_force_{r['id']}"] = True
                     if st.session_state.get(f"confirm_force_{r['id']}"):
                         st.warning(
                             "Confirma que la operación se ha ejecutado fuera de la plataforma. "
@@ -1121,52 +1125,73 @@ def render_reservas(lista: list, editable: bool = False):
                             st.session_state.pop(f"confirm_force_{r['id']}", None)
                             st.rerun()
 
-                # Cancelar reserva
-                with btn2:
-                    if st.button("❌ Cancelar", key=f"cancel_{r['id']}"):
-                        st.session_state[f"confirm_cancel_{r['id']}"] = True
-
-                # Eliminar reserva definitivamente
-                with btn3:
-                    if st.button("🗑️ Eliminar", key=f"delete_{r['id']}"):
-                        st.session_state[f"confirm_delete_{r['id']}"] = True
-
                 # Formulario de edición inline
                 if st.session_state.get(f"editing_{r['id']}"):
-                    addr_tok   = r["token_address"].lower()
-                    disp_edit  = float(saldos.get(addr_tok, {}).get("disponible", 0)) + float(r["n_tokens"])
+                    addr_tok    = r["token_address"].lower()
+                    disp_edit   = float(saldos.get(addr_tok, {}).get("disponible", 0)) + float(r["n_tokens"])
+                    precio_min  = float(precios_otc.get(addr_tok, {}).get("precio_otc") or saldos.get(addr_tok, {}).get("precio_emision") or 0.0)
+                    divisa_r    = r.get("divisa", "EUR")
+
                     col_e1, col_e2, col_e3 = st.columns(3)
                     new_tokens = col_e1.number_input(
                         "Nuevo nº de tokens",
-                        min_value=0.001,
-                        max_value=disp_edit,
+                        min_value=0.001, max_value=disp_edit,
                         value=float(r["n_tokens"]),
                         step=1.0, format="%.3f",
                         key=f"edit_tok_{r['id']}",
                     )
                     new_precio = col_e2.number_input(
-                        f"Nuevo precio ({r['divisa']})",
-                        min_value=0.0,
-                        value=float(r["precio_acordado"]),
+                        f"Precio ({divisa_r}) — mín. {precio_min:.2f}",
+                        min_value=precio_min,
+                        value=max(float(r["precio_acordado"]), precio_min),
                         step=0.01, format="%.2f",
                         key=f"edit_precio_{r['id']}",
                     )
                     new_notas = col_e3.text_input("Notas", value=r.get("notas", ""), key=f"edit_notas_{r['id']}")
+
+                    # Campo wallet (editable si es propuesta pendiente o si quiere corregirla)
+                    wallet_actual    = r.get("wallet_inversor", "")
+                    es_pendiente_w   = r.get("wallet_pendiente", False)
+                    wallet_label     = "Wallet inversor" + (" (⏳ pendiente — rellena ahora)" if es_pendiente_w else "")
+                    new_wallet       = st.text_input(
+                        wallet_label,
+                        value="" if es_pendiente_w else wallet_actual,
+                        placeholder="0x…",
+                        key=f"edit_wallet_{r['id']}",
+                    )
+
                     col_s, col_c = st.columns(2)
                     guardar       = col_s.button("💾 Guardar cambios", type="primary", use_container_width=True, key=f"edit_save_{r['id']}")
                     cancelar_edit = col_c.button("Cancelar", use_container_width=True, key=f"edit_cancel_{r['id']}")
 
                     if guardar:
-                        all_r = load_reservas()
-                        for item in all_r:
-                            if item["id"] == r["id"]:
-                                item["n_tokens"]        = float(new_tokens)
-                                item["precio_acordado"] = float(new_precio)
-                                item["notas"]           = new_notas.strip()
-                                break
-                        save_reservas(all_r)
-                        st.session_state.pop(f"editing_{r['id']}", None)
-                        st.rerun()
+                        errores_edit = []
+                        wallet_limpia = new_wallet.strip().lower()
+                        # Validar wallet si se ha rellenado o era obligatoria
+                        wallet_guardada  = wallet_actual
+                        pendiente_nueva  = es_pendiente_w
+                        if wallet_limpia:
+                            if not (wallet_limpia.startswith("0x") and len(wallet_limpia) == 42):
+                                errores_edit.append("La wallet introducida no es válida (debe empezar por 0x y tener 42 caracteres).")
+                            else:
+                                wallet_guardada = wallet_limpia
+                                pendiente_nueva = False
+                        if errores_edit:
+                            for e in errores_edit:
+                                st.error(e)
+                        else:
+                            all_r = load_reservas()
+                            for item in all_r:
+                                if item["id"] == r["id"]:
+                                    item["n_tokens"]         = float(new_tokens)
+                                    item["precio_acordado"]  = float(new_precio)
+                                    item["notas"]            = new_notas.strip()
+                                    item["wallet_inversor"]  = wallet_guardada
+                                    item["wallet_pendiente"] = pendiente_nueva
+                                    break
+                            save_reservas(all_r)
+                            st.session_state.pop(f"editing_{r['id']}", None)
+                            st.rerun()
                     if cancelar_edit:
                         st.session_state.pop(f"editing_{r['id']}", None)
                         st.rerun()
