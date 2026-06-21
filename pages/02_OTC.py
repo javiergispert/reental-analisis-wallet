@@ -933,15 +933,15 @@ for _tid, _ in _tabs_def:
     if _tid == _active_tab:
         _css_rules += (
             f'div[data-testid="stColumns"] div:has(button[key="tab_btn_{_tid}"]) button {{'
-            f'background:#d97706 !important;border:none !important;'
-            f'border-bottom:4px solid #92400e !important;'
+            f'background:#1e293b !important;border:none !important;'
+            f'border-bottom:4px solid #0f172a !important;'
             f'color:#ffffff !important;font-weight:700 !important;'
-            f'font-size:0.92rem !important;box-shadow:0 2px 6px rgba(217,119,6,0.35) !important;}}'
+            f'font-size:0.92rem !important;box-shadow:0 2px 6px rgba(15,23,42,0.3) !important;}}'
         )
     else:
         _css_rules += (
             f'div[data-testid="stColumns"] div:has(button[key="tab_btn_{_tid}"]) button {{'
-            f'background:#f1f5f9 !important;border:1px solid #cbd5e1 !important;'
+            f'background:#ffffff !important;border:1px solid #cbd5e1 !important;'
             f'border-bottom:4px solid #cbd5e1 !important;'
             f'color:#64748b !important;font-weight:500 !important;font-size:0.88rem !important;}}'
         )
