@@ -900,386 +900,383 @@ st.subheader("📋 Reservas")
 
 reservas_all = load_reservas()
 
-if not reservas_all:
-    st.info("No hay reservas registradas todavía.")
-else:
-    # ── Filtros ───────────────────────────────────────────────────────────────
-    proyectos_unicos  = sorted({r["proyecto_nombre"] for r in reservas_all})
-    comerciales_unicos = sorted({r.get("comercial", "") for r in reservas_all if r.get("comercial")})
-    inversores_unicos  = sorted({r.get("inversor", "") for r in reservas_all if r.get("inversor")})
+# ── Filtros ───────────────────────────────────────────────────────────────
+proyectos_unicos   = sorted({r["proyecto_nombre"] for r in reservas_all})
+comerciales_unicos = sorted({r.get("comercial", "") for r in reservas_all if r.get("comercial")})
+inversores_unicos  = sorted({r.get("inversor", "") for r in reservas_all if r.get("inversor")})
 
-    fx1, fx2, fx3 = st.columns(3)
-    f_proyecto  = fx1.selectbox("🏠 Filtrar por proyecto",  ["Todos"] + proyectos_unicos,  key="rf_proyecto")
-    f_comercial = fx2.selectbox("👤 Filtrar por comercial", ["Todos"] + comerciales_unicos, key="rf_comercial")
-    f_inversor  = fx3.selectbox("🤝 Filtrar por inversor",  ["Todos"] + inversores_unicos,  key="rf_inversor")
+fx1, fx2, fx3 = st.columns(3)
+f_proyecto  = fx1.selectbox("🏠 Filtrar por proyecto",  ["Todos"] + proyectos_unicos,  key="rf_proyecto")
+f_comercial = fx2.selectbox("👤 Filtrar por comercial", ["Todos"] + comerciales_unicos, key="rf_comercial")
+f_inversor  = fx3.selectbox("🤝 Filtrar por inversor",  ["Todos"] + inversores_unicos,  key="rf_inversor")
 
-    def aplicar_filtros(lista):
-        if f_proyecto  != "Todos": lista = [r for r in lista if r["proyecto_nombre"] == f_proyecto]
-        if f_comercial != "Todos": lista = [r for r in lista if r.get("comercial") == f_comercial]
-        if f_inversor  != "Todos": lista = [r for r in lista if r.get("inversor") == f_inversor]
-        return lista
+def aplicar_filtros(lista):
+    if f_proyecto  != "Todos": lista = [r for r in lista if r["proyecto_nombre"] == f_proyecto]
+    if f_comercial != "Todos": lista = [r for r in lista if r.get("comercial") == f_comercial]
+    if f_inversor  != "Todos": lista = [r for r in lista if r.get("inversor") == f_inversor]
+    return lista
 
-    # ── Navegación por botones destacados ────────────────────────────────────
-    if "reservas_tab" not in st.session_state:
-        st.session_state["reservas_tab"] = "activas"
+# ── Navegación por botones destacados ────────────────────────────────────
+if "reservas_tab" not in st.session_state:
+    st.session_state["reservas_tab"] = "activas"
 
-    _tabs_def = [
-        ("activas",     "🟡 Activas"),
-        ("completadas", "✅ Completadas"),
-        ("canceladas",  "❌ Canceladas"),
-        ("ofertas",     "📢 Ofertas de terceros"),
-    ]
+_tabs_def = [
+    ("activas",     "🟡 Activas"),
+    ("completadas", "✅ Completadas"),
+    ("canceladas",  "❌ Canceladas"),
+    ("ofertas",     "📢 Ofertas de terceros"),
+]
 
-    _active_tab = st.session_state["reservas_tab"]
-    _css_rules = ""
-    for _tid, _ in _tabs_def:
-        if _tid == _active_tab:
-            _css_rules += (
-                f'div[data-testid="stColumns"] div:has(button[key="tab_btn_{_tid}"]) button {{'
-                f'background:#d97706 !important;border:none !important;'
-                f'border-bottom:4px solid #92400e !important;'
-                f'color:#ffffff !important;font-weight:700 !important;'
-                f'font-size:0.92rem !important;box-shadow:0 2px 6px rgba(217,119,6,0.35) !important;}}'
-            )
-        else:
-            _css_rules += (
-                f'div[data-testid="stColumns"] div:has(button[key="tab_btn_{_tid}"]) button {{'
-                f'background:#f1f5f9 !important;border:1px solid #cbd5e1 !important;'
-                f'border-bottom:4px solid #cbd5e1 !important;'
-                f'color:#64748b !important;font-weight:500 !important;font-size:0.88rem !important;}}'
-            )
-    st.markdown(
-        f'<style>div[data-testid="stColumns"] button[key^="tab_btn_"] {{'
-        f'width:100%;padding:11px 6px;border-radius:8px;transition:all .15s;}}'
-        f'{_css_rules}</style>',
-        unsafe_allow_html=True,
-    )
+_active_tab = st.session_state["reservas_tab"]
+_css_rules = ""
+for _tid, _ in _tabs_def:
+    if _tid == _active_tab:
+        _css_rules += (
+            f'div[data-testid="stColumns"] div:has(button[key="tab_btn_{_tid}"]) button {{'
+            f'background:#d97706 !important;border:none !important;'
+            f'border-bottom:4px solid #92400e !important;'
+            f'color:#ffffff !important;font-weight:700 !important;'
+            f'font-size:0.92rem !important;box-shadow:0 2px 6px rgba(217,119,6,0.35) !important;}}'
+        )
+    else:
+        _css_rules += (
+            f'div[data-testid="stColumns"] div:has(button[key="tab_btn_{_tid}"]) button {{'
+            f'background:#f1f5f9 !important;border:1px solid #cbd5e1 !important;'
+            f'border-bottom:4px solid #cbd5e1 !important;'
+            f'color:#64748b !important;font-weight:500 !important;font-size:0.88rem !important;}}'
+        )
+st.markdown(
+    f'<style>div[data-testid="stColumns"] button[key^="tab_btn_"] {{'
+    f'width:100%;padding:11px 6px;border-radius:8px;transition:all .15s;}}'
+    f'{_css_rules}</style>',
+    unsafe_allow_html=True,
+)
 
-    _tab_cols = st.columns(len(_tabs_def))
-    for (_tid, _tlabel), _col in zip(_tabs_def, _tab_cols):
-        if _col.button(_tlabel, key=f"tab_btn_{_tid}", use_container_width=True):
-            st.session_state["reservas_tab"] = _tid
-            st.rerun()
+_tab_cols = st.columns(len(_tabs_def))
+for (_tid, _tlabel), _col in zip(_tabs_def, _tab_cols):
+    if _col.button(_tlabel, key=f"tab_btn_{_tid}", use_container_width=True):
+        st.session_state["reservas_tab"] = _tid
+        st.rerun()
 
-    st.markdown("---")
+st.markdown("---")
 
-    def render_reservas(lista: list, editable: bool = False):
-        if not lista:
-            st.info("No hay reservas en este estado.")
-            return
+def render_reservas(lista: list, editable: bool = False):
+    if not lista:
+        st.info("No hay reservas en este estado.")
+        return
 
-        _todas_ofs_cache = load_ofertas()
+    _todas_ofs_cache = load_ofertas()
 
-        for r in lista:
-            # Detectar reservas activas con tokens ya no disponibles
-            sin_disponibilidad = False
-            if r["estado"] == "activa":
-                if r.get("tipo_origen") == "tercero":
-                    oferta = next((o for o in _todas_ofs_cache if o["id"] == r.get("oferta_id")), None)
-                    if oferta is None or oferta.get("estado") != "activa":
-                        sin_disponibilidad = True
-                else:
-                    addr_r  = r.get("token_address", "").lower()
-                    info_r  = saldos.get(addr_r, {})
-                    if info_r.get("reservado", 0) > info_r.get("saldo", 0):
-                        sin_disponibilidad = True
+    for r in lista:
+        # Detectar reservas activas con tokens ya no disponibles
+        sin_disponibilidad = False
+        if r["estado"] == "activa":
+            if r.get("tipo_origen") == "tercero":
+                oferta = next((o for o in _todas_ofs_cache if o["id"] == r.get("oferta_id")), None)
+                if oferta is None or oferta.get("estado") != "activa":
+                    sin_disponibilidad = True
+            else:
+                addr_r  = r.get("token_address", "").lower()
+                info_r  = saldos.get(addr_r, {})
+                if info_r.get("reservado", 0) > info_r.get("saldo", 0):
+                    sin_disponibilidad = True
 
-            border_style = "border:2px solid #7f1d1d;" if sin_disponibilidad else "border:1px solid #e2e8f0;"
-            with st.container():
-                if sin_disponibilidad:
-                    st.markdown(
-                        '<div style="background:#fef2f2;' + border_style + 'border-radius:8px;'
-                        'padding:6px 14px;margin-bottom:6px;font-size:0.82rem;'
-                        'color:#991b1b;font-weight:600;">'
-                        '⚠️ ATENCIÓN: Los tokens de esta reserva ya no están disponibles '
-                        '(oferta eliminada o saldo agotado en wallet OTC)</div>',
-                        unsafe_allow_html=True,
-                    )
-
-                es_parcial_badge  = r["estado"] == "completada" and r.get("envio_parcial", False)
-                es_tercero        = r.get("tipo_origen") == "tercero"
-                es_propuesta      = r.get("wallet_pendiente", False)
-                badge_color = (
-                    "#b45309" if es_parcial_badge else
-                    {"activa": "#d97706", "completada": "#16a34a", "cancelada": "#94a3b8"}.get(r["estado"], "#64748b")
-                )
-                badge_label = (
-                    "⚠️ PARCIAL" if es_parcial_badge else
-                    {"activa": "ACTIVA", "completada": "COMPLETADA", "cancelada": "CANCELADA"}.get(r["estado"], r["estado"].upper())
-                )
-                origen_badge    = ' <span style="background:#7c3aed;color:white;border-radius:4px;padding:1px 6px;font-size:0.65rem;font-weight:700;">👤 TERCERO</span>' if es_tercero else ""
-                propuesta_badge = ' <span style="background:#0369a1;color:white;border-radius:4px;padding:1px 6px;font-size:0.65rem;font-weight:700;">📋 PROPUESTA</span>' if es_propuesta else ""
-
-                header_html = (
-                    f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">'
-                    f'<span style="background:{badge_color};color:white;border-radius:5px;'
-                    f'padding:2px 8px;font-size:0.7rem;font-weight:700;">{badge_label}</span>'
-                    f'{origen_badge}{propuesta_badge}'
-                    f'<span style="font-weight:700;font-size:1rem;">{r["proyecto_nombre"]}</span>'
-                    f'<span style="color:#94a3b8;font-size:0.85rem;">{r["id"]}</span>'
-                    f'</div>'
-                )
-                st.markdown(header_html, unsafe_allow_html=True)
-
-                i1, i2, i3, i4, i5, i6 = st.columns([2, 2, 2, 1, 1, 2])
-                i1.markdown(f"**Inversor**  \n{r['inversor']}")
-                i2.markdown(f"**Comercial**  \n{r['comercial']}")
-                _w = r["wallet_inversor"]
-                _w_display = "⏳ Pendiente" if r.get("wallet_pendiente") else f"`{_w[:18]}…`"
-                i3.markdown(f"**Wallet inversor**  \n{_w_display}")
-                i4.markdown(f"**Tokens**  \n{r['n_tokens']:,}")
-                i5.markdown(f"**Precio**  \n{r['precio_acordado']:,.2f} {r['divisa']}")
-                i6.markdown(f"**Reservado el**  \n{r['fecha_reserva']}")
-
-                # Totales EUR/USD si están guardados
-                if r.get("total_eur") or r.get("total_usd"):
-                    t_eur  = r.get("total_eur", 0)
-                    t_usd  = r.get("total_usd", 0)
-                    tc     = r.get("eur_usd_rate", "—")
-                    tc_fch = r.get("eur_usd_fecha", "")
-                    st.markdown(
-                        f'<div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;'
-                        f'padding:8px 16px;font-size:0.85rem;color:#0c4a6e;margin:4px 0;">'
-                        f'💱 <b>{t_eur:,.2f} EUR</b> · <b>{t_usd:,.2f} USD</b> &nbsp;|&nbsp; '
-                        f'Cambio aplicado: 1 EUR = {tc} USD <em>({tc_fch})</em></div>',
-                        unsafe_allow_html=True,
-                    )
-
-                if r.get("notas"):
-                    st.caption(f"📝 {r['notas']}")
-
-                if r["estado"] == "completada":
-                    tx_url       = POLYSCAN_TX_URL + r["tx_envio"] if r.get("tx_envio") else None
-                    tx_link      = f"[Ver TX en Polygonscan ↗]({tx_url})" if tx_url else "TX no disponible"
-                    enviados     = r.get("tokens_enviados")
-                    reservados   = r.get("n_tokens", "—")
-                    es_parcial   = r.get("envio_parcial", False)
-                    nota_envio   = r.get("nota_envio")
-
-                    resumen = (
-                        f"**Enviados:** {enviados:.3f} tokens · **Reservados:** {reservados} tokens · "
-                        f"{tx_link} · {r.get('fecha_envio', '—')}"
-                        if enviados is not None
-                        else f"{tx_link} · {r.get('fecha_envio', '—')}"
-                    )
-
-                    if es_parcial:
-                        st.warning(f"⚠️ Envío parcial — {resumen}")
-                        if nota_envio:
-                            st.caption(nota_envio)
-                    else:
-                        st.success(f"✅ Completada — {resumen}")
-                        if nota_envio:
-                            st.caption(nota_envio)
-
-                if editable:
-                    es_tercero_r = r.get("tipo_origen") == "tercero"
-                    btn1, btn2, btn3, btn4, _ = st.columns([1, 1, 1, 1.4, 3])
-
-                    # Editar número de tokens
-                    with btn1:
-                        if st.button("✏️ Editar", key=f"edit_{r['id']}"):
-                            st.session_state[f"editing_{r['id']}"] = True
-
-                    # Forzar completada (solo terceros)
-                    with btn4:
-                        if es_tercero_r:
-                            if st.button("✅ Marcar completada", key=f"force_{r['id']}"):
-                                st.session_state[f"confirm_force_{r['id']}"] = True
-                        if st.session_state.get(f"confirm_force_{r['id']}"):
-                            st.warning(
-                                "Confirma que la operación se ha ejecutado fuera de la plataforma. "
-                                "La reserva pasará a Completada sin hash de TX automático."
-                            )
-                            cf1, cf2 = st.columns(2)
-                            tx_manual = cf1.text_input("Hash de TX (opcional)", placeholder="0x…", key=f"tx_manual_{r['id']}")
-                            if cf1.button("Confirmar", key=f"yes_force_{r['id']}", type="primary"):
-                                all_r = load_reservas()
-                                for item in all_r:
-                                    if item["id"] == r["id"]:
-                                        item["estado"]          = "completada"
-                                        item["envio_parcial"]   = False
-                                        item["tokens_enviados"] = float(item.get("n_tokens", 0))
-                                        item["fecha_envio"]     = datetime.utcnow().strftime("%d/%m/%Y %H:%M")
-                                        item["tx_envio"]        = tx_manual.strip() or None
-                                        item["nota_envio"]      = "Completada manualmente por el equipo comercial."
-                                        break
-                                save_reservas(all_r)
-                                st.session_state.pop(f"confirm_force_{r['id']}", None)
-                                st.rerun()
-                            if cf2.button("Cancelar", key=f"no_force_{r['id']}"):
-                                st.session_state.pop(f"confirm_force_{r['id']}", None)
-                                st.rerun()
-
-                    # Cancelar reserva
-                    with btn2:
-                        if st.button("❌ Cancelar", key=f"cancel_{r['id']}"):
-                            st.session_state[f"confirm_cancel_{r['id']}"] = True
-
-                    # Eliminar reserva definitivamente
-                    with btn3:
-                        if st.button("🗑️ Eliminar", key=f"delete_{r['id']}"):
-                            st.session_state[f"confirm_delete_{r['id']}"] = True
-
-                    # Formulario de edición inline
-                    if st.session_state.get(f"editing_{r['id']}"):
-                        addr_tok   = r["token_address"].lower()
-                        disp_edit  = float(saldos.get(addr_tok, {}).get("disponible", 0)) + float(r["n_tokens"])
-                        col_e1, col_e2, col_e3 = st.columns(3)
-                        new_tokens = col_e1.number_input(
-                            "Nuevo nº de tokens",
-                            min_value=0.001,
-                            max_value=disp_edit,
-                            value=float(r["n_tokens"]),
-                            step=1.0, format="%.3f",
-                            key=f"edit_tok_{r['id']}",
-                        )
-                        new_precio = col_e2.number_input(
-                            f"Nuevo precio ({r['divisa']})",
-                            min_value=0.0,
-                            value=float(r["precio_acordado"]),
-                            step=0.01, format="%.2f",
-                            key=f"edit_precio_{r['id']}",
-                        )
-                        new_notas = col_e3.text_input("Notas", value=r.get("notas", ""), key=f"edit_notas_{r['id']}")
-                        col_s, col_c = st.columns(2)
-                        guardar       = col_s.button("💾 Guardar cambios", type="primary", use_container_width=True, key=f"edit_save_{r['id']}")
-                        cancelar_edit = col_c.button("Cancelar", use_container_width=True, key=f"edit_cancel_{r['id']}")
-
-                        if guardar:
-                            all_r = load_reservas()
-                            for item in all_r:
-                                if item["id"] == r["id"]:
-                                    item["n_tokens"]        = float(new_tokens)
-                                    item["precio_acordado"] = float(new_precio)
-                                    item["notas"]           = new_notas.strip()
-                                    break
-                            save_reservas(all_r)
-                            st.session_state.pop(f"editing_{r['id']}", None)
-                            st.rerun()
-                        if cancelar_edit:
-                            st.session_state.pop(f"editing_{r['id']}", None)
-                            st.rerun()
-
-                    # Confirmación cancelación
-                    if st.session_state.get(f"confirm_cancel_{r['id']}"):
-                        st.warning(f"¿Cancelar la reserva **{r['id']}** de {r['inversor']}? La reserva quedará marcada como cancelada pero permanecerá en el historial.")
-                        cc1, cc2, _ = st.columns([1, 1, 6])
-                        if cc1.button("Sí, cancelar", key=f"yes_cancel_{r['id']}", type="primary"):
-                            all_r = load_reservas()
-                            for item in all_r:
-                                if item["id"] == r["id"]:
-                                    item["estado"] = "cancelada"
-                                    break
-                            save_reservas(all_r)
-                            st.session_state.pop(f"confirm_cancel_{r['id']}", None)
-                            st.rerun()
-                        if cc2.button("No", key=f"no_cancel_{r['id']}"):
-                            st.session_state.pop(f"confirm_cancel_{r['id']}", None)
-                            st.rerun()
-
-                    # Confirmación eliminación
-                    if st.session_state.get(f"confirm_delete_{r['id']}"):
-                        st.error(f"¿Eliminar definitivamente la reserva **{r['id']}**? Esta acción no se puede deshacer.")
-                        cd1, cd2, _ = st.columns([1, 1, 6])
-                        if cd1.button("Sí, eliminar", key=f"yes_delete_{r['id']}", type="primary"):
-                            all_r = load_reservas()
-                            all_r = [item for item in all_r if item["id"] != r["id"]]
-                            save_reservas(all_r)
-                            st.session_state.pop(f"confirm_delete_{r['id']}", None)
-                            st.rerun()
-                        if cd2.button("No", key=f"no_delete_{r['id']}"):
-                            st.session_state.pop(f"confirm_delete_{r['id']}", None)
-                            st.rerun()
-
-            st.divider()
-
-    def _sort_key(r):
-        try:
-            return datetime.strptime(r["fecha_reserva"], "%d/%m/%Y %H:%M")
-        except Exception:
-            return datetime.min
-
-    activas     = aplicar_filtros(sorted([r for r in reservas_all if r["estado"] == "activa"],     key=_sort_key, reverse=True))
-    completadas = aplicar_filtros(sorted([r for r in reservas_all if r["estado"] == "completada"], key=_sort_key, reverse=True))
-    canceladas  = aplicar_filtros(sorted([r for r in reservas_all if r["estado"] == "cancelada"],  key=_sort_key, reverse=True))
-
-    if _active_tab == "activas":
-        if activas:
-            for addr, d in saldos.items():
-                if d["reservado"] > d["saldo"]:
-                    st.error(
-                        f"⚠️ **{d['nombre']}**: tokens reservados ({d['reservado']:,.0f}) "
-                        f"superan el saldo en custodia ({d['saldo']:,.0f}). Revisa las reservas."
-                    )
-        render_reservas(activas, editable=True)
-
-    elif _active_tab == "completadas":
-        render_reservas(completadas, editable=False)
-
-    elif _active_tab == "canceladas":
-        render_reservas(canceladas, editable=False)
-
-    elif _active_tab == "ofertas":
-        st.caption("Ofertas publicadas por inversores terceros. Elimínalas cuando el proceso finalice o el inversor las retire.")
-        todas_ofertas_mgmt = load_ofertas()
-        if not todas_ofertas_mgmt:
-            st.info("No hay ofertas de terceros registradas.")
-        else:
-            for o in sorted(todas_ofertas_mgmt, key=lambda x: x.get("fecha_publicacion",""), reverse=True):
-                estado_o    = o.get("estado", "activa")
-                eliminada_o = estado_o == "eliminada"
-                badge_o  = "🟡 ACTIVA" if estado_o == "activa" else "❌ ELIMINADA"
-                color_o  = "#d97706"   if estado_o == "activa" else "#94a3b8"
-                opacity  = "opacity:0.45;" if eliminada_o else ""
-
+        border_style = "border:2px solid #7f1d1d;" if sin_disponibilidad else "border:1px solid #e2e8f0;"
+        with st.container():
+            if sin_disponibilidad:
                 st.markdown(
-                    f'<div style="{opacity}display:flex;align-items:center;gap:10px;margin-bottom:4px;">'
-                    f'<span style="background:{color_o};color:white;border-radius:5px;'
-                    f'padding:2px 8px;font-size:0.7rem;font-weight:700;">{badge_o}</span>'
-                    f'<span style="font-weight:700;">{o["proyecto_nombre"]}</span>'
-                    f'<span style="color:#94a3b8;font-size:0.85rem;">{o["id"]}</span></div>',
+                    '<div style="background:#fef2f2;' + border_style + 'border-radius:8px;'
+                    'padding:6px 14px;margin-bottom:6px;font-size:0.82rem;'
+                    'color:#991b1b;font-weight:600;">'
+                    '⚠️ ATENCIÓN: Los tokens de esta reserva ya no están disponibles '
+                    '(oferta eliminada o saldo agotado en wallet OTC)</div>',
                     unsafe_allow_html=True,
                 )
-                oc1, oc2, oc3, oc4, oc5, oc6 = st.columns([2, 2, 1, 1, 1, 1])
-                oc1.markdown(f"**Inversor**  \n{o['inversor']}  \n{o.get('email_inversor','')}")
-                oc2.markdown(f"**Comercial**  \n{o.get('comercial','—')}  \n`{o['wallet_inversor'][:14]}…`")
-                oc3.markdown(f"**Tokens**  \n{o['n_tokens']:,.3f}")
-                oc4.markdown(f"**Precio**  \n{o['precio_venta']:,.2f} {o['divisa']}")
-                oc5.markdown(f"**Publicado**  \n{o['fecha_publicacion']}")
 
-                # Saldo real en vivo (solo para activas, para no consumir llamadas API innecesarias)
-                if not eliminada_o:
-                    saldo_v = fetch_token_balance(o["wallet_inversor"].lower(), o["token_address"].lower(), API_KEY)
-                    if saldo_v < 0:
-                        oc6.warning("Sin datos")
-                    elif saldo_v < float(o["n_tokens"]) - 0.001:
-                        oc6.error(f"⚠️ Solo {saldo_v:.3f} en wallet")
-                    else:
-                        oc6.success(f"✅ {saldo_v:.3f} en wallet")
+            es_parcial_badge  = r["estado"] == "completada" and r.get("envio_parcial", False)
+            es_tercero        = r.get("tipo_origen") == "tercero"
+            es_propuesta      = r.get("wallet_pendiente", False)
+            badge_color = (
+                "#b45309" if es_parcial_badge else
+                {"activa": "#d97706", "completada": "#16a34a", "cancelada": "#94a3b8"}.get(r["estado"], "#64748b")
+            )
+            badge_label = (
+                "⚠️ PARCIAL" if es_parcial_badge else
+                {"activa": "ACTIVA", "completada": "COMPLETADA", "cancelada": "CANCELADA"}.get(r["estado"], r["estado"].upper())
+            )
+            origen_badge    = ' <span style="background:#7c3aed;color:white;border-radius:4px;padding:1px 6px;font-size:0.65rem;font-weight:700;">👤 TERCERO</span>' if es_tercero else ""
+            propuesta_badge = ' <span style="background:#0369a1;color:white;border-radius:4px;padding:1px 6px;font-size:0.65rem;font-weight:700;">📋 PROPUESTA</span>' if es_propuesta else ""
+
+            header_html = (
+                f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">'
+                f'<span style="background:{badge_color};color:white;border-radius:5px;'
+                f'padding:2px 8px;font-size:0.7rem;font-weight:700;">{badge_label}</span>'
+                f'{origen_badge}{propuesta_badge}'
+                f'<span style="font-weight:700;font-size:1rem;">{r["proyecto_nombre"]}</span>'
+                f'<span style="color:#94a3b8;font-size:0.85rem;">{r["id"]}</span>'
+                f'</div>'
+            )
+            st.markdown(header_html, unsafe_allow_html=True)
+
+            i1, i2, i3, i4, i5, i6 = st.columns([2, 2, 2, 1, 1, 2])
+            i1.markdown(f"**Inversor**  \n{r['inversor']}")
+            i2.markdown(f"**Comercial**  \n{r['comercial']}")
+            _w = r["wallet_inversor"]
+            _w_display = "⏳ Pendiente" if r.get("wallet_pendiente") else f"`{_w[:18]}…`"
+            i3.markdown(f"**Wallet inversor**  \n{_w_display}")
+            i4.markdown(f"**Tokens**  \n{r['n_tokens']:,}")
+            i5.markdown(f"**Precio**  \n{r['precio_acordado']:,.2f} {r['divisa']}")
+            i6.markdown(f"**Reservado el**  \n{r['fecha_reserva']}")
+
+            # Totales EUR/USD si están guardados
+            if r.get("total_eur") or r.get("total_usd"):
+                t_eur  = r.get("total_eur", 0)
+                t_usd  = r.get("total_usd", 0)
+                tc     = r.get("eur_usd_rate", "—")
+                tc_fch = r.get("eur_usd_fecha", "")
+                st.markdown(
+                    f'<div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;'
+                    f'padding:8px 16px;font-size:0.85rem;color:#0c4a6e;margin:4px 0;">'
+                    f'💱 <b>{t_eur:,.2f} EUR</b> · <b>{t_usd:,.2f} USD</b> &nbsp;|&nbsp; '
+                    f'Cambio aplicado: 1 EUR = {tc} USD <em>({tc_fch})</em></div>',
+                    unsafe_allow_html=True,
+                )
+
+            if r.get("notas"):
+                st.caption(f"📝 {r['notas']}")
+
+            if r["estado"] == "completada":
+                tx_url       = POLYSCAN_TX_URL + r["tx_envio"] if r.get("tx_envio") else None
+                tx_link      = f"[Ver TX en Polygonscan ↗]({tx_url})" if tx_url else "TX no disponible"
+                enviados     = r.get("tokens_enviados")
+                reservados   = r.get("n_tokens", "—")
+                es_parcial   = r.get("envio_parcial", False)
+                nota_envio   = r.get("nota_envio")
+
+                resumen = (
+                    f"**Enviados:** {enviados:.3f} tokens · **Reservados:** {reservados} tokens · "
+                    f"{tx_link} · {r.get('fecha_envio', '—')}"
+                    if enviados is not None
+                    else f"{tx_link} · {r.get('fecha_envio', '—')}"
+                )
+
+                if es_parcial:
+                    st.warning(f"⚠️ Envío parcial — {resumen}")
+                    if nota_envio:
+                        st.caption(nota_envio)
                 else:
-                    oc6.markdown("<span style='color:#94a3b8;font-size:0.8rem;'>—</span>", unsafe_allow_html=True)
+                    st.success(f"✅ Completada — {resumen}")
+                    if nota_envio:
+                        st.caption(nota_envio)
 
-                if estado_o == "activa":
-                    bc1, bc2, _ = st.columns([1, 1, 6])
-                    if bc1.button("🗑️ Eliminar oferta", key=f"del_oferta_{o['id']}"):
-                        st.session_state[f"confirm_del_oferta_{o['id']}"] = True
-                    if st.session_state.get(f"confirm_del_oferta_{o['id']}"):
-                        st.error(f"¿Eliminar definitivamente la oferta **{o['id']}**?")
-                        cx1, cx2, _ = st.columns([1, 1, 6])
-                        if cx1.button("Sí, eliminar", key=f"yes_del_of_{o['id']}", type="primary"):
-                            ofs = load_ofertas()
-                            for _of in ofs:
-                                if _of["id"] == o["id"]:
-                                    _of["estado"] = "eliminada"
+            if editable:
+                es_tercero_r = r.get("tipo_origen") == "tercero"
+                btn1, btn2, btn3, btn4, _ = st.columns([1, 1, 1, 1.4, 3])
+
+                # Editar número de tokens
+                with btn1:
+                    if st.button("✏️ Editar", key=f"edit_{r['id']}"):
+                        st.session_state[f"editing_{r['id']}"] = True
+
+                # Forzar completada (solo terceros)
+                with btn4:
+                    if es_tercero_r:
+                        if st.button("✅ Marcar completada", key=f"force_{r['id']}"):
+                            st.session_state[f"confirm_force_{r['id']}"] = True
+                    if st.session_state.get(f"confirm_force_{r['id']}"):
+                        st.warning(
+                            "Confirma que la operación se ha ejecutado fuera de la plataforma. "
+                            "La reserva pasará a Completada sin hash de TX automático."
+                        )
+                        cf1, cf2 = st.columns(2)
+                        tx_manual = cf1.text_input("Hash de TX (opcional)", placeholder="0x…", key=f"tx_manual_{r['id']}")
+                        if cf1.button("Confirmar", key=f"yes_force_{r['id']}", type="primary"):
+                            all_r = load_reservas()
+                            for item in all_r:
+                                if item["id"] == r["id"]:
+                                    item["estado"]          = "completada"
+                                    item["envio_parcial"]   = False
+                                    item["tokens_enviados"] = float(item.get("n_tokens", 0))
+                                    item["fecha_envio"]     = datetime.utcnow().strftime("%d/%m/%Y %H:%M")
+                                    item["tx_envio"]        = tx_manual.strip() or None
+                                    item["nota_envio"]      = "Completada manualmente por el equipo comercial."
                                     break
-                            save_ofertas(ofs)
-                            st.session_state.pop(f"confirm_del_oferta_{o['id']}", None)
+                            save_reservas(all_r)
+                            st.session_state.pop(f"confirm_force_{r['id']}", None)
                             st.rerun()
-                        if cx2.button("No", key=f"no_del_of_{o['id']}"):
-                            st.session_state.pop(f"confirm_del_oferta_{o['id']}", None)
+                        if cf2.button("Cancelar", key=f"no_force_{r['id']}"):
+                            st.session_state.pop(f"confirm_force_{r['id']}", None)
                             st.rerun()
-                st.divider()
+
+                # Cancelar reserva
+                with btn2:
+                    if st.button("❌ Cancelar", key=f"cancel_{r['id']}"):
+                        st.session_state[f"confirm_cancel_{r['id']}"] = True
+
+                # Eliminar reserva definitivamente
+                with btn3:
+                    if st.button("🗑️ Eliminar", key=f"delete_{r['id']}"):
+                        st.session_state[f"confirm_delete_{r['id']}"] = True
+
+                # Formulario de edición inline
+                if st.session_state.get(f"editing_{r['id']}"):
+                    addr_tok   = r["token_address"].lower()
+                    disp_edit  = float(saldos.get(addr_tok, {}).get("disponible", 0)) + float(r["n_tokens"])
+                    col_e1, col_e2, col_e3 = st.columns(3)
+                    new_tokens = col_e1.number_input(
+                        "Nuevo nº de tokens",
+                        min_value=0.001,
+                        max_value=disp_edit,
+                        value=float(r["n_tokens"]),
+                        step=1.0, format="%.3f",
+                        key=f"edit_tok_{r['id']}",
+                    )
+                    new_precio = col_e2.number_input(
+                        f"Nuevo precio ({r['divisa']})",
+                        min_value=0.0,
+                        value=float(r["precio_acordado"]),
+                        step=0.01, format="%.2f",
+                        key=f"edit_precio_{r['id']}",
+                    )
+                    new_notas = col_e3.text_input("Notas", value=r.get("notas", ""), key=f"edit_notas_{r['id']}")
+                    col_s, col_c = st.columns(2)
+                    guardar       = col_s.button("💾 Guardar cambios", type="primary", use_container_width=True, key=f"edit_save_{r['id']}")
+                    cancelar_edit = col_c.button("Cancelar", use_container_width=True, key=f"edit_cancel_{r['id']}")
+
+                    if guardar:
+                        all_r = load_reservas()
+                        for item in all_r:
+                            if item["id"] == r["id"]:
+                                item["n_tokens"]        = float(new_tokens)
+                                item["precio_acordado"] = float(new_precio)
+                                item["notas"]           = new_notas.strip()
+                                break
+                        save_reservas(all_r)
+                        st.session_state.pop(f"editing_{r['id']}", None)
+                        st.rerun()
+                    if cancelar_edit:
+                        st.session_state.pop(f"editing_{r['id']}", None)
+                        st.rerun()
+
+                # Confirmación cancelación
+                if st.session_state.get(f"confirm_cancel_{r['id']}"):
+                    st.warning(f"¿Cancelar la reserva **{r['id']}** de {r['inversor']}? La reserva quedará marcada como cancelada pero permanecerá en el historial.")
+                    cc1, cc2, _ = st.columns([1, 1, 6])
+                    if cc1.button("Sí, cancelar", key=f"yes_cancel_{r['id']}", type="primary"):
+                        all_r = load_reservas()
+                        for item in all_r:
+                            if item["id"] == r["id"]:
+                                item["estado"] = "cancelada"
+                                break
+                        save_reservas(all_r)
+                        st.session_state.pop(f"confirm_cancel_{r['id']}", None)
+                        st.rerun()
+                    if cc2.button("No", key=f"no_cancel_{r['id']}"):
+                        st.session_state.pop(f"confirm_cancel_{r['id']}", None)
+                        st.rerun()
+
+                # Confirmación eliminación
+                if st.session_state.get(f"confirm_delete_{r['id']}"):
+                    st.error(f"¿Eliminar definitivamente la reserva **{r['id']}**? Esta acción no se puede deshacer.")
+                    cd1, cd2, _ = st.columns([1, 1, 6])
+                    if cd1.button("Sí, eliminar", key=f"yes_delete_{r['id']}", type="primary"):
+                        all_r = load_reservas()
+                        all_r = [item for item in all_r if item["id"] != r["id"]]
+                        save_reservas(all_r)
+                        st.session_state.pop(f"confirm_delete_{r['id']}", None)
+                        st.rerun()
+                    if cd2.button("No", key=f"no_delete_{r['id']}"):
+                        st.session_state.pop(f"confirm_delete_{r['id']}", None)
+                        st.rerun()
+
+        st.divider()
+
+def _sort_key(r):
+    try:
+        return datetime.strptime(r["fecha_reserva"], "%d/%m/%Y %H:%M")
+    except Exception:
+        return datetime.min
+
+activas     = aplicar_filtros(sorted([r for r in reservas_all if r["estado"] == "activa"],     key=_sort_key, reverse=True))
+completadas = aplicar_filtros(sorted([r for r in reservas_all if r["estado"] == "completada"], key=_sort_key, reverse=True))
+canceladas  = aplicar_filtros(sorted([r for r in reservas_all if r["estado"] == "cancelada"],  key=_sort_key, reverse=True))
+
+if _active_tab == "activas":
+    if activas:
+        for addr, d in saldos.items():
+            if d["reservado"] > d["saldo"]:
+                st.error(
+                    f"⚠️ **{d['nombre']}**: tokens reservados ({d['reservado']:,.0f}) "
+                    f"superan el saldo en custodia ({d['saldo']:,.0f}). Revisa las reservas."
+                )
+    render_reservas(activas, editable=True)
+
+elif _active_tab == "completadas":
+    render_reservas(completadas, editable=False)
+
+elif _active_tab == "canceladas":
+    render_reservas(canceladas, editable=False)
+
+elif _active_tab == "ofertas":
+    st.caption("Ofertas publicadas por inversores terceros. Elimínalas cuando el proceso finalice o el inversor las retire.")
+    todas_ofertas_mgmt = load_ofertas()
+    if not todas_ofertas_mgmt:
+        st.info("No hay ofertas de terceros registradas.")
+    else:
+        for o in sorted(todas_ofertas_mgmt, key=lambda x: x.get("fecha_publicacion",""), reverse=True):
+            estado_o    = o.get("estado", "activa")
+            eliminada_o = estado_o == "eliminada"
+            badge_o  = "🟡 ACTIVA" if estado_o == "activa" else "❌ ELIMINADA"
+            color_o  = "#d97706"   if estado_o == "activa" else "#94a3b8"
+            opacity  = "opacity:0.45;" if eliminada_o else ""
+
+            st.markdown(
+                f'<div style="{opacity}display:flex;align-items:center;gap:10px;margin-bottom:4px;">'
+                f'<span style="background:{color_o};color:white;border-radius:5px;'
+                f'padding:2px 8px;font-size:0.7rem;font-weight:700;">{badge_o}</span>'
+                f'<span style="font-weight:700;">{o["proyecto_nombre"]}</span>'
+                f'<span style="color:#94a3b8;font-size:0.85rem;">{o["id"]}</span></div>',
+                unsafe_allow_html=True,
+            )
+            oc1, oc2, oc3, oc4, oc5, oc6 = st.columns([2, 2, 1, 1, 1, 1])
+            oc1.markdown(f"**Inversor**  \n{o['inversor']}  \n{o.get('email_inversor','')}")
+            oc2.markdown(f"**Comercial**  \n{o.get('comercial','—')}  \n`{o['wallet_inversor'][:14]}…`")
+            oc3.markdown(f"**Tokens**  \n{o['n_tokens']:,.3f}")
+            oc4.markdown(f"**Precio**  \n{o['precio_venta']:,.2f} {o['divisa']}")
+            oc5.markdown(f"**Publicado**  \n{o['fecha_publicacion']}")
+
+            # Saldo real en vivo (solo para activas, para no consumir llamadas API innecesarias)
+            if not eliminada_o:
+                saldo_v = fetch_token_balance(o["wallet_inversor"].lower(), o["token_address"].lower(), API_KEY)
+                if saldo_v < 0:
+                    oc6.warning("Sin datos")
+                elif saldo_v < float(o["n_tokens"]) - 0.001:
+                    oc6.error(f"⚠️ Solo {saldo_v:.3f} en wallet")
+                else:
+                    oc6.success(f"✅ {saldo_v:.3f} en wallet")
+            else:
+                oc6.markdown("<span style='color:#94a3b8;font-size:0.8rem;'>—</span>", unsafe_allow_html=True)
+
+            if estado_o == "activa":
+                bc1, bc2, _ = st.columns([1, 1, 6])
+                if bc1.button("🗑️ Eliminar oferta", key=f"del_oferta_{o['id']}"):
+                    st.session_state[f"confirm_del_oferta_{o['id']}"] = True
+                if st.session_state.get(f"confirm_del_oferta_{o['id']}"):
+                    st.error(f"¿Eliminar definitivamente la oferta **{o['id']}**?")
+                    cx1, cx2, _ = st.columns([1, 1, 6])
+                    if cx1.button("Sí, eliminar", key=f"yes_del_of_{o['id']}", type="primary"):
+                        ofs = load_ofertas()
+                        for _of in ofs:
+                            if _of["id"] == o["id"]:
+                                _of["estado"] = "eliminada"
+                                break
+                        save_ofertas(ofs)
+                        st.session_state.pop(f"confirm_del_oferta_{o['id']}", None)
+                        st.rerun()
+                    if cx2.button("No", key=f"no_del_of_{o['id']}"):
+                        st.session_state.pop(f"confirm_del_oferta_{o['id']}", None)
+                        st.rerun()
+            st.divider()
 
 
 # ── Exportar reservas ─────────────────────────────────────────────────────────
