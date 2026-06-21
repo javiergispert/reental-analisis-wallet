@@ -48,32 +48,30 @@ st.caption(
 # ── Google Sheets — cliente compartido ───────────────────────────────────────
 
 @st.cache_resource
-def _gsheet_client():
+def _spreadsheet():
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     creds  = Credentials.from_service_account_info(
         dict(st.secrets["gcp_service_account"]), scopes=scopes
     )
-    return gspread.authorize(creds)
+    return gspread.authorize(creds).open_by_key(SPREADSHEET_ID)
 
-def _worksheet(tab: str):
-    return _gsheet_client().open_by_key(SPREADSHEET_ID).worksheet(tab)
+def _ws(tab: str):
+    return _spreadsheet().worksheet(tab)
 
-# ── Persistencia de reservas ──────────────────────────────────────────────────
-
-def _read_cell(tab: str):
+def _read_list(tab: str) -> list:
+    """Lee una lista de registros desde A1. Migra automáticamente el formato antiguo (una fila por registro)."""
     for intento in range(3):
         try:
-            ws  = _worksheet(tab)
+            ws  = _ws(tab)
             val = ws.acell("A1").value
             if not val:
                 return []
             parsed = json.loads(val)
             if isinstance(parsed, list):
-                return parsed          # formato nuevo: lista completa en A1
-            # formato antiguo: A1 es un solo registro → leer todas las filas y migrar
+                return parsed
+            # Formato antiguo: A1 contiene un solo dict → leer todas las filas y migrar
             all_vals = ws.col_values(1)
             rows = [json.loads(v) for v in all_vals if v.strip()]
-            # Migrar: reescribir en formato nuevo
             ws.update("A1", [[json.dumps(rows, ensure_ascii=False)]])
             return rows
         except Exception:
@@ -81,37 +79,52 @@ def _read_cell(tab: str):
                 time.sleep(1)
     return []
 
-def _write_cell(tab: str, data):
+def _read_dict(tab: str) -> dict:
+    """Lee un dict desde A1 (para precios_otc)."""
     for intento in range(3):
         try:
-            _worksheet(tab).update("A1", [[json.dumps(data, ensure_ascii=False)]])
+            val = _ws(tab).acell("A1").value
+            if not val:
+                return {}
+            parsed = json.loads(val)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            if intento < 2:
+                time.sleep(1)
+    return {}
+
+def _write(tab: str, data):
+    for intento in range(3):
+        try:
+            _ws(tab).update("A1", [[json.dumps(data, ensure_ascii=False)]])
             return
         except Exception:
             if intento < 2:
                 time.sleep(1)
 
+# ── Persistencia de reservas ──────────────────────────────────────────────────
+
 def load_reservas() -> list:
-    return _read_cell(TAB_RESERVAS)
+    return _read_list(TAB_RESERVAS)
 
 def save_reservas(reservas: list):
-    _write_cell(TAB_RESERVAS, reservas)
+    _write(TAB_RESERVAS, reservas)
 
 # ── Persistencia de precios OTC ───────────────────────────────────────────────
 
 def load_precios_otc() -> dict:
-    result = _read_cell(TAB_PRECIOS)
-    return result if isinstance(result, dict) else {}
+    return _read_dict(TAB_PRECIOS)
 
 def save_precios_otc(precios: dict):
-    _write_cell(TAB_PRECIOS, precios)
+    _write(TAB_PRECIOS, precios)
 
 # ── Persistencia de ofertas de terceros ──────────────────────────────────────
 
 def load_ofertas() -> list:
-    return _read_cell(TAB_OFERTAS)
+    return _read_list(TAB_OFERTAS)
 
 def save_ofertas(ofertas: list):
-    _write_cell(TAB_OFERTAS, ofertas)
+    _write(TAB_OFERTAS, ofertas)
 
 # ── Tipo de cambio EUR/USD ────────────────────────────────────────────────────
 
