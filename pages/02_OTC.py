@@ -930,21 +930,23 @@ else:
         ("ofertas",     "📢 Ofertas de terceros"),
     ]
 
-    # CSS: resalta el botón activo con borde ámbar y fondo cálido
     _active_tab = st.session_state["reservas_tab"]
     _css_rules = ""
     for _tid, _ in _tabs_def:
         if _tid == _active_tab:
             _css_rules += (
                 f'div[data-testid="stColumns"] div:has(button[key="tab_btn_{_tid}"]) button {{'
-                f'background:#fffbeb !important;border:2px solid #f59e0b !important;'
-                f'color:#92400e !important;font-weight:700 !important;font-size:0.9rem !important;}}'
+                f'background:#d97706 !important;border:none !important;'
+                f'border-bottom:4px solid #92400e !important;'
+                f'color:#ffffff !important;font-weight:700 !important;'
+                f'font-size:0.92rem !important;box-shadow:0 2px 6px rgba(217,119,6,0.35) !important;}}'
             )
         else:
             _css_rules += (
                 f'div[data-testid="stColumns"] div:has(button[key="tab_btn_{_tid}"]) button {{'
                 f'background:#f1f5f9 !important;border:1px solid #cbd5e1 !important;'
-                f'color:#475569 !important;font-weight:500 !important;font-size:0.88rem !important;}}'
+                f'border-bottom:4px solid #cbd5e1 !important;'
+                f'color:#64748b !important;font-weight:500 !important;font-size:0.88rem !important;}}'
             )
     st.markdown(
         f'<style>div[data-testid="stColumns"] button[key^="tab_btn_"] {{'
