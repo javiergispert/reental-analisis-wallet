@@ -948,33 +948,11 @@ _tabs_def = [
 ]
 
 _active_tab = st.session_state["reservas_tab"]
-_css_rules = ""
-for _tid, _ in _tabs_def:
-    if _tid == _active_tab:
-        _css_rules += (
-            f'div[data-testid="stColumns"] div:has(button[key="tab_btn_{_tid}"]) button {{'
-            f'background:#1e293b !important;border:none !important;'
-            f'border-bottom:4px solid #0f172a !important;'
-            f'color:#ffffff !important;font-weight:700 !important;'
-            f'font-size:0.92rem !important;box-shadow:0 2px 6px rgba(15,23,42,0.3) !important;}}'
-        )
-    else:
-        _css_rules += (
-            f'div[data-testid="stColumns"] div:has(button[key="tab_btn_{_tid}"]) button {{'
-            f'background:#ffffff !important;border:1px solid #cbd5e1 !important;'
-            f'border-bottom:4px solid #cbd5e1 !important;'
-            f'color:#64748b !important;font-weight:500 !important;font-size:0.88rem !important;}}'
-        )
-st.markdown(
-    f'<style>div[data-testid="stColumns"] button[key^="tab_btn_"] {{'
-    f'width:100%;padding:11px 6px;border-radius:8px;transition:all .15s;}}'
-    f'{_css_rules}</style>',
-    unsafe_allow_html=True,
-)
 
 _tab_cols = st.columns(len(_tabs_def))
 for (_tid, _tlabel), _col in zip(_tabs_def, _tab_cols):
-    if _col.button(_tlabel, key=f"tab_btn_{_tid}", use_container_width=True):
+    _btn_type = "primary" if _tid == _active_tab else "secondary"
+    if _col.button(_tlabel, key=f"tab_btn_{_tid}", use_container_width=True, type=_btn_type):
         st.session_state["reservas_tab"] = _tid
         st.rerun()
 
