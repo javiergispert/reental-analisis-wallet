@@ -325,8 +325,15 @@ for r in reservas:
         continue
 
     txs_salientes = last_txs.get(contract, [])
-    # Filtrar TX que van hacia esta wallet inversora (puede haber varias)
-    txs_match = [tx for tx in txs_salientes if tx["to"] == wallet_inv]
+    # Solo TX posteriores a la fecha de creación de la reserva
+    try:
+        ts_reserva = datetime.strptime(r["fecha_reserva"], "%d/%m/%Y %H:%M").timestamp()
+    except Exception:
+        ts_reserva = 0
+    txs_match = [
+        tx for tx in txs_salientes
+        if tx["to"] == wallet_inv and tx["ts"] >= ts_reserva
+    ]
     if not txs_match:
         continue
 
