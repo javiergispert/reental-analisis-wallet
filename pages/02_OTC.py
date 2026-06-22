@@ -45,62 +45,72 @@ st.caption(
     "Reservas guardadas en servidor."
 )
 
-# ── Google Sheets — cliente compartido ───────────────────────────────────────
+# ── Google Sheets — cliente por sesión ───────────────────────────────────────
 
-@st.cache_resource
-def _spreadsheet():
+def _get_client():
+    """Cliente gspread independiente por sesión para evitar conflictos entre usuarios."""
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     creds  = Credentials.from_service_account_info(
         dict(st.secrets["gcp_service_account"]), scopes=scopes
     )
-    return gspread.authorize(creds).open_by_key(SPREADSHEET_ID)
+    return gspread.authorize(creds)
 
 def _ws(tab: str):
-    return _spreadsheet().worksheet(tab)
+    return _get_client().open_by_key(SPREADSHEET_ID).worksheet(tab)
+
+def _raw_read(tab: str) -> str | None:
+    """Lee el contenido de A1 con reintentos. Devuelve el string crudo o None."""
+    for intento in range(4):
+        try:
+            val = _ws(tab).acell("A1").value
+            return val
+        except Exception:
+            if intento < 3:
+                time.sleep(1.5)
+    return None
+
+@st.cache_data(ttl=6, show_spinner=False)
+def _cached_read(tab: str) -> str | None:
+    """Caché de lectura de 6 segundos: evita golpes simultáneos a la API."""
+    return _raw_read(tab)
 
 def _read_list(tab: str) -> list:
-    """Lee una lista de registros desde A1. Migra automáticamente el formato antiguo (una fila por registro)."""
-    for intento in range(3):
-        try:
-            ws  = _ws(tab)
-            val = ws.acell("A1").value
-            if not val:
-                return []
-            parsed = json.loads(val)
-            if isinstance(parsed, list):
-                return parsed
-            # Formato antiguo: A1 contiene un solo dict → leer todas las filas y migrar
-            all_vals = ws.col_values(1)
-            rows = [json.loads(v) for v in all_vals if v.strip()]
-            ws.update("A1", [[json.dumps(rows, ensure_ascii=False)]])
-            return rows
-        except Exception:
-            if intento < 2:
-                time.sleep(1)
+    val = _cached_read(tab)
+    if not val:
+        return []
+    try:
+        parsed = json.loads(val)
+    except Exception:
+        return []
+    if isinstance(parsed, list):
+        return parsed
+    # Formato antiguo: migrar (un solo dict en A1 = una sola reserva)
+    if isinstance(parsed, dict):
+        migrated = [parsed]
+        _write(tab, migrated)
+        _cached_read.clear()
+        return migrated
     return []
 
 def _read_dict(tab: str) -> dict:
-    """Lee un dict desde A1 (para precios_otc)."""
-    for intento in range(3):
-        try:
-            val = _ws(tab).acell("A1").value
-            if not val:
-                return {}
-            parsed = json.loads(val)
-            return parsed if isinstance(parsed, dict) else {}
-        except Exception:
-            if intento < 2:
-                time.sleep(1)
-    return {}
+    val = _cached_read(tab)
+    if not val:
+        return {}
+    try:
+        parsed = json.loads(val)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
 
 def _write(tab: str, data):
-    for intento in range(3):
+    for intento in range(4):
         try:
             _ws(tab).update("A1", [[json.dumps(data, ensure_ascii=False)]])
+            _cached_read.clear()   # invalida caché inmediatamente tras escritura
             return
         except Exception:
-            if intento < 2:
-                time.sleep(1)
+            if intento < 3:
+                time.sleep(1.5)
 
 # ── Persistencia de reservas ──────────────────────────────────────────────────
 
