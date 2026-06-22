@@ -453,8 +453,6 @@ if saldos:
             "":               disp_color,
             "Proyecto":       d["nombre"],
             "ID":             d["id"],
-            "Ubicación":      d["ubicacion"],
-            "Estado":         d["estado"],
             "Fin estimado":   d.get("fecha_fin", "—"),
             "Tipo renta":     d.get("tipo_renta", "—"),
             "Divisa":         d["divisa"],
@@ -463,6 +461,8 @@ if saldos:
             "En custodia":    d["saldo"],
             "Reservados":     d["reservado"],
             "Disponibles":    d["disponible"],
+            "Estado":         d["estado"],
+            "Ubicación":      d["ubicacion"],
             "_addr":          addr,
         })
     df_saldos = pd.DataFrame(filas)
