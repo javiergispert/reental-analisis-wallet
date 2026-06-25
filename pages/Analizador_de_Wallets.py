@@ -552,84 +552,163 @@ def build_stablecoin_movements(token_data: dict) -> list:
     return rows
 
 
-def process_aave_lending(transfers: list, wallet: str) -> list:
+def process_aave_activity(transfers: list, wallet: str) -> dict:
     """
-    Detecta posiciones de prestamista Aave (aMatUSDT, aMatUSDC…)
-    distintas de los aTokens inmobiliarios de Reental.
-    Devuelve lista de movimientos clasificados.
+    Separa la actividad Aave en dos roles:
+      - lender:   prestamista (deposita/retira stablecoins, gana intereses)
+      - borrower: prestatario (deposita colateral Reental, pide/devuelve USDT)
+    Devuelve {"lender": [...], "borrower": [...]}.
     """
     wallet = wallet.lower()
-    # aTokens de Aave que NO son de Reental
-    def is_aave_lending_token(sym, name):
-        is_aave = sym.startswith("aMat") or name.startswith("Aave Matic")
-        is_reental = "Reental" in name or "Reental" in sym
-        return is_aave and not is_reental
 
-    # Agrupar por TX para detectar contexto (depósito vs retirada)
-    from collections import defaultdict as dd
-    tx_groups = dd(list)
+    def _is_lender_atoken(sym, name):
+        """aToken de stablecoin (no Reental): aMat/aPolUSDT, aMat/aPolUSDC…"""
+        prefixed = sym.startswith("aMat") or sym.startswith("aPol") or name.startswith("Aave")
+        is_stable = any(s in sym.upper() for s in ("USDT", "USDC", "DAI"))
+        is_reental = "Reental" in name or "Reental" in sym
+        return prefixed and is_stable and not is_reental
+
+    def _is_collateral_atoken(sym, name):
+        """aToken de colateral Reental: aMatReental-…"""
+        prefixed = sym.startswith("aMat") or sym.startswith("aPol")
+        is_reental = "Reental" in name or "Reental" in sym
+        return prefixed and is_reental
+
+    def _is_debt_token(sym, name):
+        """Token de deuda variable/estable de Aave"""
+        return sym.startswith("variableDebt") or sym.startswith("stableDebt")
+
+    from collections import defaultdict as _dd
+    tx_groups = _dd(list)
     for tx in transfers:
         tx_groups[tx["hash"]].append(tx)
 
-    movements = []
-    seen = set()  # evitar duplicados por TX+contrato
+    lender   = []
+    borrower = []
+    seen     = set()
 
     for tx_hash, group in tx_groups.items():
+        dt = datetime.utcfromtimestamp(int(group[0]["timeStamp"]))
+        tx_link = f"https://polygonscan.com/tx/{tx_hash}"
+
+        # Clasificar cada transfer del grupo por tipo
+        lender_atokens    = []   # aMat/aPolUSDT/USDC
+        collateral_tokens = []   # aMatReental
+        debt_tokens       = []   # variableDebt*
+        stables_in        = []   # USDT/USDC que entran a la wallet
+        stables_out       = []   # USDT/USDC que salen de la wallet
+
         for tx in group:
-            sym = tx.get("tokenSymbol", "")
-            name = tx.get("tokenName", "")
-            if not is_aave_lending_token(sym, name):
-                continue
-            key = (tx_hash, tx["contractAddress"].lower())
+            sym   = tx.get("tokenSymbol", "")
+            name  = tx.get("tokenName", "")
+            addr  = tx["contractAddress"].lower()
+            dec   = int(tx["tokenDecimal"]) if tx["tokenDecimal"] else 6
+            value = int(tx["value"]) / (10 ** dec)
+            to_   = tx["to"].lower()
+            from_ = tx["from"].lower()
+            direction = "in" if to_ == wallet else "out"
+
+            if _is_lender_atoken(sym, name):
+                lender_atokens.append({"sym": sym, "value": value, "dir": direction})
+            elif _is_collateral_atoken(sym, name):
+                collateral_tokens.append({"sym": sym, "value": value, "dir": direction})
+            elif _is_debt_token(sym, name):
+                debt_tokens.append({"sym": sym, "value": value, "dir": direction})
+            elif addr in STABLECOIN_CONTRACTS:
+                sym_s, dec_s = STABLECOIN_CONTRACTS[addr]
+                val_s = int(tx["value"]) / (10 ** dec_s)
+                if direction == "in":
+                    stables_in.append({"sym": sym_s, "value": val_s})
+                else:
+                    stables_out.append({"sym": sym_s, "value": val_s})
+
+        # ── Prestamista ───────────────────────────────────────────────────────
+        for at in lender_atokens:
+            key = (tx_hash, at["sym"])
             if key in seen:
                 continue
             seen.add(key)
-
-            dec = int(tx["tokenDecimal"]) if tx["tokenDecimal"] else 6
-            value = int(tx["value"]) / (10 ** dec)
-            direction = "entrada" if tx["to"].lower() == wallet else "salida"
-            dt = datetime.utcfromtimestamp(int(tx["timeStamp"]))
-
-            # Detectar USDT/USDC involucrado en el mismo TX
-            stable_amount = 0.0
-            stable_sym = ""
-            for other in group:
-                other_contract = other["contractAddress"].lower()
-                if other_contract in STABLECOIN_CONTRACTS:
-                    dec2 = STABLECOIN_CONTRACTS[other_contract][1]
-                    val2 = int(other["value"]) / (10 ** dec2)
-                    stable_amount = val2
-                    stable_sym = STABLECOIN_CONTRACTS[other_contract][0]
-
-            if direction == "entrada":
-                # aToken IN desde 0x0000 = depósito (Aave mint)
-                tipo = "Depósito en Aave"
-                signo_stable = -stable_amount  # pagamos USDT para depositar
+            if at["dir"] == "in":
+                # Depósito: aToken entra, USDT sale
+                stable_amt = sum(s["value"] for s in stables_out)
+                stable_sym = stables_out[0]["sym"] if stables_out else "USDT"
+                lender.append({
+                    "fecha": dt, "fecha_str": dt.strftime("%Y-%m-%d %H:%M"),
+                    "tipo": "Depósito préstamo",
+                    "atoken": at["sym"], "cantidad_atoken": at["value"],
+                    "stable_amount": stable_amt, "stable_symbol": stable_sym,
+                    "interest_note": "", "tx_link": tx_link,
+                })
             else:
-                # aToken OUT hacia 0x0000 = retirada + intereses
-                tipo = "Retirada de Aave"
-                signo_stable = stable_amount   # recibimos USDT al retirar
+                # Retirada: aToken sale, USDT entra
+                stable_amt = sum(s["value"] for s in stables_in)
+                stable_sym = stables_in[0]["sym"] if stables_in else "USDT"
+                interest_note = ""
+                if stable_amt > at["value"] + 0.001:
+                    interest_note = f"+{stable_amt - at['value']:,.2f} {stable_sym} intereses"
+                lender.append({
+                    "fecha": dt, "fecha_str": dt.strftime("%Y-%m-%d %H:%M"),
+                    "tipo": "Retirada préstamo",
+                    "atoken": at["sym"], "cantidad_atoken": at["value"],
+                    "stable_amount": stable_amt, "stable_symbol": stable_sym,
+                    "interest_note": interest_note, "tx_link": tx_link,
+                })
 
-            # Calcular interés si es retirada (recibido - depositado estimado)
-            interest_note = ""
-            if tipo == "Retirada de Aave" and stable_amount > value:
-                interest_note = f"+{stable_amount - value:,.2f} {stable_sym} intereses"
+        # ── Prestatario — garantía ────────────────────────────────────────────
+        for ct in collateral_tokens:
+            key = (tx_hash, ct["sym"])
+            if key in seen:
+                continue
+            seen.add(key)
+            if ct["dir"] == "in":
+                borrower.append({
+                    "fecha": dt, "fecha_str": dt.strftime("%Y-%m-%d %H:%M"),
+                    "tipo": "Garantía depositada",
+                    "detalle": ct["sym"], "cantidad": ct["value"],
+                    "stable_amount": 0.0, "stable_symbol": "",
+                    "tx_link": tx_link,
+                })
+            else:
+                borrower.append({
+                    "fecha": dt, "fecha_str": dt.strftime("%Y-%m-%d %H:%M"),
+                    "tipo": "Garantía retirada",
+                    "detalle": ct["sym"], "cantidad": ct["value"],
+                    "stable_amount": 0.0, "stable_symbol": "",
+                    "tx_link": tx_link,
+                })
 
-            movements.append({
-                "fecha": dt,
-                "fecha_str": dt.strftime("%Y-%m-%d %H:%M"),
-                "tipo": tipo,
-                "token_aave": sym,
-                "cantidad_atoken": value,
-                "stable_amount": abs(signo_stable),
-                "stable_signo": signo_stable,
-                "stable_symbol": stable_sym,
-                "interest_note": interest_note,
-                "tx_link": f"https://polygonscan.com/tx/{tx['hash']}",
-            })
+        # ── Prestatario — deuda ───────────────────────────────────────────────
+        for dt_tok in debt_tokens:
+            key = (tx_hash, dt_tok["sym"])
+            if key in seen:
+                continue
+            seen.add(key)
+            if dt_tok["dir"] == "in":
+                # Préstamo recibido: deuda entra + USDT entra
+                stable_amt = sum(s["value"] for s in stables_in)
+                stable_sym = stables_in[0]["sym"] if stables_in else "USDT"
+                borrower.append({
+                    "fecha": dt, "fecha_str": dt.strftime("%Y-%m-%d %H:%M"),
+                    "tipo": "Préstamo recibido",
+                    "detalle": dt_tok["sym"], "cantidad": dt_tok["value"],
+                    "stable_amount": stable_amt, "stable_symbol": stable_sym,
+                    "tx_link": tx_link,
+                })
+            else:
+                # Pago de deuda: deuda sale + USDT sale
+                stable_amt = sum(s["value"] for s in stables_out)
+                stable_sym = stables_out[0]["sym"] if stables_out else "USDT"
+                borrower.append({
+                    "fecha": dt, "fecha_str": dt.strftime("%Y-%m-%d %H:%M"),
+                    "tipo": "Pago de deuda",
+                    "detalle": dt_tok["sym"], "cantidad": dt_tok["value"],
+                    "stable_amount": stable_amt, "stable_symbol": stable_sym,
+                    "tx_link": tx_link,
+                })
 
-    movements.sort(key=lambda m: m["fecha"])
-    return movements
+    lender.sort(key=lambda m: m["fecha"])
+    borrower.sort(key=lambda m: m["fecha"])
+    return {"lender": lender, "borrower": borrower}
 
 
 def get_fecha_fin_display(info: dict, closing_dates: dict) -> str:
@@ -1438,130 +1517,145 @@ st.markdown("---")
 st.subheader("🏦 Actividad en Aave como prestamista (USDT/USDC)")
 st.caption("Depósitos y retiradas de USDT/USDC en Aave como prestamista, independientes de la colateralización de tokens inmobiliarios.")
 
-aave_lending = process_aave_lending(raw_transfers, wallet)
+aave_activity = process_aave_activity(raw_transfers, wallet)
+aave_lender   = aave_activity["lender"]
+aave_borrower = aave_activity["borrower"]
+aave_lending  = aave_lender   # alias para el exportador CSV
 
-if aave_lending:
-    saldo_atoken = 0.0
-    saldo_stable = 0.0
-    aave_rows = []
-    for m in aave_lending:
-        if m["tipo"] == "Depósito en Aave":
-            saldo_atoken += m["cantidad_atoken"]
-            saldo_stable -= m["stable_amount"]
-            importe_str = f"-{m['stable_amount']:,.2f} {m['stable_symbol']}"
+# ── Prestamista ───────────────────────────────────────────────────────────────
+st.markdown("#### 🏦 Como prestamista")
+if aave_lender:
+    saldo_at = 0.0
+    lender_rows = []
+    for m in aave_lender:
+        if m["tipo"] == "Depósito préstamo":
+            saldo_at += m["cantidad_atoken"]
+            importe_str = f"-{m['stable_amount']:,.2f} {m['stable_symbol']}" if m["stable_amount"] else "—"
         else:
-            saldo_atoken -= m["cantidad_atoken"]
-            saldo_stable += m["stable_amount"]
-            importe_str = f"+{m['stable_amount']:,.2f} {m['stable_symbol']}"
-
+            saldo_at -= m["cantidad_atoken"]
+            importe_str = f"+{m['stable_amount']:,.2f} {m['stable_symbol']}" if m["stable_amount"] else "—"
         row = {
-            "Fecha": m["fecha_str"],
-            "Operación": m["tipo"],
-            "aToken": m["token_aave"],
-            f"Cantidad aToken": f"{m['cantidad_atoken']:,.4f}",
-            "USDT/USDC": importe_str,
-            "Saldo aToken": f"{saldo_atoken:,.4f}",
-            "TX": m["tx_link"],
+            "Fecha":        m["fecha_str"],
+            "Operación":    m["tipo"],
+            "aToken":       m["atoken"],
+            "Cant. aToken": f"{m['cantidad_atoken']:,.4f}",
+            "USDT/USDC":    importe_str,
+            "Saldo aToken": f"{saldo_at:,.4f}",
+            "TX":           m["tx_link"],
         }
         if m["interest_note"]:
             row["Intereses"] = m["interest_note"]
-        aave_rows.append(row)
+        lender_rows.append(row)
 
-    st.dataframe(pd.DataFrame(aave_rows), column_config={
+    st.dataframe(pd.DataFrame(lender_rows), column_config={
         "TX": st.column_config.LinkColumn("Ver TX", width="small"),
     }, hide_index=True, use_container_width=True)
 
-    # Métricas Aave
-    total_depositado = sum(m["stable_amount"] for m in aave_lending if m["tipo"] == "Depósito en Aave")
-    total_retirado   = sum(m["stable_amount"] for m in aave_lending if m["tipo"] == "Retirada de Aave")
-    total_atoken_dep = sum(m["cantidad_atoken"] for m in aave_lending if m["tipo"] == "Depósito en Aave")
-    total_atoken_ret = sum(m["cantidad_atoken"] for m in aave_lending if m["tipo"] == "Retirada de Aave")
+    total_dep   = sum(m["stable_amount"] for m in aave_lender if m["tipo"] == "Depósito préstamo")
+    total_ret   = sum(m["stable_amount"] for m in aave_lender if m["tipo"] == "Retirada préstamo")
+    at_dep      = sum(m["cantidad_atoken"] for m in aave_lender if m["tipo"] == "Depósito préstamo")
+    at_ret      = sum(m["cantidad_atoken"] for m in aave_lender if m["tipo"] == "Retirada préstamo")
+    saldo_vivo  = max(0.0, at_dep - at_ret)
+    pos_abierta = saldo_vivo > 0.01
+    int_netos   = max(0.0, total_ret + saldo_vivo - total_dep)
+    rent_pct    = (int_netos / total_dep * 100) if total_dep > 0 else 0.0
 
-    # Saldo activo: aTokens que aún no se han retirado (aproximadamente 1:1 con USDT)
-    saldo_atoken_vivo = max(0.0, total_atoken_dep - total_atoken_ret)
-    tiene_posicion_abierta = saldo_atoken_vivo > 0.01
-
-    # Intereses netos = USDT recibido en retiradas + valor posición abierta − USDT depositado
-    intereses_netos = max(0.0, total_retirado + saldo_atoken_vivo - total_depositado)
-
-    # Rentabilidad total (%)
-    rentabilidad_pct = (intereses_netos / total_depositado * 100) if total_depositado > 0 else 0.0
-
-    # TIR: flujos fechados (negativo = depósito, positivo = retirada)
     flujos_irr = []
-    for m in aave_lending:
-        if m["tipo"] == "Depósito en Aave":
+    for m in aave_lender:
+        if m["tipo"] == "Depósito préstamo":
             flujos_irr.append((m["fecha"], -m["stable_amount"]))
         else:
             flujos_irr.append((m["fecha"], +m["stable_amount"]))
-    # Si hay posición abierta, añadir hoy como liquidación hipotética
-    if tiene_posicion_abierta:
-        flujos_irr.append((datetime.utcnow(), +saldo_atoken_vivo))
-
+    if pos_abierta:
+        flujos_irr.append((datetime.utcnow(), +saldo_vivo))
     tir = calculate_irr(flujos_irr)
 
-    tir_str = f"{tir*100:.2f} %" if tir is not None else "—"
-    rent_color = "#16a34a" if rentabilidad_pct >= 0 else "#dc2626"
-    tir_color  = "#16a34a" if (tir or 0) >= 0 else "#dc2626"
-    posicion_badge = (
+    pos_badge = (
         '<span style="font-size:0.7rem;background:#fef9c3;color:#854d0e;'
         'border-radius:4px;padding:2px 6px;font-weight:600;">posición abierta</span>'
-        if tiene_posicion_abierta else ""
+        if pos_abierta else ""
     )
-
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.markdown(kpi_card("💵", "Total depositado",
-                         f"{total_depositado:,.2f}",
-                         sublabel="USDT / USDC"), unsafe_allow_html=True)
-    c2.markdown(kpi_card("🏦", "Total retirado",
-                         f"{total_retirado:,.2f}",
-                         sublabel="USDT / USDC"), unsafe_allow_html=True)
-    c3.markdown(kpi_card("✨", "Intereses netos",
-                         f"{intereses_netos:,.2f}",
-                         value_color="#16a34a" if intereses_netos >= 0 else "#dc2626",
-                         sublabel="USDT / USDC",
-                         badge=posicion_badge), unsafe_allow_html=True)
-    c4.markdown(kpi_card("📈", "Rentabilidad *",
-                         f"{rentabilidad_pct:.2f} %",
-                         value_color=rent_color,
+    c1.markdown(kpi_card("💵", "Total depositado",   f"{total_dep:,.2f}",  sublabel="USDT / USDC"), unsafe_allow_html=True)
+    c2.markdown(kpi_card("🏦", "Total retirado",     f"{total_ret:,.2f}",  sublabel="USDT / USDC"), unsafe_allow_html=True)
+    c3.markdown(kpi_card("✨", "Intereses netos",    f"{int_netos:,.2f}",
+                         value_color="#16a34a" if int_netos >= 0 else "#dc2626",
+                         sublabel="USDT / USDC", badge=pos_badge), unsafe_allow_html=True)
+    c4.markdown(kpi_card("📈", "Rentabilidad *",     f"{rent_pct:.2f} %",
+                         value_color="#16a34a" if rent_pct >= 0 else "#dc2626",
                          sublabel="sobre capital total"), unsafe_allow_html=True)
     c5.markdown(kpi_card("⚡", "TIR anual *",
-                         tir_str,
-                         value_color=tir_color,
+                         f"{tir*100:.2f} %" if tir is not None else "—",
+                         value_color="#16a34a" if (tir or 0) >= 0 else "#dc2626",
                          sublabel="tasa interna de retorno"), unsafe_allow_html=True)
 
-    # Notas metodológicas
-    posicion_nota = (
-        f" Se ha incluido el saldo abierto actual estimado en **{saldo_atoken_vivo:,.2f} aToken** "
-        f"(valorado a 1:1 con USDT) como si se retirara hoy."
-        if tiene_posicion_abierta else
-        " La posición está completamente cerrada; se usan solo flujos reales."
-    )
-    with st.expander("📐 Notas metodológicas sobre Rentabilidad y TIR"):
+    with st.expander("📐 Notas metodológicas — Prestamista"):
         st.markdown(f"""
-**\\* Rentabilidad total**
-Mide el beneficio neto acumulado sobre el capital total invertido:
+**\\* Rentabilidad total:** (Total retirado + Saldo abierto − Total depositado) / Total depositado
+{"— Se incluye saldo abierto estimado a 1:1 con USDT como flujo hipotético a hoy." if pos_abierta else "— Posición cerrada; solo flujos reales."}
 
-> Rentabilidad = (Total retirado + Saldo abierto − Total depositado) / Total depositado
+**\\* TIR anual:** tasa interna de retorno ponderando importes y fechas de cada flujo. Una TIR del 4 % equivale a un 4 % de interés anual compuesto.
 
-{posicion_nota}
-
----
-
-**\\* TIR (Tasa Interna de Retorno) anual**
-La TIR es la tasa de descuento que hace el Valor Actual Neto (VAN) igual a cero, teniendo en cuenta **las fechas exactas de cada flujo**:
-
-- Cada **depósito** es un flujo negativo (dinero que sale de tu bolsillo).
-- Cada **retirada** es un flujo positivo (dinero que recuperas con intereses).
-- {"Si hay saldo vivo en Aave, se añade como flujo positivo hipotético **a fecha de hoy**, ya que representa capital recuperable en cualquier momento." if tiene_posicion_abierta else "Todos los flujos son reales; no hay posición abierta pendiente."}
-
-La TIR se calcula numéricamente (método Newton-Raphson) y se expresa en términos **anuales**. Una TIR del 4 % significa que tu inversión en Aave ha rendido equivalente a un 4 % de interés anual compuesto, ponderando los importes y el tiempo transcurrido entre cada movimiento.
-
-> ⚠️ **Limitación:** los saldos de aToken se estiman a paridad 1:1 con USDT/USDC; pequeñas variaciones del índice de Aave pueden producir ligeras imprecisiones en el cálculo.
+> ⚠️ Los aTokens se valoran a paridad 1:1 con USDT/USDC; variaciones del índice Aave pueden producir ligeras imprecisiones.
         """)
-
 else:
     st.info("No se detectó actividad como prestamista en Aave en esta wallet.")
+
+# ── Prestatario ───────────────────────────────────────────────────────────────
+st.markdown("#### 🏛️ Como prestatario")
+if aave_borrower:
+    borrower_rows = []
+    for m in aave_borrower:
+        if m["tipo"] in ("Préstamo recibido", "Pago de deuda"):
+            importe_str = (
+                f"+{m['stable_amount']:,.2f} {m['stable_symbol']}" if m["tipo"] == "Préstamo recibido"
+                else f"-{m['stable_amount']:,.2f} {m['stable_symbol']}"
+            ) if m["stable_amount"] else "—"
+        else:
+            importe_str = "—"
+        borrower_rows.append({
+            "Fecha":      m["fecha_str"],
+            "Operación":  m["tipo"],
+            "Detalle":    m["detalle"],
+            "Cantidad":   f"{m['cantidad']:,.4f}",
+            "USDT/USDC":  importe_str,
+            "TX":         m["tx_link"],
+        })
+
+    st.dataframe(pd.DataFrame(borrower_rows), column_config={
+        "TX": st.column_config.LinkColumn("Ver TX", width="small"),
+    }, hide_index=True, use_container_width=True)
+
+    total_prestado  = sum(m["stable_amount"] for m in aave_borrower if m["tipo"] == "Préstamo recibido")
+    total_devuelto  = sum(m["stable_amount"] for m in aave_borrower if m["tipo"] == "Pago de deuda")
+    coste_neto      = max(0.0, total_devuelto - total_prestado)
+    deuda_viva      = max(0.0, total_prestado - total_devuelto)
+    n_garantias_dep = sum(1 for m in aave_borrower if m["tipo"] == "Garantía depositada")
+    n_garantias_ret = sum(1 for m in aave_borrower if m["tipo"] == "Garantía retirada")
+    garantia_activa = n_garantias_dep > n_garantias_ret
+
+    g_badge = (
+        '<span style="font-size:0.7rem;background:#fef9c3;color:#854d0e;'
+        'border-radius:4px;padding:2px 6px;font-weight:600;">garantía activa</span>'
+        if garantia_activa else ""
+    )
+    d_badge = (
+        '<span style="font-size:0.7rem;background:#fee2e2;color:#991b1b;'
+        'border-radius:4px;padding:2px 6px;font-weight:600;">deuda viva</span>'
+        if deuda_viva > 0.01 else ""
+    )
+
+    b1, b2, b3, b4 = st.columns(4)
+    b1.markdown(kpi_card("💸", "Total prestado",   f"{total_prestado:,.2f}", sublabel="USDT / USDC"), unsafe_allow_html=True)
+    b2.markdown(kpi_card("↩️", "Total devuelto",   f"{total_devuelto:,.2f}", sublabel="USDT / USDC"), unsafe_allow_html=True)
+    b3.markdown(kpi_card("💰", "Coste (intereses)", f"{coste_neto:,.2f}",
+                         value_color="#dc2626" if coste_neto > 0 else "#94a3b8",
+                         sublabel="USDT / USDC pagado de más"), unsafe_allow_html=True)
+    b4.markdown(kpi_card("⚠️", "Deuda pendiente",  f"{deuda_viva:,.2f}",
+                         value_color="#dc2626" if deuda_viva > 0.01 else "#16a34a",
+                         sublabel="USDT / USDC", badge=d_badge), unsafe_allow_html=True)
+else:
+    st.info("No se detectó actividad como prestatario en Aave en esta wallet.")
 
 # ── Ecosistema RNT — Staking y Farming ───────────────────────────────────────
 st.markdown("---")
@@ -1880,7 +1974,7 @@ def build_fiscal_csv() -> bytes:
 
     # ── 5. Aave ───────────────────────────────────────────────────────────────
     for m in (aave_lending if aave_lending else []):
-        signo   = -1.0 if m["tipo"] == "Depósito en Aave" else 1.0
+        signo   = -1.0 if m["tipo"] == "Depósito préstamo" else 1.0
         rows.append({
             "Fecha UTC":        m["fecha_str"],
             "Año fiscal":       m["fecha_str"][:4],
