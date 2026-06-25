@@ -561,8 +561,18 @@ def process_aave_activity(transfers: list, wallet: str) -> dict:
     """
     wallet = wallet.lower()
 
+    def _is_debt_token(sym, name):
+        """Token de deuda variable/estable de Aave"""
+        return sym.startswith("variableDebt") or sym.startswith("stableDebt")
+
     def _is_lender_atoken(sym, name):
-        """aToken de stablecoin (no Reental): aMat/aPolUSDT, aMat/aPolUSDC…"""
+        """aToken de stablecoin (no Reental, no deuda): aMat/aPolUSDT, aMat/aPolUSDC…
+        IMPORTANTE: se comprueba DESPUÉS de _is_debt_token porque los debt tokens
+        tienen nombre 'Aave Matic Variable Debt USDT' que empieza con 'Aave' y
+        pasarían este filtro erróneamente si no se excluyen primero.
+        """
+        if _is_debt_token(sym, name):
+            return False
         prefixed = sym.startswith("aMat") or sym.startswith("aPol") or name.startswith("Aave")
         is_stable = any(s in sym.upper() for s in ("USDT", "USDC", "DAI"))
         is_reental = "Reental" in name or "Reental" in sym
@@ -573,10 +583,6 @@ def process_aave_activity(transfers: list, wallet: str) -> dict:
         prefixed = sym.startswith("aMat") or sym.startswith("aPol")
         is_reental = "Reental" in name or "Reental" in sym
         return prefixed and is_reental
-
-    def _is_debt_token(sym, name):
-        """Token de deuda variable/estable de Aave"""
-        return sym.startswith("variableDebt") or sym.startswith("stableDebt")
 
     from collections import defaultdict as _dd
     tx_groups = _dd(list)
@@ -678,30 +684,38 @@ def process_aave_activity(transfers: list, wallet: str) -> dict:
                 })
 
         # ── Prestatario — deuda ───────────────────────────────────────────────
-        for dt_tok in debt_tokens:
-            key = (tx_hash, dt_tok["sym"])
-            if key in seen:
-                continue
-            seen.add(key)
-            if dt_tok["dir"] == "in":
-                # Préstamo recibido: deuda entra + USDT entra
+        # Aave V3 puede emitir Transfer(0x0→wallet) del debt token durante un
+        # repago (minting del interés acumulado antes de quemar el principal).
+        # Por eso NO nos fiamos de la dirección del debt token: usamos la
+        # dirección del USDT/USDC para distinguir borrow (USDT entra) vs repago
+        # (USDT sale). Solo creamos UN evento por TX de deuda.
+        if debt_tokens and (tx_hash, "_debt") not in seen:
+            seen.add((tx_hash, "_debt"))
+            debt_sym = debt_tokens[0]["sym"]
+            debt_qty = sum(t["value"] for t in debt_tokens)
+            if stables_in:
+                # USDT entra → es un préstamo recibido (borrow)
                 stable_amt = sum(s["value"] for s in stables_in)
-                stable_sym = stables_in[0]["sym"] if stables_in else "USDT"
+                stable_sym = stables_in[0]["sym"]
                 borrower.append({
                     "fecha": dt, "fecha_str": dt.strftime("%Y-%m-%d %H:%M"),
                     "tipo": "Préstamo recibido",
-                    "detalle": dt_tok["sym"], "cantidad": dt_tok["value"],
+                    "detalle": debt_sym, "cantidad": debt_qty,
                     "stable_amount": stable_amt, "stable_symbol": stable_sym,
                     "tx_link": tx_link,
                 })
             else:
-                # Pago de deuda: deuda sale + USDT sale
+                # USDT sale (o no hay USDT si paga con aTokens) → pago de deuda
                 stable_amt = sum(s["value"] for s in stables_out)
-                stable_sym = stables_out[0]["sym"] if stables_out else "USDT"
+                if not stable_amt:
+                    # Repago con aTokens: importe = aTokens salientes
+                    stable_amt = sum(at["value"] for at in lender_atokens if at["dir"] == "out")
+                stable_sym = (stables_out[0]["sym"] if stables_out
+                              else (lender_atokens[0]["sym"] if lender_atokens else "USDT"))
                 borrower.append({
                     "fecha": dt, "fecha_str": dt.strftime("%Y-%m-%d %H:%M"),
                     "tipo": "Pago de deuda",
-                    "detalle": dt_tok["sym"], "cantidad": dt_tok["value"],
+                    "detalle": debt_sym, "cantidad": debt_qty,
                     "stable_amount": stable_amt, "stable_symbol": stable_sym,
                     "tx_link": tx_link,
                 })
@@ -1512,10 +1526,10 @@ if dividends:
 else:
     st.info("No se detectaron dividendos recibidos directamente en esta wallet desde el distribuidor de Reental.")
 
-# ── Actividad en Aave como prestamista ───────────────────────────────────────
+# ── Actividad en Aave ────────────────────────────────────────────────────────
 st.markdown("---")
-st.subheader("🏦 Actividad en Aave como prestamista (USDT/USDC)")
-st.caption("Depósitos y retiradas de USDT/USDC en Aave como prestamista, independientes de la colateralización de tokens inmobiliarios.")
+st.subheader("🏦 Actividad en Aave (USDT/USDC)")
+st.caption("Actividad en el protocolo Aave: préstamos otorgados (prestamista) y créditos tomados usando tokens inmobiliarios como garantía (prestatario).")
 
 aave_activity = process_aave_activity(raw_transfers, wallet)
 aave_lender   = aave_activity["lender"]
