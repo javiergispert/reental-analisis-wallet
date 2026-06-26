@@ -2122,19 +2122,23 @@ def build_fiscal_csv() -> bytes:
 
     # ── 2. Dividendos ─────────────────────────────────────────────────────────
     for ev in (dividends if dividends else []):
+        destino = ev.get("destino", "Wallet directa")
+        nota_div = f"{ev['n_proyectos']} proyecto(s) en este pago."
+        if destino == "Vault personal":
+            nota_div += " Acumulado en vault personal (no retirado a wallet)."
         rows.append({
             "Fecha UTC":        ev["fecha_str"],
             "Año fiscal":       ev["fecha_str"][:4],
             "Categoría":        "Dividendo",
-            "Tipo operación":   "Dividendo recibido",
+            "Tipo operación":   f"Dividendo recibido ({destino})",
             "Activo":           ev.get("sym", "USDT"),
             "Cantidad":         round(ev["total"], 4),
             "Precio unit. USD": 1.0,
             "Valor USD":        round(ev["total"], 2),
             "Fuente precio":    "TX exacta",
-            "Contraparte":      "",
+            "Contraparte":      "Reental (distribuidor)",
             "TX Hash":          ev.get("tx_link", "").replace("https://polygonscan.com/tx/", ""),
-            "Notas":            f"{ev['n_proyectos']} proyecto(s) en este pago.",
+            "Notas":            nota_div,
         })
 
     # ── 3. Stablecoins ────────────────────────────────────────────────────────
@@ -2216,9 +2220,9 @@ def build_fiscal_csv() -> bytes:
             "Notas":            nota_completa,
         })
 
-    # ── 5. Aave ───────────────────────────────────────────────────────────────
-    for m in (aave_lending if aave_lending else []):
-        signo   = -1.0 if m["tipo"] == "Depósito préstamo" else 1.0
+    # ── 5. Aave — Prestamista ─────────────────────────────────────────────────
+    for m in (aave_lender if aave_lender else []):
+        signo = -1.0 if m["tipo"] == "Depósito préstamo" else 1.0
         rows.append({
             "Fecha UTC":        m["fecha_str"],
             "Año fiscal":       m["fecha_str"][:4],
@@ -2232,6 +2236,38 @@ def build_fiscal_csv() -> bytes:
             "Contraparte":      "Aave Protocol",
             "TX Hash":          m.get("tx_link", "").replace("https://polygonscan.com/tx/", ""),
             "Notas":            m.get("interest_note", ""),
+        })
+
+    # ── 6. Aave — Prestatario ─────────────────────────────────────────────────
+    for m in (aave_borrower if aave_borrower else []):
+        tipo = m["tipo"]
+        if tipo == "Préstamo recibido":
+            signo = 1.0
+            nota = "USDT recibido como préstamo. Genera obligación de devolución."
+        elif tipo == "Pago de deuda":
+            signo = -1.0
+            nota = "Devolución (total o parcial) del préstamo + intereses."
+        elif tipo == "Garantía depositada":
+            signo = -1.0
+            nota = "Tokens inmobiliarios depositados como colateral en Aave."
+        else:  # Garantía retirada
+            signo = 1.0
+            nota = "Tokens inmobiliarios retirados del colateral en Aave."
+
+        amt = m.get("stable_amount") or 0.0
+        rows.append({
+            "Fecha UTC":        m["fecha_str"],
+            "Año fiscal":       m["fecha_str"][:4],
+            "Categoría":        "Aave (prestatario)",
+            "Tipo operación":   tipo,
+            "Activo":           m.get("stable_symbol") or m.get("detalle", ""),
+            "Cantidad":         round(signo * (amt or m.get("cantidad", 0.0)), 4),
+            "Precio unit. USD": 1.0 if amt else "",
+            "Valor USD":        round(amt, 2) if amt else "",
+            "Fuente precio":    "TX exacta" if amt else "N/A",
+            "Contraparte":      "Aave Protocol",
+            "TX Hash":          m.get("tx_link", "").replace("https://polygonscan.com/tx/", ""),
+            "Notas":            nota,
         })
 
     # Ordenar todo cronológicamente
