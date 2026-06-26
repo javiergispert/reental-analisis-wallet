@@ -1110,6 +1110,35 @@ def get_rnt_price_usdt() -> float:
         return 0.0
 
 
+@st.cache_data(show_spinner=False, ttl=3600)
+def get_eurusd_on_date(date_str: str) -> float:
+    """Tipo de cambio EUR/USD para una fecha dada (YYYY-MM-DD). Usa CoinGecko (euro vs usd).
+    Devuelve None si no se puede obtener."""
+    try:
+        dd = date_str[8:10]; mm = date_str[5:7]; yyyy = date_str[:4]
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/coins/tether/history",
+            params={"date": f"{dd}-{mm}-{yyyy}", "localization": "false"},
+            timeout=10,
+        )
+        # Tether (USDT) en EUR nos da 1/EURUSD → invertimos
+        eur_price = r.json().get("market_data", {}).get("current_price", {}).get("eur")
+        if eur_price and float(eur_price) > 0:
+            return round(1.0 / float(eur_price), 4)
+    except Exception:
+        pass
+    # Fallback: ECB via exchangerate.host (sin API key)
+    try:
+        r2 = requests.get(
+            "https://api.frankfurter.app/latest",
+            params={"from": "EUR", "to": "USD"},
+            timeout=10,
+        )
+        return float(r2.json()["rates"]["USD"])
+    except Exception:
+        return None
+
+
 # ── UI ───────────────────────────────────────────────────────────────────────
 
 wallet_input = st.text_input("🔑 Dirección de la wallet del inversor", placeholder="0x1234abcd...")
@@ -1181,7 +1210,7 @@ for contract, data in token_data.items():
 # ── Resumen ──────────────────────────────────────────────────────────────────
 st.markdown("---")
 date_label = f" a fecha **{filter_date}**" if use_date_filter else ""
-st.subheader(f"📊 Resumen de cartera{date_label}")
+st.subheader(f"📊 Resumen de cartera a la fecha indicada{date_label}")
 
 all_dates = [m["fecha"] for d in token_data.values() for m in d["movements"]]
 primera_fecha = min(all_dates).strftime("%d/%m/%Y") if all_dates else "—"
@@ -1202,6 +1231,63 @@ c1.markdown(kpi_card("🏠", "Tokens con saldo",        str(len(activos)),   sub
 c2.markdown(kpi_card("📁", "Tokens históricos",        str(len(historicos)), sublabel="saldo cero"),          unsafe_allow_html=True)
 c3.markdown(kpi_card("🔁", "Total movimientos",        str(sum(len(d["movements"]) for d in token_data.values())), sublabel="en esta wallet"), unsafe_allow_html=True)
 c4.markdown(kpi_card("📅", "Primer token inmobiliario", primera_fecha,       sublabel="fecha de entrada"),    unsafe_allow_html=True)
+
+# ── KPIs de valor de cartera ──────────────────────────────────────────────────
+_tokens_eur = sum(d["balance_display"] for d in activos.values() if d["info"].get("divisa") == "EUR")
+_tokens_usd = sum(d["balance_display"] for d in activos.values() if d["info"].get("divisa") != "EUR")
+
+# Valor a precio de emisión
+_valor_usd_part = sum(
+    d["balance_display"] * (d["info"].get("precio_emision") or 0.0)
+    for d in activos.values() if d["info"].get("divisa") != "EUR"
+)
+_valor_eur_part = sum(
+    d["balance_display"] * (d["info"].get("precio_emision") or 0.0)
+    for d in activos.values() if d["info"].get("divisa") == "EUR"
+)
+
+# Tipo de cambio EUR→USD en la fecha de análisis
+_fx_date_str = str(filter_date) if filter_date else str(date.today())
+_eurusd = get_eurusd_on_date(_fx_date_str)
+_eurusd_label = f"{_eurusd:.4f}" if _eurusd else "N/D"
+
+if _eurusd:
+    _valor_total_usd = _valor_usd_part + _valor_eur_part * _eurusd
+    _valor_total_str = f"${_valor_total_usd:,.2f}"
+    _nota_valor = (
+        f"USD directos: ${_valor_usd_part:,.2f} · "
+        f"EUR convertidos: €{_valor_eur_part:,.2f} × {_eurusd_label} = ${_valor_eur_part * _eurusd:,.2f}"
+    )
+else:
+    _valor_total_str = "N/D"
+    _nota_valor = "No se pudo obtener el tipo de cambio EUR/USD para esta fecha."
+
+_kc1, _kc2, _kc3 = st.columns(3)
+_kc1.markdown(kpi_card("🇺🇸", "Tokens en USD",  f"{_tokens_usd:,.4f}".rstrip("0").rstrip("."),
+                        sublabel="suma de saldos activos en proyectos USD"), unsafe_allow_html=True)
+_kc2.markdown(kpi_card("🇪🇺", "Tokens en EUR",  f"{_tokens_eur:,.4f}".rstrip("0").rstrip("."),
+                        sublabel="suma de saldos activos en proyectos EUR"), unsafe_allow_html=True)
+_kc3.markdown(kpi_card("💼", "Valor a precio emisión",  _valor_total_str,
+                        sublabel=f"tipo cambio EUR/USD {_eurusd_label} · fecha {_fx_date_str}"),
+              unsafe_allow_html=True)
+
+with st.expander("ℹ️ ¿Cómo se calcula el valor a precio de emisión?"):
+    st.markdown(f"""
+Este KPI estima el **valor total de la cartera en dólares (USD)** usando el precio al que se emitió cada token inmobiliario:
+
+**Proyectos en USD** → `nº de tokens × precio de emisión (USD)`
+
+**Proyectos en EUR** → `nº de tokens × precio de emisión (EUR)` convertido a USD aplicando el tipo de cambio EUR/USD del día **{_fx_date_str}**
+
+> Tipo de cambio usado: **1 EUR = {_eurusd_label} USD** (fuente: CoinGecko / Frankfurter/BCE)
+
+**Resultado:**
+- Parte USD: **${_valor_usd_part:,.2f}**
+- Parte EUR: **€{_valor_eur_part:,.2f}** × {_eurusd_label} = **${_valor_eur_part * _eurusd:,.2f}** *(solo si hay tipo de cambio disponible)*
+- **Total estimado: {_valor_total_str}**
+
+⚠️ Este valor usa el precio de **emisión original**, no el precio de mercado actual ni el precio OTC. Es una referencia de cuánto se pagó por estos activos, no su valor de venta.
+    """) if _eurusd else st.warning(_nota_valor)
 
 # ── Tokens con saldo ─────────────────────────────────────────────────────────
 st.markdown("---")
