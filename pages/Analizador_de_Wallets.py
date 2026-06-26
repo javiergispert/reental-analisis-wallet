@@ -755,23 +755,68 @@ def get_fecha_fin_display(info: dict, closing_dates: dict) -> str:
 
 DIVIDEND_DISTRIBUTOR = "0xf9b135fd84ae6dc9d6e632a97235de5f08c0d61e"
 
-def detect_vault_address(transfers: list, wallet: str) -> str | None:
+@st.cache_data(show_spinner=False, ttl=3600)
+def fetch_normal_transactions(wallet: str) -> list:
+    """Transacciones normales (ETH) de la wallet — necesarias para detectar el vault."""
+    if not API_KEY:
+        return []
+    params = {
+        "chainid": POLYGON_CHAIN_ID, "module": "account", "action": "txlist",
+        "address": wallet, "startblock": 0, "endblock": 99999999,
+        "sort": "asc", "apikey": API_KEY,
+    }
+    try:
+        r = requests.get(ETHERSCAN_V2_BASE, params=params, timeout=30)
+        data = r.json()
+        return data.get("result") or [] if data.get("status") == "1" else []
+    except Exception:
+        return []
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def fetch_distributor_recipients() -> set:
+    """Conjunto de todas las direcciones que han recibido dividendos del distribuidor."""
+    if not API_KEY:
+        return set()
+    params = {
+        "chainid": POLYGON_CHAIN_ID, "module": "account", "action": "tokentx",
+        "address": DIVIDEND_DISTRIBUTOR,
+        "startblock": 0, "endblock": 99999999, "sort": "desc", "apikey": API_KEY,
+    }
+    try:
+        r = requests.get(ETHERSCAN_V2_BASE, params=params, timeout=30)
+        data = r.json()
+        return {tx["to"].lower() for tx in (data.get("result") or [])}
+    except Exception:
+        return set()
+
+
+def detect_vault_address(wallet: str) -> str | None:
     """
-    Deduce la dirección del vault personal del usuario buscando en los transfers
-    ya cargados el patrón de reinversión/venta-al-vault: una TX donde el vault
-    envía USDT al vendedor (no directamente a la wallet del usuario).
-    Devuelve la dirección vault en minúsculas o None si no se encuentra.
+    Detecta el vault personal del inversor cruzando dos fuentes:
+    1. Contratos que la wallet ha llamado directamente (txlist normal).
+    2. Direcciones que han recibido USDT del distribuidor de Reental.
+    La intersección es el vault personal.
     """
     wallet = wallet.lower()
-    # Agrupar por TX hash para poder leer el receipt solo cuando sea necesario
-    tx_hashes = {tx["hash"] for tx in transfers
-                 if tx["contractAddress"].lower() in STABLECOIN_CONTRACTS}
-    for tx_hash in tx_hashes:
-        result = get_vault_payment(tx_hash, wallet)
-        if result:
-            vault_addr, _, _ = result
-            return vault_addr.lower()
-    return None
+    normal_txs = fetch_normal_transactions(wallet)
+    if not normal_txs:
+        return None
+
+    called = {tx["to"].lower() for tx in normal_txs
+              if tx.get("to") and tx["from"].lower() == wallet
+              and tx["to"].lower() != wallet}  # excluir self-transfers
+
+    if not called:
+        return None
+
+    dist_recipients = fetch_distributor_recipients()
+    candidates = called & dist_recipients
+
+    if not candidates:
+        return None
+    # Si hay varios candidatos, devolver el primero (raro en la práctica)
+    return next(iter(candidates))
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
@@ -1240,7 +1285,7 @@ if analyze_btn:
         progress_bar.progress(75, text=f"🏦 Verificando {n_vault_candidates} posibles reinversiones desde vault…")
 
     progress_bar.progress(88, text="🏦 Buscando vault personal del inversor…")
-    vault_addr = detect_vault_address(transfers, wallet)
+    vault_addr = detect_vault_address(wallet)
     vault_transfers = fetch_vault_transfers(vault_addr) if vault_addr else []
 
     progress_bar.progress(95, text="📊 Preparando resultados…")
