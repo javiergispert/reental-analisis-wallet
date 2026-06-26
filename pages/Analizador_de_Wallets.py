@@ -1286,22 +1286,26 @@ _kc3.markdown(kpi_card("💼", "Valor a precio emisión",  _valor_total_str,
               unsafe_allow_html=True)
 
 with st.expander("ℹ️ ¿Cómo se calcula el valor a precio de emisión?"):
-    st.markdown(f"""
+    if _eurusd:
+        _eur_en_usd = _valor_eur_part * _eurusd
+        st.markdown(f"""
 Este KPI estima el **valor total de la cartera en dólares (USD)** usando el precio al que se emitió cada token inmobiliario:
 
-**Proyectos en USD** → `nº de tokens × precio de emisión (USD)`
+**Proyectos en USD** → nº de tokens × precio de emisión (USD)
 
-**Proyectos en EUR** → `nº de tokens × precio de emisión (EUR)` convertido a USD aplicando el tipo de cambio EUR/USD del día **{_fx_date_str}**
+**Proyectos en EUR** → nº de tokens × precio de emisión (EUR) convertido a USD aplicando el tipo de cambio EUR/USD del día {_fx_date_str}
 
-> Tipo de cambio usado: **1 EUR = {_eurusd_label} USD** (fuente: CoinGecko / Frankfurter/BCE)
+Tipo de cambio usado: **1 EUR = {_eurusd_label} USD** (fuente: CoinGecko / Frankfurter/BCE)
 
 **Resultado:**
 - Parte USD: **${_valor_usd_part:,.2f}**
-- Parte EUR: **€{_valor_eur_part:,.2f}** × {_eurusd_label} = **${_valor_eur_part * _eurusd:,.2f}** *(solo si hay tipo de cambio disponible)*
+- Parte EUR: **€{_valor_eur_part:,.2f}** × {_eurusd_label} = **${_eur_en_usd:,.2f}**
 - **Total estimado: {_valor_total_str}**
 
-⚠️ Este valor usa el precio de **emisión original**, no el precio de mercado actual ni el precio OTC. Es una referencia de cuánto se pagó por estos activos, no su valor de venta.
-    """) if _eurusd else st.warning(_nota_valor)
+⚠️ Este valor usa el precio de **emisión original**, no el precio de mercado actual ni el precio OTC.
+        """)
+    else:
+        st.warning(_nota_valor)
 
 # ── Tokens con saldo ─────────────────────────────────────────────────────────
 st.markdown("---")
