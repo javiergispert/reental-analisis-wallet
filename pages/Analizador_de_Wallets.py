@@ -755,45 +755,97 @@ def get_fecha_fin_display(info: dict, closing_dates: dict) -> str:
 
 DIVIDEND_DISTRIBUTOR = "0xf9b135fd84ae6dc9d6e632a97235de5f08c0d61e"
 
-def process_dividends(transfers: list, wallet: str) -> list:
+def detect_vault_address(transfers: list, wallet: str) -> str | None:
     """
-    Detecta pagos de dividendos recibidos directamente en la wallet desde el
-    distribuidor de Reental (0xf9b135fd84ae…). Agrupa por TX hash para mostrar
-    cada distribución como un único evento con el detalle de pagos parciales.
+    Deduce la dirección del vault personal del usuario buscando en los transfers
+    ya cargados el patrón de reinversión/venta-al-vault: una TX donde el vault
+    envía USDT al vendedor (no directamente a la wallet del usuario).
+    Devuelve la dirección vault en minúsculas o None si no se encuentra.
+    """
+    wallet = wallet.lower()
+    # Agrupar por TX hash para poder leer el receipt solo cuando sea necesario
+    tx_hashes = {tx["hash"] for tx in transfers
+                 if tx["contractAddress"].lower() in STABLECOIN_CONTRACTS}
+    for tx_hash in tx_hashes:
+        result = get_vault_payment(tx_hash, wallet)
+        if result:
+            vault_addr, _, _ = result
+            return vault_addr.lower()
+    return None
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def fetch_vault_transfers(vault_address: str) -> list:
+    """Obtiene todas las transferencias de stablecoin hacia el vault."""
+    if not API_KEY or not vault_address:
+        return []
+    params = {
+        "chainid": POLYGON_CHAIN_ID, "module": "account", "action": "tokentx",
+        "address": vault_address,
+        "startblock": 0, "endblock": 99999999, "sort": "asc", "apikey": API_KEY,
+    }
+    try:
+        r = requests.get(ETHERSCAN_V2_BASE, params=params, timeout=30)
+        data = r.json()
+        if data.get("status") == "0":
+            return []
+        return data.get("result") or []
+    except Exception:
+        return []
+
+
+def process_dividends(transfers: list, wallet: str, vault_transfers: list = None) -> list:
+    """
+    Detecta pagos de dividendos desde el distribuidor de Reental hacia:
+    a) la wallet directamente, y
+    b) el vault personal del usuario (dividendos acumulados sin retirar).
+    Combina ambas fuentes y devuelve la lista ordenada por fecha.
     """
     wallet = wallet.lower()
 
-    # Filtrar transfers de stablecoin desde el distribuidor hacia la wallet
-    div_txs = defaultdict(list)
-    for tx in transfers:
-        if (tx["from"].lower() == DIVIDEND_DISTRIBUTOR
-                and tx["to"].lower() == wallet
-                and tx["contractAddress"].lower() in STABLECOIN_CONTRACTS):
-            div_txs[tx["hash"]].append(tx)
+    def _build_events(tx_list: list, recipient: str, destino_label: str) -> list:
+        div_txs = defaultdict(list)
+        for tx in tx_list:
+            if (tx["from"].lower() == DIVIDEND_DISTRIBUTOR
+                    and tx["to"].lower() == recipient
+                    and tx["contractAddress"].lower() in STABLECOIN_CONTRACTS):
+                div_txs[tx["hash"]].append(tx)
+        evs = []
+        for tx_hash, group in div_txs.items():
+            dt = datetime.utcfromtimestamp(int(group[0]["timeStamp"]))
+            pagos, total, sym = [], 0.0, "USDT"
+            for tx in group:
+                contract = tx["contractAddress"].lower()
+                sym_canon, dec = STABLECOIN_CONTRACTS[contract]
+                amount = int(tx["value"]) / (10 ** dec)
+                sym = sym_canon
+                total += amount
+                pagos.append(amount)
+            pagos.sort(reverse=True)
+            evs.append({
+                "fecha": dt,
+                "fecha_str": dt.strftime("%Y-%m-%d %H:%M"),
+                "total": total,
+                "sym": sym,
+                "n_proyectos": len(pagos),
+                "pagos": pagos,
+                "destino": destino_label,
+                "tx_link": f"https://polygonscan.com/tx/{tx_hash}",
+            })
+        return evs
 
-    events = []
-    for tx_hash, group in div_txs.items():
-        dt = datetime.utcfromtimestamp(int(group[0]["timeStamp"]))
-        pagos = []
-        total = 0.0
-        sym = "USDT"
-        for tx in group:
-            contract = tx["contractAddress"].lower()
-            sym_canon, dec = STABLECOIN_CONTRACTS[contract]
-            amount = int(tx["value"]) / (10 ** dec)
-            sym = sym_canon
-            total += amount
-            pagos.append(amount)
-        pagos.sort(reverse=True)
-        events.append({
-            "fecha": dt,
-            "fecha_str": dt.strftime("%Y-%m-%d %H:%M"),
-            "total": total,
-            "sym": sym,
-            "n_proyectos": len(pagos),
-            "pagos": pagos,
-            "tx_link": f"https://polygonscan.com/tx/{tx_hash}",
-        })
+    events = _build_events(transfers, wallet, "Wallet directa")
+
+    if vault_transfers:
+        # La vault puede tener cualquier dirección; buscamos al distribuidor como from
+        vault_addr = next(
+            (tx["to"].lower() for tx in vault_transfers
+             if tx["from"].lower() == DIVIDEND_DISTRIBUTOR
+             and tx["contractAddress"].lower() in STABLECOIN_CONTRACTS),
+            None,
+        )
+        if vault_addr:
+            events += _build_events(vault_transfers, vault_addr, "Vault personal")
 
     events.sort(key=lambda e: e["fecha"])
     return events
@@ -1187,11 +1239,17 @@ if analyze_btn:
     if n_vault_candidates:
         progress_bar.progress(75, text=f"🏦 Verificando {n_vault_candidates} posibles reinversiones desde vault…")
 
+    progress_bar.progress(88, text="🏦 Buscando vault personal del inversor…")
+    vault_addr = detect_vault_address(transfers, wallet)
+    vault_transfers = fetch_vault_transfers(vault_addr) if vault_addr else []
+
     progress_bar.progress(95, text="📊 Preparando resultados…")
     st.session_state.update({
         "token_data": token_data, "wallet": wallet,
         "filter_date": filter_date,
         "raw_transfers": transfers,
+        "vault_addr": vault_addr,
+        "vault_transfers": vault_transfers,
     })
     progress_bar.progress(100, text="✅ Análisis completado")
     progress_bar.empty()
@@ -1593,16 +1651,25 @@ if stable_movs:
 else:
     st.info("No se detectaron flujos de stablecoins relacionados con Reental en esta wallet.")
 
-raw_transfers = st.session_state.get("raw_transfers", [])
-dividends = process_dividends(raw_transfers, wallet)
+raw_transfers    = st.session_state.get("raw_transfers", [])
+vault_addr       = st.session_state.get("vault_addr")
+vault_transfers  = st.session_state.get("vault_transfers", [])
+dividends = process_dividends(raw_transfers, wallet, vault_transfers)
 
 # ── Dividendos recibidos de Reental ──────────────────────────────────────────
 st.markdown("---")
 st.subheader("💰 Dividendos recibidos de Reental")
+
+_vault_note = (
+    f"Incluye dividendos acumulados en tu vault personal (`{vault_addr[:8]}…{vault_addr[-4:]}`) "
+    "además de los recibidos directamente en esta wallet."
+    if vault_addr else
+    "Solo se muestran dividendos recibidos directamente en esta wallet "
+    "(no se detectó vault personal asociado)."
+)
 st.caption(
-    "Pagos de rendimientos distribuidos por Reental directamente a esta wallet. "
-    "Cada fila es una distribución (puede incluir varios proyectos en el mismo TX). "
-    "La atribución por proyecto estará disponible en futuras versiones."
+    "Pagos de rendimientos distribuidos por Reental. "
+    "Cada fila es una distribución (puede incluir varios proyectos en el mismo TX). " + _vault_note
 )
 
 if dividends:
@@ -1613,6 +1680,7 @@ if dividends:
         detalle = "  +  ".join(f"{p:,.2f}" for p in ev["pagos"])
         div_rows.append({
             "Fecha":          ev["fecha_str"],
+            "Destino":        ev.get("destino", "Wallet directa"),
             "Nº proyectos":   ev["n_proyectos"],
             "Detalle pagos":  detalle,
             "Total recibido": f"{ev['total']:,.2f} {ev['sym']}",
@@ -1625,13 +1693,23 @@ if dividends:
         "Nº proyectos": st.column_config.NumberColumn(width="small"),
     }, hide_index=True, use_container_width=True)
 
-    total_div = sum(ev["total"] for ev in dividends)
+    total_div      = sum(ev["total"] for ev in dividends)
+    total_wallet   = sum(ev["total"] for ev in dividends if ev.get("destino") == "Wallet directa")
+    total_vault    = sum(ev["total"] for ev in dividends if ev.get("destino") == "Vault personal")
     c1, c2, c3 = st.columns(3)
-    c1.markdown(kpi_card("💵", "Total dividendos",       f"{total_div:,.2f}",                          value_color="#16a34a", sublabel="USDT / USDC"), unsafe_allow_html=True)
-    c2.markdown(kpi_card("📬", "Distribuciones",          str(len(dividends)),                          sublabel="pagos recibidos"), unsafe_allow_html=True)
-    c3.markdown(kpi_card("📊", "Media por distribución",  f"{total_div / len(dividends):,.2f}",         sublabel="USDT / USDC"), unsafe_allow_html=True)
+    c1.markdown(kpi_card("💵", "Total dividendos",       f"{total_div:,.2f}",
+                          value_color="#16a34a", sublabel="USDT / USDC (wallet + vault)"), unsafe_allow_html=True)
+    c2.markdown(kpi_card("📬", "Distribuciones",          str(len(dividends)),
+                          sublabel="pagos recibidos"), unsafe_allow_html=True)
+    c3.markdown(kpi_card("📊", "Media por distribución",  f"{total_div / len(dividends):,.2f}",
+                          sublabel="USDT / USDC"), unsafe_allow_html=True)
+    if vault_addr and total_vault > 0:
+        st.caption(
+            f"Desglose: **${total_wallet:,.2f}** recibidos en wallet directa · "
+            f"**${total_vault:,.2f}** acumulados en vault personal"
+        )
 else:
-    st.info("No se detectaron dividendos recibidos directamente en esta wallet desde el distribuidor de Reental.")
+    st.info("No se detectaron dividendos recibidos en esta wallet ni en su vault personal.")
 
 # ── Actividad en Aave ────────────────────────────────────────────────────────
 st.markdown("---")
