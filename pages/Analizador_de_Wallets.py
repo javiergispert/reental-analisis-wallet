@@ -1583,10 +1583,13 @@ if stable_movs:
     total_recibido  = sum(m["amount"] for m in stable_movs if m["direction"] == "entrada")
     balance_neto = total_recibido - total_invertido
     balance_color = "#16a34a" if balance_neto >= 0 else "#dc2626"
+    _balance_sublabel = "USDT / USDC"
     c1, c2, c3 = st.columns(3)
     c1.markdown(kpi_card("💸", "Total invertido",      f"{total_invertido:,.2f}", sublabel="USDT / USDC"), unsafe_allow_html=True)
     c2.markdown(kpi_card("💰", "Total recibido",       f"{total_recibido:,.2f}",  sublabel="de ventas · USDT / USDC"), unsafe_allow_html=True)
     c3.markdown(kpi_card("⚖️", "Balance neto",         f"{balance_neto:,.2f}",    value_color=balance_color, sublabel="USDT / USDC"), unsafe_allow_html=True)
+    if balance_neto < 0:
+        st.caption("⚠️ Faltaría por considerar las operaciones realizadas con FIAT, como por ejemplo la compra de tokens inmobiliarios.")
 else:
     st.info("No se detectaron flujos de stablecoins relacionados con Reental en esta wallet.")
 
