@@ -201,7 +201,7 @@ def fetch_nft_transfers(wallet: str, contract: str) -> list:
         return []
 
 
-@st.cache_data(show_spinner=False, ttl=86400)
+@st.cache_data(show_spinner=False, ttl=3600)
 def fetch_xrnt_staked_rnt(token_id: str) -> float:
     """
     Dado el tokenID de un xRNT NFT, localiza la TX de mint original y extrae
@@ -226,22 +226,28 @@ def fetch_xrnt_staked_rnt(token_id: str) -> float:
         if not logs:
             return 0.0
 
-        mint_log     = logs[0]
-        mint_tx_hash = mint_log["transactionHash"].lower()
-        block_num    = mint_log["blockNumber"]
+        mint_tx_hash = logs[0]["transactionHash"].lower()
 
-        # 2. En ese mismo bloque, buscar Transfer de RNT hacia STAKING_RECEIVER
-        receiver_topic = "0x000000000000000000000000" + STAKING_RECEIVER[2:].lower()
+        # 2. Leer el receipt completo de la TX de mint para evitar el límite de
+        #    1.000 resultados que afecta a getLogs en bloques muy activos.
         r2 = requests.get(ETHERSCAN_V2_BASE, params={
-            "chainid": POLYGON_CHAIN_ID, "module": "logs", "action": "getLogs",
-            "address": RNT_CONTRACT,
-            "fromBlock": block_num, "toBlock": block_num,
-            "topic0": TRANSFER_TOPIC, "topic0_2_opr": "and", "topic2": receiver_topic,
-            "apikey": API_KEY,
+            "chainid": POLYGON_CHAIN_ID, "module": "proxy",
+            "action": "eth_getTransactionReceipt",
+            "txhash": mint_tx_hash, "apikey": API_KEY,
         }, timeout=20)
-        for log in (r2.json().get("result") or []):
-            if log.get("transactionHash", "").lower() == mint_tx_hash:
-                return int(log["data"], 16) / 1e18
+        receipt_logs = r2.json().get("result", {}).get("logs", [])
+
+        rnt_lower      = RNT_CONTRACT.lower()
+        receiver_lower = STAKING_RECEIVER.lower()
+        for log in receipt_logs:
+            if log.get("address", "").lower() != rnt_lower:
+                continue
+            topics = log.get("topics", [])
+            if len(topics) < 3 or topics[0].lower() != TRANSFER_TOPIC:
+                continue
+            to_addr = "0x" + topics[2][-40:]
+            if to_addr.lower() == receiver_lower:
+                return int(log.get("data", "0x0"), 16) / 1e18
     except Exception:
         pass
     return 0.0

@@ -1034,7 +1034,10 @@ def render_reservas(lista: list, editable: bool = False):
             i3.markdown(f"**Wallet inversor**  \n{_w_display}")
             i4.markdown(f"**Tokens**  \n{r['n_tokens']:,}")
             i5.markdown(f"**Precio**  \n{r['precio_acordado']:,.2f} {r['divisa']}")
-            i6.markdown(f"**Reservado el**  \n{r['fecha_reserva']}")
+            if r["estado"] == "completada" and r.get("fecha_envio"):
+                i6.markdown(f"**Completado el**  \n{r['fecha_envio']}")
+            else:
+                i6.markdown(f"**Reservado el**  \n{r['fecha_reserva']}")
 
             # Totales EUR/USD si están guardados
             if r.get("total_eur") or r.get("total_usd"):
@@ -1230,9 +1233,20 @@ def _sort_key(r):
     except Exception:
         return datetime.min
 
-activas     = aplicar_filtros(sorted([r for r in reservas_all if r["estado"] == "activa"],     key=_sort_key, reverse=True))
-completadas = aplicar_filtros(sorted([r for r in reservas_all if r["estado"] == "completada"], key=_sort_key, reverse=True))
-canceladas  = aplicar_filtros(sorted([r for r in reservas_all if r["estado"] == "cancelada"],  key=_sort_key, reverse=True))
+def _sort_key_completada(r):
+    # Ordenar por fecha de completado (fecha_envio), tanto si se detectó
+    # automáticamente en blockchain como si se marcó manualmente.
+    # Fallback a fecha_reserva si por alguna razón no existe fecha_envio.
+    for campo in ("fecha_envio", "fecha_reserva"):
+        try:
+            return datetime.strptime(r[campo], "%d/%m/%Y %H:%M")
+        except Exception:
+            continue
+    return datetime.min
+
+activas     = aplicar_filtros(sorted([r for r in reservas_all if r["estado"] == "activa"],     key=_sort_key,            reverse=True))
+completadas = aplicar_filtros(sorted([r for r in reservas_all if r["estado"] == "completada"], key=_sort_key_completada, reverse=True))
+canceladas  = aplicar_filtros(sorted([r for r in reservas_all if r["estado"] == "cancelada"],  key=_sort_key,            reverse=True))
 
 if _active_tab == "activas":
     if activas:

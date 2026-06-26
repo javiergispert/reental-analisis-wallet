@@ -204,6 +204,8 @@ def load_master_projects() -> pd.DataFrame:
             "r_hoy_total":      parse_pct(row.iloc[45]),
             "r_hoy_anualizada": parse_pct(row.iloc[46]),
             "div_anual_token":  div_anual_token,
+            "meses_pendientes": parse_float_val(str(row.iloc[44])),
+            "div_pagado_token": parse_float_val(str(row.iloc[51])),
             "fecha_fin":        fecha_fin_real or fecha_fin_est,
             "fecha_lanzamiento": parse_fecha_util(str(row.iloc[3])),
             "token_address":    token_addr,
