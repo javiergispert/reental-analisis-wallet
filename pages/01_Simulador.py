@@ -26,6 +26,9 @@ API_KEY = os.getenv("ETHERSCAN_API_KEY", "")
 st.title("🏗️ Simulador de Cartera Inmobiliaria")
 st.caption("Proyecta el rendimiento de tu cartera actual y evalúa nuevas oportunidades de inversión.")
 
+st.warning("🚧 En Construcción", icon="🚧")
+st.stop()
+
 # ── Inicializar estado de sesión ──────────────────────────────────────────────
 
 if "wallet_slots"   not in st.session_state: st.session_state.wallet_slots   = [{"address": "", "loaded": False}]
