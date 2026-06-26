@@ -165,7 +165,16 @@ def load_tokens() -> dict:
                         name = str(row.get("Nombre del proyecto", "")).strip()
                         project_id = str(row.get("ID", "")).strip()
                         label = project_id if project_id and project_id != "nan" else name
-                        tokens[addr] = {"name": name, "symbol": project_id, "label": label, "address": addr}
+                        divisa_raw = str(row.iloc[11]).strip()
+                        divisa = "USD" if "$" in divisa_raw else "EUR"
+                        try:
+                            precio_emision = float(str(row.iloc[10]).strip().replace(",", "."))
+                        except Exception:
+                            precio_emision = None
+                        tokens[addr] = {
+                            "name": name, "symbol": project_id, "label": label, "address": addr,
+                            "divisa": divisa, "precio_emision": precio_emision,
+                        }
         except Exception:
             pass
 
@@ -490,6 +499,8 @@ def process_transfers(transfers: list, wallet: str, known_tokens: dict, reental_
                 "address": contract,
                 "is_aave": is_aave,
                 "underlying_address": original_info.get("address", "") if is_aave else "",
+                "divisa": original_info.get("divisa", "USD"),
+                "precio_emision": original_info.get("precio_emision"),
             }
             token_data[contract]["movements"].append({
                 "fecha": datetime.utcfromtimestamp(int(tx["timeStamp"])),
@@ -1262,10 +1273,13 @@ else:
     _valor_total_str = "N/D"
     _nota_valor = "No se pudo obtener el tipo de cambio EUR/USD para esta fecha."
 
+st.markdown("<div style='margin-top:18px'></div>", unsafe_allow_html=True)
 _kc1, _kc2, _kc3 = st.columns(3)
-_kc1.markdown(kpi_card("🇺🇸", "Tokens en USD",  f"{_tokens_usd:,.4f}".rstrip("0").rstrip("."),
+_kc1.markdown(kpi_card("🇺🇸", "Nº de tokens de proyectos emitidos en USD",
+                        f"{_tokens_usd:,.4f}".rstrip("0").rstrip("."),
                         sublabel="suma de saldos activos en proyectos USD"), unsafe_allow_html=True)
-_kc2.markdown(kpi_card("🇪🇺", "Tokens en EUR",  f"{_tokens_eur:,.4f}".rstrip("0").rstrip("."),
+_kc2.markdown(kpi_card("🇪🇺", "Nº de tokens de proyectos emitidos en EUR",
+                        f"{_tokens_eur:,.4f}".rstrip("0").rstrip("."),
                         sublabel="suma de saldos activos en proyectos EUR"), unsafe_allow_html=True)
 _kc3.markdown(kpi_card("💼", "Valor a precio emisión",  _valor_total_str,
                         sublabel=f"tipo cambio EUR/USD {_eurusd_label} · fecha {_fx_date_str}"),
