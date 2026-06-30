@@ -1421,14 +1421,14 @@ st.markdown("---")
 st.subheader("✅ Tokens con saldo" + date_label)
 closing_dates = load_closing_dates()
 
+def parse_fecha(s):
+    try:
+        return datetime.strptime(s, "%d/%m/%Y").date()
+    except Exception:
+        return None
+
 if activos:
     today_str = date.today().strftime("%d/%m/%Y")
-
-    def parse_fecha(s):
-        try:
-            return datetime.strptime(s, "%d/%m/%Y").date()
-        except Exception:
-            return None
 
     rows = []
     for d in sorted(activos.values(), key=lambda x: x["info"]["label"]):
