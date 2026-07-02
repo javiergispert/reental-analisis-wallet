@@ -288,8 +288,11 @@ def fetch_token_balance(wallet: str, token_address: str, api_key: str) -> float:
         "startblock": 0, "endblock": 99999999, "sort": "asc", "apikey": api_key,
     }
     try:
-        data = requests.get(ETHERSCAN_BASE, params=params, timeout=15).json()
-        txs  = data.get("result") if isinstance(data.get("result"), list) else []
+        data   = requests.get(ETHERSCAN_BASE, params=params, timeout=15).json()
+        result = data.get("result")
+        if not isinstance(result, list):
+            return -1.0  # API devuelve error (rate limit, dirección inválida, etc.)
+        txs = result
     except Exception:
         return -1.0   # -1 indica error de consulta
     bal = 0.0
