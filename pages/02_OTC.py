@@ -1330,23 +1330,25 @@ elif _active_tab == "ofertas":
                             index=0 if o.get("divisa", "USDT") == "USDT" else 1,
                         )
                         gs1, gs2, _ = st.columns([1, 1, 6])
-                        guardar = gs1.form_submit_button("💾 Guardar", type="primary")
+                        guardar  = gs1.form_submit_button("💾 Guardar", type="primary")
                         cancelar = gs2.form_submit_button("Cancelar")
 
-                    if guardar:
-                        ofs = load_ofertas()
-                        for _of in ofs:
-                            if _of["id"] == o["id"]:
-                                _of["n_tokens"]    = round(float(new_tokens), 3)
-                                _of["precio_venta"] = round(float(new_precio), 2)
-                                _of["divisa"]       = new_divisa
-                                break
-                        save_ofertas(ofs)
-                        st.session_state.pop(f"editing_oferta_{o['id']}", None)
-                        st.rerun()
-                    if cancelar:
-                        st.session_state.pop(f"editing_oferta_{o['id']}", None)
-                        st.rerun()
+                        # La lógica de guardado va DENTRO del with st.form para que
+                        # new_tokens/new_precio/new_divisa tengan los valores enviados
+                        if guardar:
+                            ofs = load_ofertas()
+                            for _of in ofs:
+                                if _of["id"] == o["id"]:
+                                    _of["n_tokens"]     = round(float(new_tokens), 3)
+                                    _of["precio_venta"] = round(float(new_precio), 2)
+                                    _of["divisa"]       = new_divisa
+                                    break
+                            save_ofertas(ofs)
+                            st.session_state.pop(f"editing_oferta_{o['id']}", None)
+                            st.rerun()
+                        if cancelar:
+                            st.session_state.pop(f"editing_oferta_{o['id']}", None)
+                            st.rerun()
 
                 # ── Confirmación de eliminación ──
                 if st.session_state.get(f"confirm_del_oferta_{o['id']}"):
