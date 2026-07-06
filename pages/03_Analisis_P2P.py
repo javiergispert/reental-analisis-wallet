@@ -237,6 +237,12 @@ def construir_disponibilidad(master_df: pd.DataFrame) -> list:
         precio   = float(o.get("precio_acordado") or o.get("precio_venta") or 0)
         addr     = o.get("token_address", "").lower()
         pid      = o.get("proyecto_id", "")
+
+        # Fallback: resolver proyecto_id desde token_address si no está guardado
+        if not pid and addr:
+            proj = project_by_addr.get(addr, {})
+            pid  = proj.get("id", "")
+
         if n_tokens < 0.001 or precio <= 0 or not pid:
             continue
         disponibles.append({
@@ -485,6 +491,11 @@ with st.spinner("Consultando disponibilidad en OTC…"):
 if not disponibles:
     st.warning("No hay tokens disponibles en el OTC en este momento.")
     st.stop()
+
+with st.expander("🔍 Diagnóstico: tokens detectados en el OTC", expanded=False):
+    for d in sorted(disponibles, key=lambda x: x["project_id"]):
+        st.write(f"**{d['project_id']}** · {d['tokens_disponibles']:.0f} tokens · "
+                 f"{d['precio_p2p']:.2f} · fuente: {d['fuente']}")
 
 # ── Filtros ───────────────────────────────────────────────────────────────────
 st.subheader("⚙️ Configuración del informe")
