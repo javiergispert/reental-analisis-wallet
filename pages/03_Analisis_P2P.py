@@ -66,44 +66,28 @@ TIPO_RENTA_LABELS = {
 # ── Google Sheets ─────────────────────────────────────────────────────────────
 
 def _get_gsheet_client():
-    creds_json = os.getenv("GSHEET_CREDENTIALS_JSON", "")
-    if not creds_json:
-        return None
-    creds = Credentials.from_service_account_info(
-        json.loads(creds_json),
-        scopes=["https://www.googleapis.com/auth/spreadsheets"],
+    """Usa st.secrets igual que 02_OTC.py (correcto en Streamlit Cloud)."""
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds  = Credentials.from_service_account_info(
+        dict(st.secrets["gcp_service_account"]), scopes=scopes
     )
     return gspread.authorize(creds)
 
-@st.cache_data(show_spinner=False, ttl=CACHE_TTL)
-def _read_gsheet_tab_cached(tab: str) -> list:
-    try:
-        gc = _get_gsheet_client()
-        if not gc:
-            return []
-        ws  = gc.open_by_key(SPREADSHEET_ID).worksheet(tab)
-        val = ws.acell("A1").value
-        if not val:
-            return []
-        parsed = json.loads(val)
-        return parsed if isinstance(parsed, list) else []
-    except Exception:
-        return []
-
 def _read_gsheet_tab_fresh(tab: str) -> list:
     """Sin caché — para datos que cambian frecuentemente (reservas, ofertas)."""
-    try:
-        gc = _get_gsheet_client()
-        if not gc:
-            return []
-        ws  = gc.open_by_key(SPREADSHEET_ID).worksheet(tab)
-        val = ws.acell("A1").value
-        if not val:
-            return []
-        parsed = json.loads(val)
-        return parsed if isinstance(parsed, list) else []
-    except Exception:
-        return []
+    for intento in range(4):
+        try:
+            gc  = _get_gsheet_client()
+            ws  = gc.open_by_key(SPREADSHEET_ID).worksheet(tab)
+            val = ws.acell("A1").value
+            if not val:
+                return []
+            parsed = json.loads(val)
+            return parsed if isinstance(parsed, list) else []
+        except Exception:
+            if intento < 3:
+                time.sleep(1.5)
+    return []
 
 def load_reservas_otc() -> list:
     return _read_gsheet_tab_fresh(TAB_RESERVAS)
