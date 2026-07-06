@@ -1,59 +1,57 @@
 """
 Análisis de Oportunidades P2P — Reental Wealth
-Genera el ranking de mejores oportunidades disponibles en el mercado P2P
-y permite exportar el informe en PDF.
+Fuente de datos: wallet OTC de Reental (tokens disponibles - reservas activas)
+                + ofertas activas de terceros publicadas en esta herramienta.
 """
 
 import io
+import json
 import os
-from datetime import date
+import sys
+import time
+from datetime import date, datetime, timezone
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
 
 import pandas as pd
 import requests
 import streamlit as st
+import gspread
+from google.oauth2.service_account import Credentials
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
 from reportlab.platypus import (
-    HRFlowable,
-    Paragraph,
-    SimpleDocTemplate,
-    Spacer,
-    Table,
-    TableStyle,
+    HRFlowable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
 )
 
-from utils import load_master_projects, load_p2p_listings, parse_pct, parse_float_val
+from utils import load_master_projects, parse_pct, parse_float_val, strip_accents
 
-# ── Colores de marca ──────────────────────────────────────────────────────────
+# ── Constantes ────────────────────────────────────────────────────────────────
+OTC_WALLET     = os.getenv("OTC_WALLET", "0xce0719ec1bda336ba069c6961ad167767829301a").lower()
+API_KEY        = os.getenv("ETHERSCAN_API_KEY", "")
+ETHERSCAN_BASE = "https://api.etherscan.io/v2/api"
+POLYGON_CHAIN  = 137
+SPREADSHEET_ID = "13Q0n7egbAIJSU9UvwwDucd3MUQ48Q44eoMwsPT-PmGs"
+TAB_RESERVAS   = "Reservas"
+TAB_OFERTAS    = "Ofertas"
+CACHE_TTL      = 3600
+MIN_TOKENS     = 20   # mínimo tokens disponibles para entrar en el ranking
+
 NARANJA   = colors.HexColor("#F15A2B")
 VERDE     = colors.HexColor("#1D8348")
 GRIS_OSC  = colors.HexColor("#2C3E50")
 GRIS_CLAR = colors.HexColor("#F2F3F4")
 BLANCO    = colors.white
 
-# ── Configuración de categorías ───────────────────────────────────────────────
 CATEGORIAS = {
-    "SR (SuperReentel)": {
-        "r_hoy_total":  "r_hoy_total_sr",
-        "r_hoy_ann":    "r_hoy_ann_sr",
-        "r_rec_ann":    "r_rec_ann_sr",
-        "r_plusv":      "r_plusv_sr",
-    },
-    "RP (ReentelPro)": {
-        "r_hoy_total":  "r_hoy_total_rp",
-        "r_hoy_ann":    "r_hoy_ann_rp",
-        "r_rec_ann":    "r_rec_ann_rp",
-        "r_plusv":      "r_plusv_rp",
-    },
-    "Reentel": {
-        "r_hoy_total":  "r_hoy_total_reentel",
-        "r_hoy_ann":    "r_hoy_ann_reentel",
-        "r_rec_ann":    "r_rec_ann_reentel",
-        "r_plusv":      "r_plusv_reentel",
-    },
+    "SR (SuperReentel)": {"r_hoy_total": "r_hoy_total_sr",  "r_hoy_ann": "r_hoy_ann_sr",  "r_rec_ann": "r_rec_ann_sr",  "r_plusv": "r_plusv_sr"},
+    "RP (ReentelPro)":   {"r_hoy_total": "r_hoy_total_rp",  "r_hoy_ann": "r_hoy_ann_rp",  "r_rec_ann": "r_rec_ann_rp",  "r_plusv": "r_plusv_rp"},
+    "Reentel":           {"r_hoy_total": "r_hoy_total_reentel", "r_hoy_ann": "r_hoy_ann_reentel", "r_rec_ann": "r_rec_ann_reentel", "r_plusv": "r_plusv_reentel"},
 }
 
 TIPO_RENTA_LABELS = {
@@ -63,291 +61,403 @@ TIPO_RENTA_LABELS = {
     "mixto":      "Mixta (recurrente + final)",
 }
 
-MIN_TOKENS_P2P = 20  # filtro mínimo de tokens disponibles
+# ── Google Sheets ─────────────────────────────────────────────────────────────
 
+def _get_gsheet_client():
+    creds_json = os.getenv("GSHEET_CREDENTIALS_JSON", "")
+    if not creds_json:
+        return None
+    creds = Credentials.from_service_account_info(
+        json.loads(creds_json),
+        scopes=["https://www.googleapis.com/auth/spreadsheets"],
+    )
+    return gspread.authorize(creds)
 
-# ── Helpers de cálculo ────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False, ttl=CACHE_TTL)
+def _read_gsheet_tab(tab: str) -> list:
+    try:
+        gc = _get_gsheet_client()
+        if not gc:
+            return []
+        ws  = gc.open_by_key(SPREADSHEET_ID).worksheet(tab)
+        val = ws.acell("A1").value
+        if not val:
+            return []
+        parsed = json.loads(val)
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
 
-def calcular_oportunidades(master_df: pd.DataFrame, p2p_df: pd.DataFrame,
-                            categoria: str, tipo_renta: str, top_n: int) -> pd.DataFrame:
+def load_reservas_otc() -> list:
+    return _read_gsheet_tab(TAB_RESERVAS)
+
+def load_ofertas_otc() -> list:
+    return _read_gsheet_tab(TAB_OFERTAS)
+
+# ── Saldos wallet OTC desde Etherscan ─────────────────────────────────────────
+
+@st.cache_data(show_spinner=False, ttl=CACHE_TTL)
+def fetch_otc_disponibles(wallet: str, api_key: str,
+                           project_by_addr_items: tuple,
+                           project_by_id_items: tuple) -> dict:
     """
-    Cruza master con P2P, ajusta rentabilidades al precio P2P real y
-    devuelve el top N ordenado por score (mayor rentabilidad anualizada = mejor score).
+    Devuelve {contract_addr: saldo_bruto} para tokens Reental en la wallet OTC.
+    Los aTokens Aave se consolidan sobre su subyacente.
     """
+    project_by_addr = dict(project_by_addr_items)
+    project_by_id   = dict(project_by_id_items)
+    known_addresses = set(project_by_addr.keys())
+    nombre_to_addr  = {row["nombre"].lower(): addr for addr, row in project_by_addr.items()}
+
+    params = {
+        "chainid": POLYGON_CHAIN, "module": "account", "action": "tokentx",
+        "address": wallet, "startblock": 0, "endblock": 99999999,
+        "sort": "asc", "apikey": api_key,
+    }
+    try:
+        resp = requests.get(ETHERSCAN_BASE, params=params, timeout=30)
+        result = resp.json().get("result")
+        txs = result if isinstance(result, list) else []
+    except Exception:
+        return {}
+
+    raw_balances = {}
+    atoken_map   = {}
+
+    for tx in txs:
+        contract  = tx["contractAddress"].lower()
+        sym       = tx.get("tokenSymbol", "")
+        name      = tx.get("tokenName", "")
+        dec       = int(tx.get("tokenDecimal") or 18)
+        value     = int(tx["value"]) / (10 ** dec)
+        to_addr   = tx["to"].lower()
+        from_addr = tx["from"].lower()
+
+        is_atoken = sym.startswith("aMatReental-") or name.startswith("Aave Matic Reental-")
+        if is_atoken and contract not in atoken_map:
+            suffix = (name[len("Aave Matic Reental-"):] if name.startswith("Aave Matic Reental-")
+                      else sym[len("aMatReental-"):]).strip().lower()
+            underlying = project_by_id.get(suffix, {}).get("token_address")
+            if not underlying:
+                for n, a in nombre_to_addr.items():
+                    if suffix in n:
+                        underlying = a
+                        break
+            if underlying:
+                atoken_map[contract] = underlying.lower()
+
+        effective = atoken_map.get(contract, contract if contract in known_addresses else None)
+        if effective is None:
+            continue
+
+        if to_addr == wallet and from_addr != wallet:
+            raw_balances[effective] = raw_balances.get(effective, 0.0) + value
+        elif from_addr == wallet and to_addr != wallet:
+            raw_balances[effective] = raw_balances.get(effective, 0.0) - value
+
+    return {addr: round(saldo, 6) for addr, saldo in raw_balances.items() if saldo >= 0.001}
+
+
+def construir_disponibilidad(master_df: pd.DataFrame) -> list:
+    """
+    Devuelve lista de dicts con los tokens disponibles (OTC Reental + terceros).
+    Cada dict: {project_id, nombre, divisa, precio_p2p, tokens_disponibles, fuente}
+    """
+    # Índices del master
+    project_by_addr = {}
+    project_by_id   = {}
+    for _, row in master_df.iterrows():
+        if row.get("token_address"):
+            project_by_addr[row["token_address"]] = row.to_dict()
+        project_by_id[row["id"].lower()] = row.to_dict()
+
+    # 1. Saldos brutos wallet OTC
+    brutos = fetch_otc_disponibles(
+        OTC_WALLET, API_KEY,
+        tuple(project_by_addr.items()),
+        tuple(project_by_id.items()),
+    )
+
+    # 2. Restar reservas activas
+    reservas = load_reservas_otc()
+    reservado = {}
+    for r in reservas:
+        if r.get("estado") in ("completada", "cancelada"):
+            continue
+        addr = r.get("token_address", "").lower()
+        reservado[addr] = reservado.get(addr, 0.0) + float(r.get("n_tokens", 0))
+
+    disponibles = []
+
+    # Wallet OTC
+    from utils import load_precios_otc  # type: ignore  # noqa
+    try:
+        precios_otc = _load_precios_otc_cached()
+    except Exception:
+        precios_otc = {}
+
+    for addr, saldo_bruto in brutos.items():
+        disp = max(0.0, saldo_bruto - reservado.get(addr, 0.0))
+        if disp < 0.001:
+            continue
+        proj = project_by_addr.get(addr, {})
+        pid  = proj.get("id", "")
+        if not pid:
+            continue
+        precio_otc = precios_otc.get(addr, {}).get("precio_otc") or proj.get("precio_emision") or 0
+        disponibles.append({
+            "project_id":        pid,
+            "token_address":     addr,
+            "tokens_disponibles": disp,
+            "precio_p2p":        precio_otc,
+            "fuente":            "OTC Reental",
+        })
+
+    # Ofertas de terceros activas
+    for o in load_ofertas_otc():
+        if o.get("estado") != "activa":
+            continue
+        n_tokens = float(o.get("n_tokens", 0))
+        precio   = float(o.get("precio_acordado") or o.get("precio_venta") or 0)
+        addr     = o.get("token_address", "").lower()
+        pid      = o.get("proyecto_id", "")
+        if n_tokens < 0.001 or precio <= 0 or not pid:
+            continue
+        disponibles.append({
+            "project_id":        pid,
+            "token_address":     addr,
+            "tokens_disponibles": n_tokens,
+            "precio_p2p":        precio,
+            "fuente":            "Tercero",
+        })
+
+    return disponibles
+
+
+@st.cache_data(show_spinner=False, ttl=CACHE_TTL)
+def _load_precios_otc_cached() -> dict:
+    try:
+        gc  = _get_gsheet_client()
+        if not gc:
+            return {}
+        ws  = gc.open_by_key(SPREADSHEET_ID).worksheet("precios_otc")
+        val = ws.acell("A1").value
+        if not val:
+            return {}
+        parsed = json.loads(val)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+# ── Cálculo del ranking ───────────────────────────────────────────────────────
+
+def calcular_ranking(master_df: pd.DataFrame, disponibles: list,
+                     categoria: str, tipo_renta: str, top_n: int) -> pd.DataFrame:
     cols = CATEGORIAS[categoria]
 
+    master_by_id = {row["id"].lower(): row for _, row in master_df.iterrows()}
+
     rows = []
-    for _, p in p2p_df.iterrows():
-        pid            = str(p["id"]).strip()
-        tokens_disp    = float(p.get("tokens_disponibles") or 0)
-        precio_p2p     = float(p.get("precio_p2p_usdt") or 0)
-
-        if tokens_disp < MIN_TOKENS_P2P or precio_p2p <= 0:
+    for d in disponibles:
+        if d["tokens_disponibles"] < MIN_TOKENS:
             continue
 
-        # Buscar proyecto en master
-        m_rows = master_df[master_df["id"] == pid]
-        if m_rows.empty:
+        pid   = d["project_id"].lower()
+        m     = master_by_id.get(pid)
+        if m is None:
             continue
-        m = m_rows.iloc[0]
 
-        # Filtro tipo renta
         if tipo_renta != "todas" and m["tipo_renta"] != tipo_renta:
             continue
 
-        precio_emision = m["precio_emision"] or 0
-        if precio_emision <= 0:
+        precio_emision = m.get("precio_emision") or 0
+        precio_p2p     = d["precio_p2p"]
+        if precio_emision <= 0 or precio_p2p <= 0:
             continue
 
-        meses = m["meses_pendientes"] or 0
+        meses = m.get("meses_pendientes") or 0
         if meses <= 0:
             continue
 
-        # Factor de ajuste: rentabilidades del master están sobre precio de emisión.
-        # Si el inversor paga precio_p2p distinto, se ajusta proporcionalmente.
-        # Ambas cifras están en la divisa nativa del token (EUR o USD).
-        adj = precio_emision / precio_p2p
-
-        r_hoy_total_raw = m[cols["r_hoy_total"]]
-        r_hoy_ann_raw   = m[cols["r_hoy_ann"]]
-        r_rec_ann_raw   = m[cols["r_rec_ann"]]
-        r_plusv_raw     = m[cols["r_plusv"]]
+        r_hoy_ann_raw   = m.get(cols["r_hoy_ann"])
+        r_hoy_total_raw = m.get(cols["r_hoy_total"])
+        r_rec_ann_raw   = m.get(cols["r_rec_ann"])
+        r_plusv_raw     = m.get(cols["r_plusv"])
 
         if r_hoy_ann_raw is None:
             continue
 
-        r_hoy_total = (r_hoy_total_raw or 0) * adj
-        r_hoy_ann   = (r_hoy_ann_raw   or 0) * adj
-        r_rec_ann   = (r_rec_ann_raw   or 0) * adj
-        r_plusv     = (r_plusv_raw     or 0) * adj
+        # Ajuste por precio P2P vs emisión (ambos en divisa nativa del token)
+        adj = precio_emision / precio_p2p
 
-        # Rentabilidad por alquiler pendiente = r_rec_ann * (meses/12)
-        r_alquiler_pendiente = r_rec_ann * (meses / 12)
+        r_hoy_ann        = (r_hoy_ann_raw   or 0) * adj
+        r_hoy_total      = (r_hoy_total_raw or 0) * adj
+        r_rec_ann        = (r_rec_ann_raw   or 0) * adj
+        r_plusv          = (r_plusv_raw     or 0) * adj
+        r_alquiler_pend  = r_rec_ann * (meses / 12)
 
         rows.append({
-            "_id":              pid,
+            "_id":              m["id"],
             "_nombre":          m["nombre"],
             "_precio_p2p":      precio_p2p,
             "_divisa":          m["divisa"],
             "_meses":           meses,
             "_tipo_renta":      m["tipo_renta"],
             "_tip_dividendo":   m["tip_dividendo"],
-            "_tokens_disp":     tokens_disp,
-            "_colateralizable": m["colateralizable"],
-            "_r_hoy_total":     r_hoy_total,
+            "_tokens_disp":     d["tokens_disponibles"],
+            "_colateralizable": m.get("colateralizable", False),
+            "_fuente":          d["fuente"],
             "_r_hoy_ann":       r_hoy_ann,
+            "_r_hoy_total":     r_hoy_total,
             "_r_rec_ann":       r_rec_ann,
-            "_r_alquiler_pend": r_alquiler_pendiente,
+            "_r_alquiler_pend": r_alquiler_pend,
             "_r_plusv":         r_plusv,
         })
 
     if not rows:
         return pd.DataFrame()
 
-    df = pd.DataFrame(rows)
-    df = df.sort_values("_r_hoy_ann", ascending=False).head(top_n).reset_index(drop=True)
+    df = pd.DataFrame(rows).sort_values("_r_hoy_ann", ascending=False).head(top_n).reset_index(drop=True)
     df["_score"] = range(1, len(df) + 1)
     return df
 
 
+# ── Formato ───────────────────────────────────────────────────────────────────
+
 def fmt_pct(v) -> str:
-    if v is None:
-        return "—"
-    return f"{v * 100:.2f}%"
+    return "—" if v is None else f"{v * 100:.2f}%"
 
 def fmt_precio(v, divisa) -> str:
-    sym = "€" if divisa == "EUR" else "$"
-    return f"{v:,.2f} {sym}"
+    return f"{v:,.2f} {'€' if divisa == 'EUR' else '$'}"
 
 def tip_dividendo_label(raw: str) -> str:
     r = raw.lower()
-    if "mensual" in r and "final" in r:
-        return "Rendimientos mensuales + final"
-    if "trimestral" in r and "final" in r:
-        return "Rendimientos trimestrales + final"
-    if "final" in r:
-        return "Rendimientos a final del proyecto"
-    if "mensual" in r:
-        return "Rendimientos mensuales"
+    if "mensual" in r and "final" in r:    return "Rendimientos mensuales + final"
+    if "trimestral" in r and "final" in r: return "Rendimientos trimestrales + final"
+    if "final" in r:                       return "Rendimientos a final del proyecto"
+    if "mensual" in r:                     return "Rendimientos mensuales"
     return raw.capitalize()
 
 
 # ── Generación del PDF ────────────────────────────────────────────────────────
 
-def generar_pdf(df: pd.DataFrame, categoria: str, top_n: int) -> bytes:
+def generar_pdf(df: pd.DataFrame, categoria: str) -> bytes:
     buf = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buf,
-        pagesize=landscape(A4),
-        leftMargin=1.5 * cm,
-        rightMargin=1.5 * cm,
-        topMargin=1.5 * cm,
-        bottomMargin=1.5 * cm,
-    )
+    doc = SimpleDocTemplate(buf, pagesize=landscape(A4),
+                            leftMargin=1.5*cm, rightMargin=1.5*cm,
+                            topMargin=1.5*cm, bottomMargin=1.5*cm)
 
-    styles = getSampleStyleSheet()
-    cell_style = ParagraphStyle(
-        "cell", fontSize=7.5, leading=10, alignment=TA_CENTER,
-        fontName="Helvetica",
-    )
-    cell_bold = ParagraphStyle(
-        "cell_bold", fontSize=7.5, leading=10, alignment=TA_CENTER,
-        fontName="Helvetica-Bold",
-    )
-    header_style = ParagraphStyle(
-        "header", fontSize=8, leading=10, alignment=TA_CENTER,
-        fontName="Helvetica-Bold", textColor=BLANCO,
-    )
-    nota_style = ParagraphStyle(
-        "nota", fontSize=7, leading=9.5, alignment=TA_LEFT,
-        fontName="Helvetica", textColor=GRIS_OSC,
-    )
+    cell_s  = ParagraphStyle("c",  fontSize=7.5, leading=10, alignment=TA_CENTER, fontName="Helvetica")
+    cell_b  = ParagraphStyle("cb", fontSize=7.5, leading=10, alignment=TA_CENTER, fontName="Helvetica-Bold")
+    head_s  = ParagraphStyle("h",  fontSize=8,   leading=10, alignment=TA_CENTER, fontName="Helvetica-Bold", textColor=BLANCO)
+    nota_s  = ParagraphStyle("n",  fontSize=7,   leading=9.5, alignment=TA_LEFT,  fontName="Helvetica", textColor=GRIS_OSC)
+    tit_s   = ParagraphStyle("t",  fontSize=18,  leading=22, alignment=TA_LEFT,   fontName="Helvetica-Bold", textColor=GRIS_OSC)
+    fecha_s = ParagraphStyle("f",  fontSize=9,   leading=12, alignment=TA_RIGHT,  fontName="Helvetica", textColor=GRIS_OSC)
+    sub_s   = ParagraphStyle("s",  fontSize=12,  leading=16, alignment=TA_CENTER, fontName="Helvetica-Bold", textColor=BLANCO)
 
     story = []
 
-    # ── Cabecera ──
-    titulo_style = ParagraphStyle(
-        "titulo", fontSize=20, leading=24, alignment=TA_LEFT,
-        fontName="Helvetica-Bold", textColor=GRIS_OSC,
-    )
-    fecha_style = ParagraphStyle(
-        "fecha", fontSize=9, leading=12, alignment=TA_RIGHT,
-        fontName="Helvetica", textColor=GRIS_OSC,
-    )
-    header_row = Table(
-        [[
-            Paragraph("<font color='#F15A2B'>Reental</font> <b>Wealth</b> · Reporte Oportunidades P2P", titulo_style),
-            Paragraph(f"Fecha: {date.today().strftime('%d/%m/%Y')}", fecha_style),
-        ]],
-        colWidths=["70%", "30%"],
-    )
-    header_row.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
-    story.append(header_row)
-    story.append(Spacer(1, 0.3 * cm))
-    story.append(HRFlowable(width="100%", thickness=2, color=NARANJA))
-    story.append(Spacer(1, 0.4 * cm))
+    # Cabecera
+    ht = Table([[
+        Paragraph("<font color='#F15A2B'>Reental</font> <b>Wealth</b> · Reporte Oportunidades P2P", tit_s),
+        Paragraph(f"Fecha: {date.today().strftime('%d/%m/%Y')}", fecha_s),
+    ]], colWidths=["70%", "30%"])
+    ht.setStyle(TableStyle([("VALIGN", (0,0),(-1,-1),"MIDDLE")]))
+    story += [ht, Spacer(1, 0.3*cm), HRFlowable(width="100%", thickness=2, color=NARANJA), Spacer(1, 0.4*cm)]
 
-    # ── Subtítulo ──
-    sub_style = ParagraphStyle(
-        "sub", fontSize=13, leading=16, alignment=TA_CENTER,
-        fontName="Helvetica-Bold", textColor=BLANCO,
-    )
-    sub_table = Table(
-        [[Paragraph(f"Top {len(df)} mejores oportunidades en P2P — Categoría {categoria}", sub_style)]],
-        colWidths=["100%"],
-    )
-    sub_table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), VERDE),
-        ("TOPPADDING",    (0, 0), (-1, -1), 7),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
-        ("ROUNDEDCORNERS", [6]),
-    ]))
-    story.append(sub_table)
-    story.append(Spacer(1, 0.5 * cm))
+    # Subtítulo
+    st_t = Table([[Paragraph(f"Top {len(df)} mejores oportunidades P2P · Categoría {categoria}", sub_s)]],
+                 colWidths=["100%"])
+    st_t.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,-1),VERDE),("TOPPADDING",(0,0),(-1,-1),7),("BOTTOMPADDING",(0,0),(-1,-1),7)]))
+    story += [st_t, Spacer(1, 0.5*cm)]
 
-    # ── Tabla de datos ──
-    n_cols = len(df)
-    page_w = landscape(A4)[0] - 3 * cm  # ancho disponible
-    label_w = 5.2 * cm
-    data_w  = (page_w - label_w) / n_cols
-
-    headers = [
-        "Ranking", "Score", "ID Token", "Nombre Inmueble",
-        "Precio/Token P2P", "Divisa",
-        "Est. Nº Meses hasta fin",
-        "Rent. total anualizada estimada *",
-        "Rent. total pendiente estimada *",
-        "Rent. por alquiler estimada *",
-        "Rent. anualizada por alquiler real *",
-        "Rent. al final estimada **",
-        "Tipología de Dividendos",
-        "Nº tokens disponibles",
-        "¿Es Colateralizable?",
-    ]
-
-    ranking_labels = ["1º", "2º", "3º", "4º", "5º", "6º", "7º", "8º", "9º", "10º"]
-
-    data_rows = [
-        [Paragraph(h, cell_bold) for h in [""] + [ranking_labels[i] for i in range(n_cols)]],
-    ]
+    # Tabla de datos
+    n   = len(df)
+    pw  = landscape(A4)[0] - 3*cm
+    lw  = 5.5*cm
+    dw  = (pw - lw) / n
+    rnk = ["1º","2º","3º","4º","5º","6º","7º","8º","9º","10º"]
 
     field_rows = [
-        ("Score",          [str(int(r["_score"])) for _, r in df.iterrows()]),
-        ("ID Token",       [str(r["_id"]) for _, r in df.iterrows()]),
-        ("Nombre Inmueble",[str(r["_nombre"]) for _, r in df.iterrows()]),
-        ("Precio/Token P2P", [fmt_precio(r["_precio_p2p"], r["_divisa"]) for _, r in df.iterrows()]),
-        ("Divisa",         ["€" if r["_divisa"] == "EUR" else "$" for _, r in df.iterrows()]),
-        ("Est. Meses hasta fin", [f"{r['_meses']:.1f}" for _, r in df.iterrows()]),
-        ("Rent. total anualizada estimada *",   [fmt_pct(r["_r_hoy_ann"])      for _, r in df.iterrows()]),
-        ("Rent. total pendiente estimada *",    [fmt_pct(r["_r_hoy_total"])    for _, r in df.iterrows()]),
-        ("Rent. por alquiler estimada *",       [fmt_pct(r["_r_alquiler_pend"]) for _, r in df.iterrows()]),
-        ("Rent. anualizada alquiler real *",    [fmt_pct(r["_r_rec_ann"])      for _, r in df.iterrows()]),
-        ("Rent. al final estimada **",          [fmt_pct(r["_r_plusv"])        for _, r in df.iterrows()]),
-        ("Tipología de Dividendos",             [tip_dividendo_label(r["_tip_dividendo"]) for _, r in df.iterrows()]),
-        ("Nº tokens disponibles",               [f"{int(r['_tokens_disp']):,}" for _, r in df.iterrows()]),
-        ("¿Es Colateralizable?",                ["Colateralizable" if r["_colateralizable"] else "No" for _, r in df.iterrows()]),
+        ("Score",                         [str(int(r["_score"]))                                      for _,r in df.iterrows()]),
+        ("ID Token",                      [r["_id"]                                                    for _,r in df.iterrows()]),
+        ("Nombre Inmueble",               [r["_nombre"]                                                for _,r in df.iterrows()]),
+        ("Precio/Token P2P",              [fmt_precio(r["_precio_p2p"], r["_divisa"])                  for _,r in df.iterrows()]),
+        ("Divisa",                        ["€" if r["_divisa"]=="EUR" else "$"                         for _,r in df.iterrows()]),
+        ("Est. Meses hasta fin",          [f"{r['_meses']:.1f}"                                        for _,r in df.iterrows()]),
+        ("Rent. total anualizada est. *", [fmt_pct(r["_r_hoy_ann"])                                    for _,r in df.iterrows()]),
+        ("Rent. total pendiente est. *",  [fmt_pct(r["_r_hoy_total"])                                  for _,r in df.iterrows()]),
+        ("Rent. alquiler pendiente *",    [fmt_pct(r["_r_alquiler_pend"])                              for _,r in df.iterrows()]),
+        ("Rent. alquiler anualiz. real *",[fmt_pct(r["_r_rec_ann"])                                    for _,r in df.iterrows()]),
+        ("Rent. al final est. **",        [fmt_pct(r["_r_plusv"])                                      for _,r in df.iterrows()]),
+        ("Tipología de Dividendos",       [tip_dividendo_label(r["_tip_dividendo"])                    for _,r in df.iterrows()]),
+        ("Nº tokens disponibles",         [f"{int(r['_tokens_disp']):,}"                               for _,r in df.iterrows()]),
+        ("Fuente",                        [r["_fuente"]                                                 for _,r in df.iterrows()]),
+        ("¿Es Colateralizable?",          ["Colateralizable" if r["_colateralizable"] else "No"        for _,r in df.iterrows()]),
     ]
 
+    table_data = [[Paragraph("", cell_b)] + [Paragraph(rnk[i], cell_b) for i in range(n)]]
     for label, values in field_rows:
-        row = [Paragraph(label, cell_bold)] + [Paragraph(v, cell_style) for v in values]
-        data_rows.append(row)
+        table_data.append([Paragraph(label, cell_b)] + [Paragraph(v, cell_s) for v in values])
 
-    col_widths = [label_w] + [data_w] * n_cols
-    tabla = Table(data_rows, colWidths=col_widths, repeatRows=1)
-
-    # Estilo base
+    col_widths = [lw] + [dw]*n
+    tabla = Table(table_data, colWidths=col_widths)
     ts = [
-        ("GRID",          (0, 0), (-1, -1), 0.4, colors.HexColor("#D5D8DC")),
-        ("BACKGROUND",    (0, 0), (-1, 0),  VERDE),
-        ("TEXTCOLOR",     (0, 0), (-1, 0),  BLANCO),
-        ("BACKGROUND",    (0, 0), (0, -1),  GRIS_OSC),
-        ("TEXTCOLOR",     (0, 0), (0, -1),  BLANCO),
-        ("TOPPADDING",    (0, 0), (-1, -1), 5),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-        ("LEFTPADDING",   (0, 0), (-1, -1), 4),
-        ("RIGHTPADDING",  (0, 0), (-1, -1), 4),
-        ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
+        ("GRID",          (0,0),(-1,-1), 0.4, colors.HexColor("#D5D8DC")),
+        ("BACKGROUND",    (0,0),(-1,0),  VERDE),
+        ("TEXTCOLOR",     (0,0),(-1,0),  BLANCO),
+        ("BACKGROUND",    (0,0),(0,-1),  GRIS_OSC),
+        ("TEXTCOLOR",     (0,0),(0,-1),  BLANCO),
+        ("TOPPADDING",    (0,0),(-1,-1), 5),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 5),
+        ("LEFTPADDING",   (0,0),(-1,-1), 4),
+        ("RIGHTPADDING",  (0,0),(-1,-1), 4),
+        ("VALIGN",        (0,0),(-1,-1), "MIDDLE"),
     ]
-    # Filas alternas
-    for i in range(1, len(data_rows)):
-        bg = GRIS_CLAR if i % 2 == 0 else BLANCO
-        ts.append(("BACKGROUND", (1, i), (-1, i), bg))
-
-    # Destacar fila ranking y score con naranja suave
-    ts.append(("BACKGROUND", (0, 0), (-1, 0), VERDE))
-
+    for i in range(1, len(table_data)):
+        ts.append(("BACKGROUND", (1,i),(-1,i), GRIS_CLAR if i%2==0 else BLANCO))
     tabla.setStyle(TableStyle(ts))
-    story.append(tabla)
-    story.append(Spacer(1, 0.5 * cm))
+    story += [tabla, Spacer(1, 0.5*cm)]
 
-    # ── Notas al pie ──
     notas = [
-        "* Las rentabilidades están calculadas en base a la rentabilidad real acumulada recurrente y proyectando al mismo nivel hasta su fin estimado, ajustadas al precio P2P.",
-        "** La rentabilidad al final hace referencia únicamente a la ganancia patrimonial que se origina en el cierre del proyecto.",
+        "* Rentabilidades calculadas sobre precio P2P real. Se proyecta la tasa recurrente real acumulada hasta el vencimiento estimado.",
+        "** La rent. al final es la ganancia patrimonial esperada en el cierre del proyecto.",
         f"— Categoría aplicada: {categoria}. Las rentabilidades varían según la categoría del inversor.",
-        "— Los inmuebles que entran en el análisis tienen que tener una oferta en el mercado P2P de más de 20 tokens.",
-        "— Score: Puntuación ponderada en base al tiempo estimado restante y su rentabilidad. A menor puntuación, mejor.",
-        "— Este ranking no debe ser tomado como consejo de inversión. Todas las rentabilidades indicadas son meras estimaciones.",
+        f"— Solo se incluyen proyectos con más de {MIN_TOKENS} tokens disponibles en el OTC interno de Reental.",
+        "— Score: A menor puntuación, mejor oportunidad (ordenado por rentabilidad total anualizada pendiente).",
+        "— Este ranking no debe ser tomado como consejo de inversión. Todas las rentabilidades son meras estimaciones.",
     ]
     for nota in notas:
-        story.append(Paragraph(nota, nota_style))
+        story.append(Paragraph(nota, nota_s))
 
     doc.build(story)
     return buf.getvalue()
 
 
-# ── Interfaz Streamlit ────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# INTERFAZ
+# ══════════════════════════════════════════════════════════════════════════════
 
 st.title("📊 Análisis de Oportunidades P2P")
-st.caption("Ranking en tiempo real de las mejores oportunidades disponibles en el mercado P2P de Reental.")
+st.caption(
+    "Ranking en tiempo real basado en los tokens disponibles del OTC interno de Reental "
+    "(wallet custodia + ofertas de inversores) ordenados por rentabilidad anualizada pendiente."
+)
 
 # Cargar datos
-with st.spinner("Cargando datos del mercado P2P…"):
+with st.spinner("Cargando catálogo de proyectos…"):
     master_df = load_master_projects()
-    p2p_df    = load_p2p_listings(master_df)
 
-if master_df.empty or p2p_df.empty:
-    st.error("No se han podido cargar los datos del master o del mercado P2P.")
+if master_df.empty:
+    st.error("No se ha podido cargar el catálogo de proyectos.")
+    st.stop()
+
+with st.spinner("Consultando disponibilidad en OTC…"):
+    disponibles = construir_disponibilidad(master_df)
+
+if not disponibles:
+    st.warning("No hay tokens disponibles en el OTC en este momento.")
     st.stop()
 
 # ── Filtros ───────────────────────────────────────────────────────────────────
@@ -358,43 +468,37 @@ categoria = f1.selectbox(
     "Categoría del inversor",
     list(CATEGORIAS.keys()),
     index=0,
-    help="Cada categoría tiene rentabilidades diferentes según las condiciones de Reental.",
+    help="SR = SuperReentel (máxima rentabilidad) · RP = ReentelPro · Reentel = categoría base.",
 )
-
 tipo_renta_sel = f2.selectbox(
     "Tipo de renta",
     list(TIPO_RENTA_LABELS.keys()),
     format_func=lambda x: TIPO_RENTA_LABELS[x],
-    index=0,
 )
-
-top_n = f3.number_input(
-    "Top N oportunidades", min_value=1, max_value=10, value=5, step=1,
-)
+top_n = int(f3.number_input("Top N", min_value=1, max_value=10, value=5, step=1))
 
 st.markdown("---")
 
-# ── Cálculo ───────────────────────────────────────────────────────────────────
-df_ops = calcular_oportunidades(master_df, p2p_df, categoria, tipo_renta_sel, int(top_n))
+# ── Calcular ranking ──────────────────────────────────────────────────────────
+df_ops = calcular_ranking(master_df, disponibles, categoria, tipo_renta_sel, top_n)
 
 if df_ops.empty:
-    st.warning("No hay oportunidades P2P disponibles con los filtros seleccionados (mínimo 20 tokens disponibles).")
+    st.warning(f"No hay oportunidades con los filtros seleccionados (mínimo {MIN_TOKENS} tokens disponibles).")
     st.stop()
 
-# ── Tabla interactiva ─────────────────────────────────────────────────────────
+# ── Tabla ─────────────────────────────────────────────────────────────────────
 st.subheader(f"🏆 Top {len(df_ops)} oportunidades · {categoria}")
 
-ranking_labels = ["1º", "2º", "3º", "4º", "5º", "6º", "7º", "8º", "9º", "10º"]
-
+rnk_labels = ["1º","2º","3º","4º","5º","6º","7º","8º","9º","10º"]
 display_rows = []
 for _, r in df_ops.iterrows():
     display_rows.append({
-        "Ranking":                        ranking_labels[int(r["_score"]) - 1],
+        "Ranking":                        rnk_labels[int(r["_score"]) - 1],
         "Score":                          int(r["_score"]),
         "ID":                             r["_id"],
         "Nombre":                         r["_nombre"],
         "Precio P2P":                     fmt_precio(r["_precio_p2p"], r["_divisa"]),
-        "Divisa":                         "€" if r["_divisa"] == "EUR" else "$",
+        "Divisa":                         "€" if r["_divisa"]=="EUR" else "$",
         "Meses hasta fin":                f"{r['_meses']:.1f}",
         "Rent. anualizada estimada":      fmt_pct(r["_r_hoy_ann"]),
         "Rent. total pendiente":          fmt_pct(r["_r_hoy_total"]),
@@ -403,31 +507,25 @@ for _, r in df_ops.iterrows():
         "Rent. al final":                 fmt_pct(r["_r_plusv"]),
         "Tipo dividendo":                 tip_dividendo_label(r["_tip_dividendo"]),
         "Tokens disponibles":             f"{int(r['_tokens_disp']):,}",
+        "Fuente":                         r["_fuente"],
         "Colateralizable":                "✅" if r["_colateralizable"] else "—",
     })
 
-df_display = pd.DataFrame(display_rows)
-st.dataframe(df_display, hide_index=True, use_container_width=True)
+st.dataframe(pd.DataFrame(display_rows), hide_index=True, use_container_width=True)
 
-# Notas
-st.caption("\\* Rentabilidades calculadas sobre precio P2P, proyectando la tasa recurrente real hasta el vencimiento estimado.")
-st.caption("\\*\\* La rent. al final es la ganancia patrimonial esperada en el cierre del proyecto.")
-st.caption(f"Mínimo {MIN_TOKENS_P2P} tokens disponibles para entrar en el análisis · Categoría: {categoria}")
+st.caption(f"\\* Rentabilidades calculadas sobre precio P2P, proyectando la tasa real acumulada hasta vencimiento · Categoría: {categoria}")
+st.caption(f"\\*\\* La rent. al final es la ganancia patrimonial esperada al cierre · Mínimo {MIN_TOKENS} tokens disponibles para entrar en el análisis")
 
-# ── Exportar PDF ─────────────────────────────────────────────────────────────
+# ── Exportar PDF ──────────────────────────────────────────────────────────────
 st.markdown("---")
 st.subheader("📄 Exportar informe")
-st.caption("Genera un PDF listo para compartir con el inversor.")
-
 if st.button("📥 Generar PDF", type="primary"):
     with st.spinner("Generando PDF…"):
-        pdf_bytes = generar_pdf(df_ops, categoria, int(top_n))
-    fecha_str = date.today().strftime("%Y%m%d")
-    nombre_archivo = f"Reental_Oportunidades_P2P_{fecha_str}.pdf"
+        pdf_bytes = generar_pdf(df_ops, categoria)
     st.download_button(
         label="⬇️ Descargar PDF",
         data=pdf_bytes,
-        file_name=nombre_archivo,
+        file_name=f"Reental_Oportunidades_P2P_{date.today().strftime('%Y%m%d')}.pdf",
         mime="application/pdf",
         type="primary",
     )
