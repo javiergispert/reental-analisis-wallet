@@ -74,7 +74,22 @@ def _get_gsheet_client():
     return gspread.authorize(creds)
 
 @st.cache_data(show_spinner=False, ttl=CACHE_TTL)
-def _read_gsheet_tab(tab: str) -> list:
+def _read_gsheet_tab_cached(tab: str) -> list:
+    try:
+        gc = _get_gsheet_client()
+        if not gc:
+            return []
+        ws  = gc.open_by_key(SPREADSHEET_ID).worksheet(tab)
+        val = ws.acell("A1").value
+        if not val:
+            return []
+        parsed = json.loads(val)
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
+
+def _read_gsheet_tab_fresh(tab: str) -> list:
+    """Sin caché — para datos que cambian frecuentemente (reservas, ofertas)."""
     try:
         gc = _get_gsheet_client()
         if not gc:
@@ -89,10 +104,10 @@ def _read_gsheet_tab(tab: str) -> list:
         return []
 
 def load_reservas_otc() -> list:
-    return _read_gsheet_tab(TAB_RESERVAS)
+    return _read_gsheet_tab_fresh(TAB_RESERVAS)
 
 def load_ofertas_otc() -> list:
-    return _read_gsheet_tab(TAB_OFERTAS)
+    return _read_gsheet_tab_fresh(TAB_OFERTAS)
 
 # ── Saldos wallet OTC desde Etherscan ─────────────────────────────────────────
 
