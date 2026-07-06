@@ -42,10 +42,12 @@ TAB_OFERTAS    = "Ofertas"
 CACHE_TTL      = 3600
 MIN_TOKENS     = 20   # mínimo tokens disponibles para entrar en el ranking
 
-NARANJA   = colors.HexColor("#F15A2B")
-VERDE     = colors.HexColor("#1D8348")
-GRIS_OSC  = colors.HexColor("#2C3E50")
-GRIS_CLAR = colors.HexColor("#F2F3F4")
+# Paleta corporativa Reental
+DORADO    = colors.HexColor("#F5A623")   # acento primario
+NAVY_OSC  = colors.HexColor("#0D1B2E")  # fondo principal / primera columna
+NAVY_MED  = colors.HexColor("#112240")  # fondo secundario / cabecera datos
+AZUL_MED  = colors.HexColor("#3B82F6")  # acento secundario
+GRIS_CLAR = colors.HexColor("#F2F4F8")  # filas alternas
 BLANCO    = colors.white
 
 CATEGORIAS = {
@@ -362,28 +364,33 @@ def generar_pdf(df: pd.DataFrame, categoria: str) -> bytes:
                             leftMargin=1.5*cm, rightMargin=1.5*cm,
                             topMargin=1.5*cm, bottomMargin=1.5*cm)
 
-    cell_s  = ParagraphStyle("c",  fontSize=7.5, leading=10, alignment=TA_CENTER, fontName="Helvetica")
-    cell_b  = ParagraphStyle("cb", fontSize=7.5, leading=10, alignment=TA_CENTER, fontName="Helvetica-Bold")
-    head_s  = ParagraphStyle("h",  fontSize=8,   leading=10, alignment=TA_CENTER, fontName="Helvetica-Bold", textColor=BLANCO)
-    nota_s  = ParagraphStyle("n",  fontSize=7,   leading=9.5, alignment=TA_LEFT,  fontName="Helvetica", textColor=GRIS_OSC)
-    tit_s   = ParagraphStyle("t",  fontSize=18,  leading=22, alignment=TA_LEFT,   fontName="Helvetica-Bold", textColor=GRIS_OSC)
-    fecha_s = ParagraphStyle("f",  fontSize=9,   leading=12, alignment=TA_RIGHT,  fontName="Helvetica", textColor=GRIS_OSC)
-    sub_s   = ParagraphStyle("s",  fontSize=12,  leading=16, alignment=TA_CENTER, fontName="Helvetica-Bold", textColor=BLANCO)
+    cell_s    = ParagraphStyle("c",   fontSize=7.5, leading=10, alignment=TA_CENTER, fontName="Helvetica",      textColor=NAVY_OSC)
+    cell_b    = ParagraphStyle("cb",  fontSize=7.5, leading=10, alignment=TA_CENTER, fontName="Helvetica-Bold",  textColor=NAVY_OSC)
+    cell_lbl  = ParagraphStyle("cl",  fontSize=7.5, leading=10, alignment=TA_LEFT,   fontName="Helvetica-Bold",  textColor=BLANCO)   # primera columna: texto blanco
+    head_val  = ParagraphStyle("hv",  fontSize=8,   leading=10, alignment=TA_CENTER, fontName="Helvetica-Bold",  textColor=NAVY_OSC) # cabecera rankings: texto oscuro sobre dorado
+    nota_s    = ParagraphStyle("n",   fontSize=7,   leading=9.5, alignment=TA_LEFT,  fontName="Helvetica",       textColor=NAVY_OSC)
+    tit_s     = ParagraphStyle("t",   fontSize=18,  leading=22, alignment=TA_LEFT,   fontName="Helvetica-Bold",  textColor=NAVY_OSC)
+    fecha_s   = ParagraphStyle("f",   fontSize=9,   leading=12, alignment=TA_RIGHT,  fontName="Helvetica",       textColor=NAVY_OSC)
+    sub_s     = ParagraphStyle("s",   fontSize=12,  leading=16, alignment=TA_CENTER, fontName="Helvetica-Bold",  textColor=BLANCO)
 
     story = []
 
     # Cabecera
     ht = Table([[
-        Paragraph("<font color='#F15A2B'>Reental</font> <b>Wealth</b> · Reporte Oportunidades P2P", tit_s),
+        Paragraph(f"<font color='#F5A623'><b>Reental</b></font> Wealth · Reporte Oportunidades P2P", tit_s),
         Paragraph(f"Fecha: {date.today().strftime('%d/%m/%Y')}", fecha_s),
     ]], colWidths=["70%", "30%"])
     ht.setStyle(TableStyle([("VALIGN", (0,0),(-1,-1),"MIDDLE")]))
-    story += [ht, Spacer(1, 0.3*cm), HRFlowable(width="100%", thickness=2, color=NARANJA), Spacer(1, 0.4*cm)]
+    story += [ht, Spacer(1, 0.3*cm), HRFlowable(width="100%", thickness=3, color=DORADO), Spacer(1, 0.4*cm)]
 
-    # Subtítulo
+    # Subtítulo — fondo navy oscuro, texto blanco
     st_t = Table([[Paragraph(f"Top {len(df)} mejores oportunidades P2P · Categoría {categoria}", sub_s)]],
                  colWidths=["100%"])
-    st_t.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,-1),VERDE),("TOPPADDING",(0,0),(-1,-1),7),("BOTTOMPADDING",(0,0),(-1,-1),7)]))
+    st_t.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0),(-1,-1), NAVY_OSC),
+        ("TOPPADDING",    (0,0),(-1,-1), 8),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 8),
+    ]))
     story += [st_t, Spacer(1, 0.5*cm)]
 
     # Tabla de datos
@@ -411,26 +418,31 @@ def generar_pdf(df: pd.DataFrame, categoria: str) -> bytes:
         ("¿Es Colateralizable?",          ["Colateralizable" if r["_colateralizable"] else "No"        for _,r in df.iterrows()]),
     ]
 
-    table_data = [[Paragraph("", cell_b)] + [Paragraph(rnk[i], cell_b) for i in range(n)]]
+    # Fila de cabecera (rankings): fondo dorado, texto navy oscuro
+    table_data = [[Paragraph("", cell_lbl)] + [Paragraph(rnk[i], head_val) for i in range(n)]]
     for label, values in field_rows:
-        table_data.append([Paragraph(label, cell_b)] + [Paragraph(v, cell_s) for v in values])
+        # Primera columna (etiqueta): fondo navy, texto blanco
+        # Resto de columnas: texto oscuro sobre fondo claro/blanco alterno
+        table_data.append([Paragraph(label, cell_lbl)] + [Paragraph(v, cell_s) for v in values])
 
     col_widths = [lw] + [dw]*n
     tabla = Table(table_data, colWidths=col_widths)
     ts = [
-        ("GRID",          (0,0),(-1,-1), 0.4, colors.HexColor("#D5D8DC")),
-        ("BACKGROUND",    (0,0),(-1,0),  VERDE),
-        ("TEXTCOLOR",     (0,0),(-1,0),  BLANCO),
-        ("BACKGROUND",    (0,0),(0,-1),  GRIS_OSC),
-        ("TEXTCOLOR",     (0,0),(0,-1),  BLANCO),
+        ("GRID",          (0,0),(-1,-1), 0.4, colors.HexColor("#CBD5E1")),
+        # Cabecera de rankings: dorado
+        ("BACKGROUND",    (0,0),(-1,0),  DORADO),
+        # Primera columna entera: navy oscuro con texto blanco
+        ("BACKGROUND",    (0,0),(0,-1),  NAVY_OSC),
         ("TOPPADDING",    (0,0),(-1,-1), 5),
         ("BOTTOMPADDING", (0,0),(-1,-1), 5),
-        ("LEFTPADDING",   (0,0),(-1,-1), 4),
-        ("RIGHTPADDING",  (0,0),(-1,-1), 4),
+        ("LEFTPADDING",   (0,0),(-1,-1), 5),
+        ("RIGHTPADDING",  (0,0),(-1,-1), 5),
         ("VALIGN",        (0,0),(-1,-1), "MIDDLE"),
     ]
+    # Filas alternas en columnas de datos (no afecta la primera columna)
     for i in range(1, len(table_data)):
-        ts.append(("BACKGROUND", (1,i),(-1,i), GRIS_CLAR if i%2==0 else BLANCO))
+        bg = GRIS_CLAR if i % 2 == 0 else BLANCO
+        ts.append(("BACKGROUND", (1,i),(-1,i), bg))
     tabla.setStyle(TableStyle(ts))
     story += [tabla, Spacer(1, 0.5*cm)]
 
