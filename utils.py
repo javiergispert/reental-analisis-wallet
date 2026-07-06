@@ -187,6 +187,9 @@ def load_master_projects() -> pd.DataFrame:
         else:
             fuente = "otro"
 
+        colateralizable_raw = strip_accents(str(row.iloc[21]).strip()).lower()
+        colateralizable = "colateralizable" in colateralizable_raw
+
         projects.append({
             "id":               str(row.iloc[0]).strip(),
             "nombre":           strip_accents(str(row.iloc[1]).strip()),
@@ -198,6 +201,24 @@ def load_master_projects() -> pd.DataFrame:
             "tipo_renta":       tipo_renta,
             "precio_emision":   precio_emision,
             "n_tokens_total":   parse_float_val(str(row.iloc[9])),
+            "colateralizable":  colateralizable,
+            # Rentabilidades por categoría (Reentel / RP / SR)
+            # Pendiente desde hoy hasta fin (cols 45-50)
+            "r_hoy_total_reentel":  parse_pct(row.iloc[45]),
+            "r_hoy_ann_reentel":    parse_pct(row.iloc[46]),
+            "r_hoy_total_rp":       parse_pct(row.iloc[47]),
+            "r_hoy_ann_rp":         parse_pct(row.iloc[48]),
+            "r_hoy_total_sr":       parse_pct(row.iloc[49]),
+            "r_hoy_ann_sr":         parse_pct(row.iloc[50]),
+            # Rentabilidad recurrente anualizada real por categoría
+            "r_rec_ann_reentel":    parse_pct(row.iloc[53]),
+            "r_rec_ann_rp":         parse_pct(row.iloc[83]),
+            "r_rec_ann_sr":         parse_pct(row.iloc[87]),
+            # Plusvalía estimada por categoría
+            "r_plusv_reentel":      parse_pct(row.iloc[24]),
+            "r_plusv_rp":           parse_pct(row.iloc[28]),
+            "r_plusv_sr":           parse_pct(row.iloc[32]),
+            # Campos legacy (usados en otras páginas)
             "r_rec_anualizada": r_rec,
             "r_plusvalia":      r_plusv,
             "r_total_anualizada": r_total_ann,
