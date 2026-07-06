@@ -294,14 +294,31 @@ def calcular_ranking(master_df: pd.DataFrame, disponibles: list,
         if r_hoy_ann_raw is None:
             continue
 
-        # Ajuste por precio P2P vs emisión (ambos en divisa nativa del token)
+        # Ajuste por precio P2P vs precio de emisión.
+        # El master calcula % sobre precio_emision. Si el inversor paga
+        # un precio distinto, hay que recalcular correctamente:
+        #
+        # - Recurrentes: los dividendos en $ no cambian, solo cambia la base.
+        #     r_rec_adj = r_rec_raw * (emision / p2p)
+        #
+        # - Plusvalía: valor_final = emision * (1 + r_plusv_raw)
+        #     r_plusv_adj = valor_final/p2p - 1 = adj*(1+r_plusv_raw) - 1
+        #
+        # - Total pendiente: mismo principio que plusvalía.
+        #     r_total_adj = adj*(1+r_hoy_total_raw) - 1
+        #
+        # - Alquiler pendiente: se deriva del total para garantizar consistencia.
+        #     r_alquiler_pend = r_total_adj - r_plusv_adj
+        #
+        # - Anualizada: se recalcula desde el total ajustado, no se escala.
+        #     r_ann = (1+r_total_adj)^(12/meses) - 1
         adj = precio_emision / precio_p2p
 
-        r_hoy_ann        = (r_hoy_ann_raw   or 0) * adj
-        r_hoy_total      = (r_hoy_total_raw or 0) * adj
-        r_rec_ann        = (r_rec_ann_raw   or 0) * adj
-        r_plusv          = (r_plusv_raw     or 0) * adj
-        r_alquiler_pend  = r_rec_ann * (meses / 12)
+        r_rec_ann       = (r_rec_ann_raw or 0) * adj
+        r_plusv         = adj * (1 + (r_plusv_raw     or 0)) - 1
+        r_hoy_total     = adj * (1 + (r_hoy_total_raw or 0)) - 1
+        r_alquiler_pend = r_hoy_total - r_plusv
+        r_hoy_ann       = (1 + r_hoy_total) ** (12 / meses) - 1
 
         rows.append({
             "_id":              m["id"],
