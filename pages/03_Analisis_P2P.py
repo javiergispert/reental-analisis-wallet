@@ -190,7 +190,6 @@ def construir_disponibilidad(master_df: pd.DataFrame) -> list:
     disponibles = []
 
     # Wallet OTC
-    from utils import load_precios_otc  # type: ignore  # noqa
     try:
         precios_otc = _load_precios_otc_cached()
     except Exception:
