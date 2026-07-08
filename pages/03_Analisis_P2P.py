@@ -602,25 +602,44 @@ with col_wa:
 
         mensaje_wa = "\n".join(lineas)
 
-        # Copiar al portapapeles via execCommand (compatible con iframes de Streamlit)
-        escaped = mensaje_wa.replace("\\", "\\\\").replace("`", "\\`")
-        st.components.v1.html(f"""
-            <script>
-            (function() {{
+        st.session_state["mensaje_wa"] = mensaje_wa
+
+if st.session_state.get("mensaje_wa"):
+    # El navegador solo permite escribir al portapapeles desde un gesto del
+    # usuario DENTRO del iframe, así que el botón de copiar vive en el componente.
+    import json as _json
+    msg_js = _json.dumps(st.session_state["mensaje_wa"])
+    st.components.v1.html(f"""
+        <button id="copiar-wa" style="
+            width:100%; padding:12px 20px; font-size:16px; font-weight:700;
+            font-family:'Source Sans Pro',sans-serif; cursor:pointer;
+            background:#25D366; color:#fff; border:none; border-radius:8px;">
+            📋 Copiar al portapapeles
+        </button>
+        <div id="copiado-ok" style="display:none; margin-top:8px; text-align:center;
+            font-family:'Source Sans Pro',sans-serif; color:#25D366; font-weight:600;">
+            ✅ ¡Copiado! Pégalo directamente en WhatsApp.
+        </div>
+        <script>
+        const MSG = {msg_js};
+        document.getElementById('copiar-wa').addEventListener('click', function() {{
+            function ok() {{
+                document.getElementById('copiado-ok').style.display = 'block';
+            }}
+            if (navigator.clipboard && navigator.clipboard.writeText) {{
+                navigator.clipboard.writeText(MSG).then(ok).catch(function() {{ fallback(); }});
+            }} else {{
+                fallback();
+            }}
+            function fallback() {{
                 var ta = document.createElement('textarea');
-                ta.value = `{escaped}`;
-                ta.style.position = 'fixed';
-                ta.style.left = '-9999px';
-                ta.style.top = '0';
-                ta.setAttribute('readonly', '');
+                ta.value = MSG;
+                ta.style.position = 'fixed'; ta.style.left = '-9999px';
                 document.body.appendChild(ta);
-                ta.focus();
-                ta.select();
-                try {{
-                    document.execCommand('copy');
-                }} catch(e) {{}}
+                ta.focus(); ta.select();
+                try {{ document.execCommand('copy'); ok(); }} catch(e) {{}}
                 document.body.removeChild(ta);
-            }})();
-            </script>
-        """, height=0)
-        st.success("✅ ¡Mensaje copiado al portapapeles! Pégalo directamente en WhatsApp.")
+            }}
+        }});
+        </script>
+    """, height=100)
