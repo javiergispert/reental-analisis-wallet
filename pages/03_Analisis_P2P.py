@@ -98,44 +98,69 @@ def load_ofertas_otc() -> list:
 # ── Saldos wallet OTC desde Etherscan ─────────────────────────────────────────
 
 @st.cache_data(show_spinner=False, ttl=CACHE_TTL)
-def fetch_otc_disponibles(wallet: str, api_key: str,
-                           project_by_addr_items: tuple,
-                           project_by_id_items: tuple) -> dict:
+def fetch_otc_raw_balances(wallet: str, api_key: str) -> dict:
     """
-    Devuelve {contract_addr: saldo_bruto} para tokens Reental en la wallet OTC.
-    Los aTokens Aave se consolidan sobre su subyacente.
+    Devuelve {contract_addr_lower: saldo_bruto} para TODOS los tokens ERC-20
+    de la wallet OTC. Solo parámetros simples para que el hash de caché funcione.
+    La resolución de aTokens y filtrado por proyecto se hace en construir_disponibilidad.
     """
-    project_by_addr = dict(project_by_addr_items)
-    project_by_id   = dict(project_by_id_items)
-    known_addresses = set(project_by_addr.keys())
-    nombre_to_addr  = {row["nombre"].lower(): addr for addr, row in project_by_addr.items()}
-
     params = {
         "chainid": POLYGON_CHAIN, "module": "account", "action": "tokentx",
         "address": wallet, "startblock": 0, "endblock": 99999999,
         "sort": "asc", "apikey": api_key,
     }
     try:
-        resp = requests.get(ETHERSCAN_BASE, params=params, timeout=30)
+        resp   = requests.get(ETHERSCAN_BASE, params=params, timeout=30)
         result = resp.json().get("result")
-        txs = result if isinstance(result, list) else []
+        txs    = result if isinstance(result, list) else []
     except Exception:
         return {}
 
-    raw_balances = {}
-    atoken_map   = {}
-
+    raw = {}
     for tx in txs:
         contract  = tx["contractAddress"].lower()
-        sym       = tx.get("tokenSymbol", "")
-        name      = tx.get("tokenName", "")
         dec       = int(tx.get("tokenDecimal") or 18)
         value     = int(tx["value"]) / (10 ** dec)
         to_addr   = tx["to"].lower()
         from_addr = tx["from"].lower()
+        sym       = tx.get("tokenSymbol", "")
+        name      = tx.get("tokenName", "")
+        if to_addr == wallet and from_addr != wallet:
+            entry = raw.setdefault(contract, {"saldo": 0.0, "sym": sym, "name": name})
+            entry["saldo"] += value
+        elif from_addr == wallet and to_addr != wallet:
+            entry = raw.setdefault(contract, {"saldo": 0.0, "sym": sym, "name": name})
+            entry["saldo"] -= value
+    return {k: v for k, v in raw.items() if v["saldo"] >= 0.001}
 
+
+def construir_disponibilidad(master_df: pd.DataFrame) -> list:
+    """
+    Devuelve lista de dicts con los tokens disponibles (OTC Reental + terceros).
+    Cada dict: {project_id, token_address, precio_p2p, tokens_disponibles, fuente}
+    """
+    # Índices del master
+    project_by_addr = {}
+    project_by_id   = {}
+    for _, row in master_df.iterrows():
+        if row.get("token_address"):
+            project_by_addr[row["token_address"]] = row.to_dict()
+        project_by_id[row["id"].lower()] = row.to_dict()
+
+    known_addresses = set(project_by_addr.keys())
+    nombre_to_addr  = {row["nombre"].lower(): addr for addr, row in project_by_addr.items()}
+
+    # 1. Saldos brutos de todos los tokens en la wallet OTC
+    raw_balances = fetch_otc_raw_balances(OTC_WALLET, API_KEY)
+
+    # Resolver aTokens Aave → token subyacente y filtrar por tokens Reental conocidos
+    atoken_map = {}
+    brutos = {}
+    for contract, data in raw_balances.items():
+        sym  = data["sym"]
+        name = data["name"]
         is_atoken = sym.startswith("aMatReental-") or name.startswith("Aave Matic Reental-")
-        if is_atoken and contract not in atoken_map:
+        if is_atoken:
             suffix = (name[len("Aave Matic Reental-"):] if name.startswith("Aave Matic Reental-")
                       else sym[len("aMatReental-"):]).strip().lower()
             underlying = project_by_id.get(suffix, {}).get("token_address")
@@ -150,34 +175,7 @@ def fetch_otc_disponibles(wallet: str, api_key: str,
         effective = atoken_map.get(contract, contract if contract in known_addresses else None)
         if effective is None:
             continue
-
-        if to_addr == wallet and from_addr != wallet:
-            raw_balances[effective] = raw_balances.get(effective, 0.0) + value
-        elif from_addr == wallet and to_addr != wallet:
-            raw_balances[effective] = raw_balances.get(effective, 0.0) - value
-
-    return {addr: round(saldo, 6) for addr, saldo in raw_balances.items() if saldo >= 0.001}
-
-
-def construir_disponibilidad(master_df: pd.DataFrame) -> list:
-    """
-    Devuelve lista de dicts con los tokens disponibles (OTC Reental + terceros).
-    Cada dict: {project_id, nombre, divisa, precio_p2p, tokens_disponibles, fuente}
-    """
-    # Índices del master
-    project_by_addr = {}
-    project_by_id   = {}
-    for _, row in master_df.iterrows():
-        if row.get("token_address"):
-            project_by_addr[row["token_address"]] = row.to_dict()
-        project_by_id[row["id"].lower()] = row.to_dict()
-
-    # 1. Saldos brutos wallet OTC
-    brutos = fetch_otc_disponibles(
-        OTC_WALLET, API_KEY,
-        tuple(project_by_addr.items()),
-        tuple(project_by_id.items()),
-    )
+        brutos[effective] = brutos.get(effective, 0.0) + data["saldo"]
 
     # 2. Restar reservas activas
     reservas = load_reservas_otc()
