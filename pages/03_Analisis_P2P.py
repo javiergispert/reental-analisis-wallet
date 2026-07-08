@@ -556,6 +556,25 @@ st.caption(f"\\*\\* La rent. al final es la ganancia patrimonial esperada al cie
 st.markdown("---")
 st.subheader("📤 Exportar informe")
 
+st.markdown("""
+    <style>
+    .st-key-btn_crear_wa button {
+        background-color: #25D366 !important;
+        color: #ffffff !important;
+        border: none !important;
+        font-weight: 700 !important;
+        border-radius: 8px !important;
+    }
+    .st-key-btn_crear_wa button:hover {
+        background-color: #1EBE5D !important;
+        color: #ffffff !important;
+    }
+    .st-key-btn_crear_wa button:active {
+        background-color: #128C7E !important;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
 col_pdf, col_wa = st.columns([1, 1])
 
 with col_pdf:
@@ -571,24 +590,6 @@ with col_pdf:
         )
 
 with col_wa:
-    st.markdown("""
-        <style>
-        .st-key-btn_crear_wa button {
-            background-color: #25D366 !important;
-            color: #ffffff !important;
-            border: none !important;
-            font-weight: 700 !important;
-            border-radius: 8px !important;
-        }
-        .st-key-btn_crear_wa button:hover {
-            background-color: #1EBE5D !important;
-            color: #ffffff !important;
-        }
-        .st-key-btn_crear_wa button:active {
-            background-color: #128C7E !important;
-        }
-        </style>
-    """, unsafe_allow_html=True)
     if st.button("💬 Crear mensaje para enviar por WhatsApp", key="btn_crear_wa", use_container_width=True):
         rnk_emoji = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
         lineas = []
@@ -620,14 +621,12 @@ with col_wa:
 
         mensaje_wa = "\n".join(lineas)
 
-        st.session_state["mensaje_wa"] = mensaje_wa
-
-if st.session_state.get("mensaje_wa"):
-    # El navegador solo permite escribir al portapapeles desde un gesto del
-    # usuario DENTRO del iframe, así que el botón de copiar vive en el componente.
-    import json as _json
-    msg_js = _json.dumps(st.session_state["mensaje_wa"])
-    st.components.v1.html(f"""
+        # El navegador solo permite escribir al portapapeles desde un gesto del
+        # usuario DENTRO del iframe, así que el botón de copiar vive en el componente.
+        # Sin session_state: el botón desaparece con cualquier otra interacción.
+        import json as _json
+        msg_js = _json.dumps(mensaje_wa)
+        st.components.v1.html(f"""
         <button id="copiar-wa" style="
             width:100%; padding:12px 20px; font-size:16px; font-weight:700;
             font-family:'Source Sans Pro',sans-serif; cursor:pointer;
