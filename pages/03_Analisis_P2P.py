@@ -571,7 +571,25 @@ with col_pdf:
         )
 
 with col_wa:
-    if st.button("💬 Copiar mensaje WhatsApp", type="secondary", use_container_width=True):
+    st.markdown("""
+        <style>
+        .st-key-btn_crear_wa button {
+            background-color: #25D366 !important;
+            color: #ffffff !important;
+            border: none !important;
+            font-weight: 700 !important;
+            border-radius: 8px !important;
+        }
+        .st-key-btn_crear_wa button:hover {
+            background-color: #1EBE5D !important;
+            color: #ffffff !important;
+        }
+        .st-key-btn_crear_wa button:active {
+            background-color: #128C7E !important;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+    if st.button("💬 Crear mensaje para enviar por WhatsApp", key="btn_crear_wa", use_container_width=True):
         rnk_emoji = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
         lineas = []
         lineas.append(f"🏠 *Reental Wealth — Top {len(df_ops)} Oportunidades P2P*")
