@@ -571,47 +571,44 @@ with col_pdf:
         )
 
 with col_wa:
-    if st.button("💬 Generar mensaje WhatsApp", type="secondary", use_container_width=True):
-        st.session_state["show_whatsapp"] = True
+    if st.button("💬 Copiar mensaje WhatsApp", type="secondary", use_container_width=True):
+        rnk_emoji = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+        lineas = []
+        lineas.append(f"🏠 *Reental Wealth — Top {len(df_ops)} Oportunidades P2P*")
+        lineas.append(f"📅 {date.today().strftime('%d/%m/%Y')}  |  Categoría: *{categoria}*")
+        lineas.append("─" * 30)
 
-if st.session_state.get("show_whatsapp"):
-    rnk_emoji = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-    lineas = []
-    lineas.append(f"🏠 *Reental Wealth — Top {len(df_ops)} Oportunidades P2P*")
-    lineas.append(f"📅 {date.today().strftime('%d/%m/%Y')}  |  Categoría: *{categoria}*")
-    lineas.append("─" * 30)
+        for _, r in df_ops.iterrows():
+            idx        = int(r["_score"]) - 1
+            emoji      = rnk_emoji[idx] if idx < len(rnk_emoji) else f"{idx+1}."
+            divisa_sym = "€" if r["_divisa"] == "EUR" else "$"
+            lineas.append(f"\n{emoji} *{r['_nombre']}* ({r['_id']})")
+            lineas.append(f"💰 Precio P2P: *{r['_precio_p2p']:,.0f} {divisa_sym}/token*")
+            lineas.append(f"⏳ Tiempo hasta fin: *{r['_meses']:.0f} meses*")
+            lineas.append(f"📈 Rent. anualizada estimada: *{fmt_pct(r['_r_hoy_ann'])}*")
+            lineas.append(f"📊 Rent. total pendiente: *{fmt_pct(r['_r_hoy_total'])}*")
+            if r["_r_alquiler_pend"] and r["_r_alquiler_pend"] > 0.001:
+                lineas.append(f"   🏘️ Por alquiler: {fmt_pct(r['_r_alquiler_pend'])}")
+            if r["_r_plusv"] and r["_r_plusv"] > 0.001:
+                lineas.append(f"   🔚 Plusvalía al cierre: {fmt_pct(r['_r_plusv'])}")
+            lineas.append(f"🪙 Tokens disponibles: *{int(r['_tokens_disp']):,}*")
+            lineas.append(f"💳 {tip_dividendo_label(r['_tip_dividendo'])}")
+            if r["_colateralizable"]:
+                lineas.append("🔒 Colateralizable")
 
-    for _, r in df_ops.iterrows():
-        idx   = int(r["_score"]) - 1
-        emoji = rnk_emoji[idx] if idx < len(rnk_emoji) else f"{idx+1}."
-        divisa_sym = "€" if r["_divisa"] == "EUR" else "$"
-        meses_txt  = f"{r['_meses']:.0f} meses"
-        colat_txt  = "✅ Colateralizable" if r["_colateralizable"] else ""
+        lineas.append("\n" + "─" * 30)
+        lineas.append("_⚠️ No constituye consejo de inversión. Rentabilidades son estimaciones._")
+        lineas.append(f"_Rentabilidades para categoría {categoria}._")
 
-        lineas.append(f"\n{emoji} *{r['_nombre']}* ({r['_id']})")
-        lineas.append(f"💰 Precio P2P: *{r['_precio_p2p']:,.0f} {divisa_sym}/token*")
-        lineas.append(f"⏳ Tiempo estimado hasta fin: *{meses_txt}*")
-        lineas.append(f"📈 Rent. anualizada estimada: *{fmt_pct(r['_r_hoy_ann'])}*")
-        lineas.append(f"📊 Rent. total pendiente: *{fmt_pct(r['_r_hoy_total'])}*")
-        if r["_r_alquiler_pend"] and r["_r_alquiler_pend"] > 0.001:
-            lineas.append(f"   🏘️ Por alquiler: {fmt_pct(r['_r_alquiler_pend'])}")
-        if r["_r_plusv"] and r["_r_plusv"] > 0.001:
-            lineas.append(f"   🔚 Plusvalía al cierre: {fmt_pct(r['_r_plusv'])}")
-        lineas.append(f"🪙 Tokens disponibles: *{int(r['_tokens_disp']):,}*")
-        lineas.append(f"💳 Tipo de renta: {tip_dividendo_label(r['_tip_dividendo'])}")
-        if colat_txt:
-            lineas.append(f"🔒 {colat_txt}")
+        mensaje_wa = "\n".join(lineas)
 
-    lineas.append("\n" + "─" * 30)
-    lineas.append("_⚠️ Este mensaje no constituye consejo de inversión. Rentabilidades son estimaciones._")
-    lineas.append("_Todas las rentabilidades contemplan categoría " + categoria + "._")
-
-    mensaje_wa = "\n".join(lineas)
-
-    st.text_area(
-        "Copia el texto y pégalo en WhatsApp:",
-        value=mensaje_wa,
-        height=420,
-        label_visibility="visible",
-    )
-    st.caption("En WhatsApp: *texto* = negrita · _texto_ = cursiva")
+        # Copiar al portapapeles via JavaScript
+        escaped = mensaje_wa.replace("\\", "\\\\").replace("`", "\\`")
+        st.components.v1.html(f"""
+            <script>
+            navigator.clipboard.writeText(`{escaped}`).then(function() {{
+                console.log('Copiado al portapapeles');
+            }});
+            </script>
+        """, height=0)
+        st.success("✅ ¡Mensaje copiado al portapapeles! Pégalo directamente en WhatsApp.")
