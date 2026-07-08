@@ -602,13 +602,25 @@ with col_wa:
 
         mensaje_wa = "\n".join(lineas)
 
-        # Copiar al portapapeles via JavaScript
+        # Copiar al portapapeles via execCommand (compatible con iframes de Streamlit)
         escaped = mensaje_wa.replace("\\", "\\\\").replace("`", "\\`")
         st.components.v1.html(f"""
             <script>
-            navigator.clipboard.writeText(`{escaped}`).then(function() {{
-                console.log('Copiado al portapapeles');
-            }});
+            (function() {{
+                var ta = document.createElement('textarea');
+                ta.value = `{escaped}`;
+                ta.style.position = 'fixed';
+                ta.style.left = '-9999px';
+                ta.style.top = '0';
+                ta.setAttribute('readonly', '');
+                document.body.appendChild(ta);
+                ta.focus();
+                ta.select();
+                try {{
+                    document.execCommand('copy');
+                }} catch(e) {{}}
+                document.body.removeChild(ta);
+            }})();
             </script>
         """, height=0)
         st.success("✅ ¡Mensaje copiado al portapapeles! Pégalo directamente en WhatsApp.")
