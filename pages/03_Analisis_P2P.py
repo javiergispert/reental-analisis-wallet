@@ -552,16 +552,66 @@ st.dataframe(pd.DataFrame(display_rows), hide_index=True, use_container_width=Tr
 st.caption(f"\\* Rentabilidades calculadas sobre precio P2P, proyectando la tasa real acumulada hasta vencimiento · Categoría: {categoria}")
 st.caption(f"\\*\\* La rent. al final es la ganancia patrimonial esperada al cierre · Mínimo {MIN_TOKENS} tokens disponibles para entrar en el análisis")
 
-# ── Exportar PDF ──────────────────────────────────────────────────────────────
+# ── Exportar ─────────────────────────────────────────────────────────────────
 st.markdown("---")
-st.subheader("📄 Exportar informe")
-if st.button("📥 Generar PDF", type="primary"):
-    with st.spinner("Generando PDF…"):
-        pdf_bytes = generar_pdf(df_ops, categoria)
-    st.download_button(
-        label="⬇️ Descargar PDF",
-        data=pdf_bytes,
-        file_name=f"Reental_Oportunidades_P2P_{date.today().strftime('%Y%m%d')}.pdf",
-        mime="application/pdf",
-        type="primary",
+st.subheader("📤 Exportar informe")
+
+col_pdf, col_wa = st.columns([1, 1])
+
+with col_pdf:
+    if st.button("📥 Generar PDF", type="primary", use_container_width=True):
+        with st.spinner("Generando PDF…"):
+            pdf_bytes = generar_pdf(df_ops, categoria)
+        st.download_button(
+            label="⬇️ Descargar PDF",
+            data=pdf_bytes,
+            file_name=f"Reental_Oportunidades_P2P_{date.today().strftime('%Y%m%d')}.pdf",
+            mime="application/pdf",
+            type="primary",
+        )
+
+with col_wa:
+    if st.button("💬 Generar mensaje WhatsApp", type="secondary", use_container_width=True):
+        st.session_state["show_whatsapp"] = True
+
+if st.session_state.get("show_whatsapp"):
+    rnk_emoji = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    lineas = []
+    lineas.append(f"🏠 *Reental Wealth — Top {len(df_ops)} Oportunidades P2P*")
+    lineas.append(f"📅 {date.today().strftime('%d/%m/%Y')}  |  Categoría: *{categoria}*")
+    lineas.append("─" * 30)
+
+    for _, r in df_ops.iterrows():
+        idx   = int(r["_score"]) - 1
+        emoji = rnk_emoji[idx] if idx < len(rnk_emoji) else f"{idx+1}."
+        divisa_sym = "€" if r["_divisa"] == "EUR" else "$"
+        meses_txt  = f"{r['_meses']:.0f} meses"
+        colat_txt  = "✅ Colateralizable" if r["_colateralizable"] else ""
+
+        lineas.append(f"\n{emoji} *{r['_nombre']}* ({r['_id']})")
+        lineas.append(f"💰 Precio P2P: *{r['_precio_p2p']:,.0f} {divisa_sym}/token*")
+        lineas.append(f"⏳ Tiempo estimado hasta fin: *{meses_txt}*")
+        lineas.append(f"📈 Rent. anualizada estimada: *{fmt_pct(r['_r_hoy_ann'])}*")
+        lineas.append(f"📊 Rent. total pendiente: *{fmt_pct(r['_r_hoy_total'])}*")
+        if r["_r_alquiler_pend"] and r["_r_alquiler_pend"] > 0.001:
+            lineas.append(f"   🏘️ Por alquiler: {fmt_pct(r['_r_alquiler_pend'])}")
+        if r["_r_plusv"] and r["_r_plusv"] > 0.001:
+            lineas.append(f"   🔚 Plusvalía al cierre: {fmt_pct(r['_r_plusv'])}")
+        lineas.append(f"🪙 Tokens disponibles: *{int(r['_tokens_disp']):,}*")
+        lineas.append(f"💳 Tipo de renta: {tip_dividendo_label(r['_tip_dividendo'])}")
+        if colat_txt:
+            lineas.append(f"🔒 {colat_txt}")
+
+    lineas.append("\n" + "─" * 30)
+    lineas.append("_⚠️ Este mensaje no constituye consejo de inversión. Rentabilidades son estimaciones._")
+    lineas.append("_Todas las rentabilidades contemplan categoría " + categoria + "._")
+
+    mensaje_wa = "\n".join(lineas)
+
+    st.text_area(
+        "Copia el texto y pégalo en WhatsApp:",
+        value=mensaje_wa,
+        height=420,
+        label_visibility="visible",
     )
+    st.caption("En WhatsApp: *texto* = negrita · _texto_ = cursiva")
