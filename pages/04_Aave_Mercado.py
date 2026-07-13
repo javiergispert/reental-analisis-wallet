@@ -279,8 +279,14 @@ def fetch_all_transfers(token_address: str) -> list:
 
 @st.cache_data(show_spinner=False, ttl=21600)
 def fetch_rate_history(reserve_address: str) -> pd.DataFrame:
-    """Histórico diario de tipos supply/borrow de una reserva, a partir de los eventos
-    ReserveDataUpdated que emite el Pool en cada operación sobre ese activo."""
+    """Media histórica acumulada (desde el despliegue hasta cada día) de los tipos
+    supply/borrow de una reserva, a partir de los eventos ReserveDataUpdated que
+    emite el Pool en cada operación sobre ese activo.
+
+    Se usa la media acumulada en vez del tipo puntual porque, al ser un tipo de
+    interés variable, refleja mejor lo que experimenta un inversor a largo plazo:
+    el tipo instantáneo es muy ruidoso (cambia en cada depósito/préstamo/repago).
+    """
     latest_block = fetch_latest_block()
     if not latest_block:
         return pd.DataFrame()
@@ -300,8 +306,12 @@ def fetch_rate_history(reserve_address: str) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows).sort_values("fecha")
-    daily = df.set_index("fecha")[["supply_apr", "borrow_apr"]].resample("1D").last().ffill().reset_index()
-    return daily
+    # Media dentro de cada día (para no sobreponderar días con mucha actividad)…
+    daily_mean = df.set_index("fecha")[["supply_apr", "borrow_apr"]].resample("1D").mean()
+    daily_mean = daily_mean.ffill()
+    # …y luego media acumulada desde el primer día hasta cada uno de ellos.
+    daily_avg_acumulada = daily_mean.expanding().mean().reset_index()
+    return daily_avg_acumulada
 
 
 def build_daily_supply_series(transfers: list, decimals: int) -> pd.DataFrame:
@@ -638,7 +648,10 @@ st.caption(
     "debt tokens; tipos (eje derecho) a partir de los eventos ReserveDataUpdated del Pool. "
     "Todo desde el despliegue del contrato. Puede tardar más la primera vez (se cachea 6h). "
     "⚠️ El capital refleja depósitos menos retiradas (principal); no incorpora el interés acumulado "
-    "día a día, por lo que queda ligeramente por debajo de las cifras del snapshot en vivo de más arriba."
+    "día a día, por lo que queda ligeramente por debajo de las cifras del snapshot en vivo de más arriba. "
+    "📐 Los tipos se muestran como media acumulada desde el despliegue hasta cada momento (no el tipo "
+    "puntual): al ser un interés variable, esta media refleja mejor lo que experimenta un inversor a "
+    "largo plazo que el tipo instantáneo, muy ruidoso al cambiar en cada depósito/préstamo/repago."
 )
 
 stable_tokens = snapshot.get("stable_tokens", {})
@@ -660,8 +673,9 @@ for sym in ("USDT", "USDC"):
 
     df_r = hist.get("rate_series")
     if df_r is not None and not df_r.empty:
+        df_r = df_r.rename(columns={"supply_apr": "supply_apr_medio", "borrow_apr": "borrow_apr_medio"})
         df_m = pd.merge(df_m, df_r, on="fecha", how="left").sort_values("fecha")
-        df_m[["supply_apr", "borrow_apr"]] = df_m[["supply_apr", "borrow_apr"]].ffill()
+        df_m[["supply_apr_medio", "borrow_apr_medio"]] = df_m[["supply_apr_medio", "borrow_apr_medio"]].ffill()
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
@@ -676,21 +690,21 @@ for sym in ("USDT", "USDC"):
         x=df_m["fecha"], y=df_m["disponible"], mode="lines", name="Disponible",
         line=dict(color="#25D366", width=2, dash="dot"),
     ))
-    if "supply_apr" in df_m.columns:
+    if "supply_apr_medio" in df_m.columns:
         fig.add_trace(go.Scatter(
-            x=df_m["fecha"], y=df_m["supply_apr"] * 100, mode="lines", name="APR Supply",
-            line=dict(color=DORADO, width=1.5, dash="dash"), yaxis="y2", opacity=0.85,
+            x=df_m["fecha"], y=df_m["supply_apr_medio"] * 100, mode="lines", name="APR Supply (media acum.)",
+            line=dict(color=DORADO, width=2, dash="dash"), yaxis="y2",
         ))
         fig.add_trace(go.Scatter(
-            x=df_m["fecha"], y=df_m["borrow_apr"] * 100, mode="lines", name="APR Borrow",
-            line=dict(color=AZUL_MED, width=1.5, dash="dash"), yaxis="y2", opacity=0.85,
+            x=df_m["fecha"], y=df_m["borrow_apr_medio"] * 100, mode="lines", name="APR Borrow (media acum.)",
+            line=dict(color=AZUL_MED, width=2, dash="dash"), yaxis="y2",
         ))
     fig.update_layout(
         title=dict(text=f"{sym} — capital aportado, prestado y disponible", y=0.97, x=0.02, xanchor="left"),
         template=TEMPLATE_PLOTLY, height=420,
         margin=dict(t=90, b=20, l=10, r=10),
         yaxis=dict(title="USD"),
-        yaxis2=dict(title="APR %", overlaying="y", side="right", showgrid=False),
+        yaxis2=dict(title="APR % (media acumulada)", overlaying="y", side="right", showgrid=False),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
     )
     st.plotly_chart(fig, use_container_width=True)
