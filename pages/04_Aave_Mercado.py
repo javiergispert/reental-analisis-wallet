@@ -14,12 +14,14 @@ holders sí se reconstruyen on-chain, escaneando eventos Transfer (mint/burn) de
 los aTokens y debt tokens de USDT/USDC desde su despliegue.
 """
 
+import io
+import json
 import os
 import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dotenv import load_dotenv
@@ -29,6 +31,14 @@ import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.units import cm
+from reportlab.platypus import (
+    HRFlowable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
+)
 
 from utils import load_master_projects
 
@@ -49,7 +59,8 @@ SEL_GET_RESERVES_LIST = "0xd1946dbc"   # getReservesList()
 SEL_GET_RESERVE_DATA  = "0x35ea6a75"   # getReserveData(address)
 SEL_TOTAL_SUPPLY      = "0x18160ddd"   # totalSupply()
 
-TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+TRANSFER_TOPIC              = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+RESERVE_DATA_UPDATED_TOPIC  = "0x804c9b842b2748a22bb64b345453a3de7ca54a6ca45ce00d415894979e22897a"
 ZERO_ADDR      = "0x0000000000000000000000000000000000000000"
 
 RAY = 10 ** 27
@@ -68,6 +79,12 @@ NAVY_OSC = "#0D1B2E"
 AZUL_MED = "#3B82F6"
 
 TEMPLATE_PLOTLY = "plotly_dark"
+
+# Colores reportlab (PDF) — mismos valores, formato HexColor
+PDF_DORADO    = colors.HexColor(DORADO)
+PDF_NAVY_OSC  = colors.HexColor(NAVY_OSC)
+PDF_GRIS_CLAR = colors.HexColor("#F2F4F8")
+PDF_BLANCO    = colors.white
 
 st.title("🏦 Mercado RNT Lend (Aave) — Reental")
 st.caption(
@@ -158,16 +175,21 @@ def fetch_total_supply(token_address: str, decimals: int = 18) -> float:
 # Etherscan limita getLogs a 10.000 resultados por consulta (page × offset).
 # Para tokens con más eventos, se parte el rango de bloques recursivamente.
 
-def _get_logs_page(address: str, from_block: int, to_block, page: int, retries: int = 6) -> list:
+def _get_logs_page(address: str, topic0: str, from_block: int, to_block, page: int,
+                    topic1: str = None, retries: int = 6) -> list:
+    params = {
+        "chainid": POLYGON_CHAIN_ID, "module": "logs", "action": "getLogs",
+        "address": address, "topic0": topic0,
+        "fromBlock": from_block, "toBlock": to_block,
+        "page": page, "offset": 1000, "apikey": API_KEY,
+    }
+    if topic1:
+        params["topic1"] = topic1
+        params["topic0_1_opr"] = "and"
     for attempt in range(retries):
         _throttle()
         try:
-            r = requests.get(ETHERSCAN_BASE, params={
-                "chainid": POLYGON_CHAIN_ID, "module": "logs", "action": "getLogs",
-                "address": address, "topic0": TRANSFER_TOPIC,
-                "fromBlock": from_block, "toBlock": to_block,
-                "page": page, "offset": 1000, "apikey": API_KEY,
-            }, timeout=25)
+            r = requests.get(ETHERSCAN_BASE, params=params, timeout=25)
             payload = r.json()
             if "too large" in str(payload.get("message", "")).lower():
                 return None  # señal: hay que partir el rango de bloques
@@ -182,14 +204,15 @@ def _get_logs_page(address: str, from_block: int, to_block, page: int, retries: 
     return []
 
 
-def _fetch_logs_range(address: str, from_block: int, to_block: int, depth: int = 0) -> list:
-    """Descarga todos los Transfer logs de `address` en [from_block, to_block],
+def _fetch_logs_range(address: str, topic0: str, from_block: int, to_block: int,
+                       topic1: str = None, depth: int = 0) -> list:
+    """Descarga todos los logs de `address`/`topic0` en [from_block, to_block],
     partiendo el rango recursivamente si excede el límite de 10.000 resultados."""
     all_logs = []
     hit_cap = False
     page = 1
     while page <= 10:
-        chunk = _get_logs_page(address, from_block, to_block, page)
+        chunk = _get_logs_page(address, topic0, from_block, to_block, page, topic1=topic1)
         if chunk is None:
             hit_cap = True  # Etherscan rechazó explícitamente: rango demasiado grande
             break
@@ -206,8 +229,8 @@ def _fetch_logs_range(address: str, from_block: int, to_block: int, depth: int =
         if depth > 40 or to_block <= from_block:
             return all_logs
         mid = (from_block + to_block) // 2
-        left = _fetch_logs_range(address, from_block, mid, depth + 1)
-        right = _fetch_logs_range(address, mid + 1, to_block, depth + 1)
+        left = _fetch_logs_range(address, topic0, from_block, mid, topic1=topic1, depth=depth + 1)
+        right = _fetch_logs_range(address, topic0, mid + 1, to_block, topic1=topic1, depth=depth + 1)
         return left + right
     return all_logs
 
@@ -237,7 +260,7 @@ def fetch_all_transfers(token_address: str) -> list:
     latest_block = fetch_latest_block()
     if not latest_block:
         return []
-    raw_logs = _fetch_logs_range(token_address, 0, latest_block)
+    raw_logs = _fetch_logs_range(token_address, TRANSFER_TOPIC, 0, latest_block)
     parsed = []
     for log in raw_logs:
         try:
@@ -252,6 +275,33 @@ def fetch_all_transfers(token_address: str) -> list:
             continue
     parsed.sort(key=lambda x: x["block"])
     return parsed
+
+
+@st.cache_data(show_spinner=False, ttl=21600)
+def fetch_rate_history(reserve_address: str) -> pd.DataFrame:
+    """Histórico diario de tipos supply/borrow de una reserva, a partir de los eventos
+    ReserveDataUpdated que emite el Pool en cada operación sobre ese activo."""
+    latest_block = fetch_latest_block()
+    if not latest_block:
+        return pd.DataFrame()
+    topic1 = "0x" + "0" * 24 + reserve_address[2:].lower()
+    raw_logs = _fetch_logs_range(RNT_LEND_POOL, RESERVE_DATA_UPDATED_TOPIC, 0, latest_block, topic1=topic1)
+    rows = []
+    for log in raw_logs:
+        try:
+            hexd = log["data"][2:]
+            words = [hexd[i:i + 64] for i in range(0, len(hexd), 64)]
+            liquidity_rate = int(words[0], 16) / RAY
+            borrow_rate = int(words[2], 16) / RAY
+            ts = datetime.fromtimestamp(int(log["timeStamp"], 16), tz=timezone.utc).replace(tzinfo=None)
+            rows.append({"fecha": ts, "supply_apr": liquidity_rate, "borrow_apr": borrow_rate})
+        except Exception:
+            continue
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows).sort_values("fecha")
+    daily = df.set_index("fecha")[["supply_apr", "borrow_apr"]].resample("1D").last().ffill().reset_index()
+    return daily
 
 
 def build_daily_supply_series(transfers: list, decimals: int) -> pd.DataFrame:
@@ -321,7 +371,7 @@ def build_market_snapshot() -> dict:
             colateral_jobs.append((asset_lower, cfg["atoken"]))
 
     stable_tokens = {
-        STABLES[a.lower()]: {"atoken": c["atoken"], "debt_token": c["variable_debt_token"]}
+        STABLES[a.lower()]: {"atoken": c["atoken"], "debt_token": c["variable_debt_token"], "reserve": a.lower()}
         for a, c in zip(reservas, configs) if c and a.lower() in STABLES
     }
 
@@ -348,22 +398,32 @@ def build_market_snapshot() -> dict:
 # ── Histórico y concentración (reconstruidos on-chain) ───────────────────────
 
 def build_historical_series_batch(stable_tokens: dict) -> dict:
-    """Recorre aToken + debt token de USDT y USDC en paralelo: el cuello de botella
-    es la latencia de red de Etherscan (no CPU), así que 4 fetches concurrentes
-    reducen el tiempo total frente a hacerlos uno detrás de otro."""
-    jobs = []  # (sym, "supply"|"borrow", token_addr)
+    """Recorre aToken + debt token + eventos de tipos de USDT y USDC en paralelo:
+    el cuello de botella es la latencia de red de Etherscan (no CPU), así que
+    fetches concurrentes reducen el tiempo total frente a hacerlos uno a uno."""
+    transfer_jobs = []  # (sym, "supply"|"borrow", token_addr)
+    rate_jobs = []       # (sym, reserve_addr)
     for sym, addrs in stable_tokens.items():
-        jobs.append((sym, "supply", addrs["atoken"]))
-        jobs.append((sym, "borrow", addrs["debt_token"]))
+        transfer_jobs.append((sym, "supply", addrs["atoken"]))
+        transfer_jobs.append((sym, "borrow", addrs["debt_token"]))
+        rate_jobs.append((sym, addrs["reserve"]))
 
-    with ThreadPoolExecutor(max_workers=min(4, len(jobs)) or 1) as pool:
-        transfers_list = list(pool.map(lambda j: fetch_all_transfers(j[2]), jobs))
+    total_workers = min(6, len(transfer_jobs) + len(rate_jobs)) or 1
+    with ThreadPoolExecutor(max_workers=total_workers) as pool:
+        transfers_future = pool.map(lambda j: fetch_all_transfers(j[2]), transfer_jobs)
+        rates_future = pool.map(lambda j: fetch_rate_history(j[1]), rate_jobs)
+        transfers_list = list(transfers_future)
+        rates_list = list(rates_future)
 
     resultado = {}
-    for (sym, kind, _), transfers in zip(jobs, transfers_list):
+    for (sym, kind, _), transfers in zip(transfer_jobs, transfers_list):
         entry = resultado.setdefault(sym, {})
         entry[f"{kind}_series"] = build_daily_supply_series(transfers, decimals=6)
         entry[f"{kind}_holders"] = build_holder_balances(transfers, decimals=6)
+
+    for (sym, _), rate_df in zip(rate_jobs, rates_list):
+        resultado.setdefault(sym, {})["rate_series"] = rate_df
+
     return resultado
 
 
@@ -379,6 +439,19 @@ def clasificar_tiers(holders: dict) -> pd.DataFrame:
     return pd.DataFrame(filas)
 
 
+def tramo_de(valor: float) -> str:
+    for nombre, lo, hi in TIERS:
+        if lo <= valor < hi:
+            return nombre
+    return "—"
+
+
+def holders_a_dataframe(holders: dict) -> pd.DataFrame:
+    """Detalle por wallet (dirección, saldo, tramo), ordenado de mayor a menor saldo."""
+    filas = [{"Wallet": addr, "Saldo (USD)": val, "Tramo": tramo_de(val)} for addr, val in holders.items()]
+    return pd.DataFrame(filas).sort_values("Saldo (USD)", ascending=False).reset_index(drop=True)
+
+
 def combinar_holders(*dicts: dict) -> dict:
     """Suma balances de la misma dirección a través de varios tokens (ej. USDT+USDC)."""
     combinado = {}
@@ -386,6 +459,128 @@ def combinar_holders(*dicts: dict) -> dict:
         for addr, val in d.items():
             combinado[addr] = combinado.get(addr, 0.0) + val
     return combinado
+
+
+# ── Exportación: PDF e informe WhatsApp ──────────────────────────────────────
+
+def generar_pdf_aave(stables: dict, df_col: pd.DataFrame, supply_holders: dict, borrow_holders: dict) -> bytes:
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4,
+                             leftMargin=1.5 * cm, rightMargin=1.5 * cm,
+                             topMargin=1.5 * cm, bottomMargin=1.5 * cm)
+
+    tit_s    = ParagraphStyle("t",  fontSize=17, leading=21, alignment=TA_LEFT,   fontName="Helvetica-Bold", textColor=PDF_NAVY_OSC)
+    fecha_s  = ParagraphStyle("f",  fontSize=9,  leading=12, alignment=TA_RIGHT,  fontName="Helvetica",      textColor=PDF_NAVY_OSC)
+    sub_s    = ParagraphStyle("s",  fontSize=11, leading=14, alignment=TA_LEFT,   fontName="Helvetica-Bold", textColor=PDF_BLANCO)
+    cell_s   = ParagraphStyle("c",  fontSize=8,  leading=11, alignment=TA_CENTER, fontName="Helvetica",      textColor=PDF_NAVY_OSC)
+    cell_lbl = ParagraphStyle("cl", fontSize=8,  leading=11, alignment=TA_LEFT,   fontName="Helvetica-Bold", textColor=PDF_BLANCO)
+    nota_s   = ParagraphStyle("n",  fontSize=7,  leading=9.5, alignment=TA_LEFT, fontName="Helvetica",       textColor=PDF_NAVY_OSC)
+
+    def seccion(titulo: str):
+        t = Table([[Paragraph(titulo, sub_s)]], colWidths=["100%"])
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), PDF_NAVY_OSC),
+            ("TOPPADDING", (0, 0), (-1, -1), 6), ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ]))
+        return t
+
+    def tabla_estandar(header: list, filas: list, col_widths=None):
+        data = [[Paragraph(h, cell_lbl) for h in header]] + [
+            [Paragraph(str(v), cell_s) for v in fila] for fila in filas
+        ]
+        t = Table(data, colWidths=col_widths)
+        ts = [
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#CBD5E1")),
+            ("BACKGROUND", (0, 0), (-1, 0), PDF_NAVY_OSC),
+            ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ]
+        for i in range(1, len(data)):
+            ts.append(("BACKGROUND", (0, i), (-1, i), PDF_GRIS_CLAR if i % 2 == 0 else PDF_BLANCO))
+        t.setStyle(TableStyle(ts))
+        return t
+
+    story = []
+
+    ht = Table([[
+        Paragraph(f"<font color='{DORADO}'><b>Reental</b></font> Wealth · Informe Mercado RNT Lend", tit_s),
+        Paragraph(f"Generado: {datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M UTC')}", fecha_s),
+    ]], colWidths=["65%", "35%"])
+    ht.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
+    story += [ht, Spacer(1, 0.3 * cm), HRFlowable(width="100%", thickness=3, color=PDF_DORADO), Spacer(1, 0.4 * cm)]
+
+    # KPIs USDT/USDC
+    story.append(seccion("Estado actual — USDT / USDC"))
+    story.append(Spacer(1, 0.2 * cm))
+    filas_kpi = []
+    for sym in ("USDT", "USDC"):
+        info = stables.get(sym)
+        if not info:
+            continue
+        util_txt = f"{info['utilizacion'] * 100:.1f}%" if info.get("utilizacion") is not None else "—"
+        filas_kpi.append([
+            sym, f"${info['supply_total']:,.0f}", f"{info['supply_apr'] * 100:.2f}%",
+            f"${info['borrow_total']:,.0f}", f"{info['borrow_apr'] * 100:.2f}%", util_txt,
+        ])
+    story.append(tabla_estandar(
+        ["Activo", "Total aportado", "APR supply", "Total prestado", "APR borrow", "Utilización"],
+        filas_kpi,
+    ))
+    story.append(Spacer(1, 0.5 * cm))
+
+    # Concentración
+    story.append(seccion("Concentración de holders (USDT + USDC)"))
+    story.append(Spacer(1, 0.2 * cm))
+    df_sup_tiers = clasificar_tiers(supply_holders)
+    df_bor_tiers = clasificar_tiers(borrow_holders)
+    # Helvetica no soporta emoji: se usa solo el nombre del tramo en el PDF.
+    df_sup_tiers["Tramo"] = df_sup_tiers["Tramo"].str.split(" ").str[-1]
+    df_bor_tiers["Tramo"] = df_bor_tiers["Tramo"].str.split(" ").str[-1]
+    filas_conc = []
+    for (_, r_s), (_, r_b) in zip(df_sup_tiers.iterrows(), df_bor_tiers.iterrows()):
+        filas_conc.append([
+            r_s["Tramo"], str(r_s["Nº holders"]), f"${r_s['Valor total']:,.0f}",
+            str(r_b["Nº holders"]), f"${r_b['Valor total']:,.0f}",
+        ])
+    story.append(Paragraph(
+        f"Suministradores: {len(supply_holders)} direcciones · Prestatarios: {len(borrow_holders)} direcciones",
+        nota_s,
+    ))
+    story.append(Spacer(1, 0.15 * cm))
+    story.append(tabla_estandar(
+        ["Tramo", "Nº suministradores", "Valor suministrado", "Nº prestatarios", "Valor prestado"],
+        filas_conc,
+    ))
+    story.append(Spacer(1, 0.5 * cm))
+
+    # Colateral por proyecto (top 15)
+    story.append(seccion("Colateral depositado por proyecto Reental (top 15)"))
+    story.append(Spacer(1, 0.2 * cm))
+    if not df_col.empty:
+        filas_col = [
+            [r.get("proyecto", "—"), f"{r['colateral_tokens']:,.1f}", f"${r['valor_estimado']:,.0f}"]
+            for _, r in df_col.head(15).iterrows()
+        ]
+        story.append(tabla_estandar(["Proyecto", "Tokens colateralizados", "Valor estimado"], filas_col))
+        story.append(Spacer(1, 0.2 * cm))
+        story.append(Paragraph(f"<b>Colateral total estimado (todos los proyectos): ${df_col['valor_estimado'].sum():,.0f}</b>", nota_s))
+    else:
+        story.append(Paragraph("Sin datos de colateral disponibles en este momento.", nota_s))
+    story.append(Spacer(1, 0.5 * cm))
+
+    notas = [
+        "— RNT Lend es el mercado de colateralización propio de Reental (arquitectura Aave V3) en Polygon, "
+        f"contrato Pool {RNT_LEND_POOL}. No es el pool público de Aave.",
+        "— El estado actual y el colateral por proyecto son un snapshot en el momento de generación. "
+        "La concentración de holders se reconstruye on-chain a partir de eventos Transfer.",
+        "— Este informe no constituye consejo de inversión. Las cifras son estimaciones a partir de datos on-chain.",
+    ]
+    for nota in notas:
+        story.append(Paragraph(nota, nota_s))
+
+    doc.build(story)
+    return buf.getvalue()
 
 
 # ── Carga de datos ────────────────────────────────────────────────────────────
@@ -439,10 +634,11 @@ st.markdown("---")
 # ── Histórico de capital aportado / prestado / disponible ────────────────────
 st.subheader("📈 Evolución histórica — USDT / USDC")
 st.caption(
-    "Reconstruido on-chain a partir de los eventos Transfer (mint/burn) de los aTokens y "
-    "debt tokens del pool desde su despliegue. Puede tardar más la primera vez (se cachea 6h). "
-    "⚠️ Refleja depósitos menos retiradas (principal); no incorpora el interés acumulado día a día, "
-    "por lo que queda ligeramente por debajo de las cifras del snapshot en vivo de más arriba."
+    "Capital reconstruido on-chain a partir de los eventos Transfer (mint/burn) de los aTokens y "
+    "debt tokens; tipos (eje derecho) a partir de los eventos ReserveDataUpdated del Pool. "
+    "Todo desde el despliegue del contrato. Puede tardar más la primera vez (se cachea 6h). "
+    "⚠️ El capital refleja depósitos menos retiradas (principal); no incorpora el interés acumulado "
+    "día a día, por lo que queda ligeramente por debajo de las cifras del snapshot en vivo de más arriba."
 )
 
 stable_tokens = snapshot.get("stable_tokens", {})
@@ -462,6 +658,11 @@ for sym in ("USDT", "USDC"):
     df_m = pd.merge(df_s, df_b, on="fecha", how="outer").sort_values("fecha").ffill().fillna(0)
     df_m["disponible"] = df_m["aportado"] - df_m["prestado"]
 
+    df_r = hist.get("rate_series")
+    if df_r is not None and not df_r.empty:
+        df_m = pd.merge(df_m, df_r, on="fecha", how="left").sort_values("fecha")
+        df_m[["supply_apr", "borrow_apr"]] = df_m[["supply_apr", "borrow_apr"]].ffill()
+
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=df_m["fecha"], y=df_m["aportado"], mode="lines", name="Aportado",
@@ -475,12 +676,32 @@ for sym in ("USDT", "USDC"):
         x=df_m["fecha"], y=df_m["disponible"], mode="lines", name="Disponible",
         line=dict(color="#25D366", width=2, dash="dot"),
     ))
+    if "supply_apr" in df_m.columns:
+        fig.add_trace(go.Scatter(
+            x=df_m["fecha"], y=df_m["supply_apr"] * 100, mode="lines", name="APR Supply",
+            line=dict(color=DORADO, width=1.5, dash="dash"), yaxis="y2", opacity=0.85,
+        ))
+        fig.add_trace(go.Scatter(
+            x=df_m["fecha"], y=df_m["borrow_apr"] * 100, mode="lines", name="APR Borrow",
+            line=dict(color=AZUL_MED, width=1.5, dash="dash"), yaxis="y2", opacity=0.85,
+        ))
     fig.update_layout(
-        title=f"{sym} — capital aportado, prestado y disponible",
-        template=TEMPLATE_PLOTLY, height=380, margin=dict(t=50, b=20, l=10, r=10),
-        yaxis_title="USD", legend=dict(orientation="h", y=1.15),
+        title=dict(text=f"{sym} — capital aportado, prestado y disponible", y=0.97, x=0.02, xanchor="left"),
+        template=TEMPLATE_PLOTLY, height=420,
+        margin=dict(t=90, b=20, l=10, r=10),
+        yaxis=dict(title="USD"),
+        yaxis2=dict(title="APR %", overlaying="y", side="right", showgrid=False),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
     )
     st.plotly_chart(fig, use_container_width=True)
+
+    st.download_button(
+        f"⬇️ Descargar CSV — {sym}",
+        data=df_m.to_csv(index=False).encode("utf-8"),
+        file_name=f"rnt_lend_{sym.lower()}_historico_{date.today().strftime('%Y%m%d')}.csv",
+        mime="text/csv",
+        key=f"csv_hist_{sym}",
+    )
 
 st.markdown("---")
 
@@ -492,6 +713,7 @@ st.caption(
     "Delfines \\$5k–25k · Peces < \\$5k."
 )
 
+supply_holders, borrow_holders = {}, {}
 if historical:
     supply_holders = combinar_holders(*[h["supply_holders"] for h in historical.values()])
     borrow_holders = combinar_holders(*[h["borrow_holders"] for h in historical.values()])
@@ -520,6 +742,14 @@ if historical:
                 df_tiers.style.format({"Valor total": "${:,.0f}"}),
                 use_container_width=True, hide_index=True,
             )
+            df_wallets = holders_a_dataframe(holders)
+            st.download_button(
+                "⬇️ Descargar CSV — saldos por wallet",
+                data=df_wallets.to_csv(index=False).encode("utf-8"),
+                file_name=f"rnt_lend_{titulo.split()[1].lower()}_{date.today().strftime('%Y%m%d')}.csv",
+                mime="text/csv",
+                key=f"csv_holders_{titulo}",
+            )
 else:
     st.info("No se pudo construir el análisis de concentración en este momento.")
 
@@ -532,6 +762,7 @@ st.caption(
     "cruzados con el precio de emisión del CSV máster para estimar su valor en USD/EUR."
 )
 
+df_col = pd.DataFrame()
 if colateral_rows and not master_df.empty:
     df_col = pd.DataFrame(colateral_rows)
     df_col = df_col[df_col["colateral_tokens"] > 0.001]
@@ -582,6 +813,113 @@ if colateral_rows and not master_df.empty:
         )
 else:
     st.info("No se pudo construir el desglose de colateral por proyecto en este momento.")
+
+st.markdown("---")
+
+# ── Exportar informe ──────────────────────────────────────────────────────────
+st.subheader("📤 Exportar informe")
+
+st.markdown("""
+    <style>
+    .st-key-btn_crear_wa_aave button {
+        background-color: #25D366 !important;
+        color: #ffffff !important;
+        border: none !important;
+        font-weight: 700 !important;
+        border-radius: 8px !important;
+    }
+    .st-key-btn_crear_wa_aave button:hover {
+        background-color: #1EBE5D !important;
+        color: #ffffff !important;
+    }
+    .st-key-btn_crear_wa_aave button:active {
+        background-color: #128C7E !important;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+col_pdf, col_wa = st.columns([1, 1])
+
+with col_pdf:
+    if st.button("📥 Generar PDF", type="primary", use_container_width=True):
+        with st.spinner("Generando PDF…"):
+            pdf_bytes = generar_pdf_aave(stables, df_col, supply_holders, borrow_holders)
+        st.download_button(
+            label="⬇️ Descargar PDF",
+            data=pdf_bytes,
+            file_name=f"Reental_RNT_Lend_{date.today().strftime('%Y%m%d')}.pdf",
+            mime="application/pdf",
+            type="primary",
+        )
+
+with col_wa:
+    if st.button("💬 Crear mensaje para enviar por WhatsApp", key="btn_crear_wa_aave", use_container_width=True):
+        lineas = []
+        lineas.append("🏦 *Reental Wealth — Mercado RNT Lend*")
+        lineas.append(f"📅 {date.today().strftime('%d/%m/%Y')}")
+        lineas.append("─" * 30)
+
+        for sym in ("USDT", "USDC"):
+            info = stables.get(sym)
+            if not info:
+                continue
+            util_txt = f" · Util. {info['utilizacion'] * 100:.1f}%" if info.get("utilizacion") is not None else ""
+            lineas.append(f"\n💰 *{sym}*")
+            lineas.append(f"  Aportado: *${info['supply_total']:,.0f}* (APR {info['supply_apr'] * 100:.2f}%)")
+            lineas.append(f"  Prestado: *${info['borrow_total']:,.0f}* (APR {info['borrow_apr'] * 100:.2f}%{util_txt})")
+
+        lineas.append("\n🐋 *Concentración de holders*")
+        lineas.append(f"  💰 Suministradores: {len(supply_holders)} direcciones")
+        lineas.append(f"  📉 Prestatarios: {len(borrow_holders)} direcciones")
+
+        if not df_col.empty:
+            top1 = df_col.iloc[0]
+            lineas.append("\n🔒 *Colateral*")
+            lineas.append(f"  Total estimado: *${df_col['valor_estimado'].sum():,.0f}*")
+            lineas.append(f"  Mayor proyecto: {top1['proyecto']} (${top1['valor_estimado']:,.0f})")
+
+        lineas.append("\n" + "─" * 30)
+        lineas.append("_⚠️ Datos on-chain del pool RNT Lend. No constituye consejo de inversión._")
+
+        mensaje_wa = "\n".join(lineas)
+
+        # El navegador solo permite escribir al portapapeles desde un gesto del
+        # usuario DENTRO del iframe, así que el botón de copiar vive en el componente.
+        msg_js = json.dumps(mensaje_wa)
+        st.components.v1.html(f"""
+        <button id="copiar-wa-aave" style="
+            width:100%; padding:12px 20px; font-size:16px; font-weight:700;
+            font-family:'Source Sans Pro',sans-serif; cursor:pointer;
+            background:#25D366; color:#fff; border:none; border-radius:8px;">
+            📋 Copiar al portapapeles
+        </button>
+        <div id="copiado-ok-aave" style="display:none; margin-top:8px; text-align:center;
+            font-family:'Source Sans Pro',sans-serif; color:#25D366; font-weight:600;">
+            ✅ ¡Copiado! Pégalo directamente en WhatsApp.
+        </div>
+        <script>
+        const MSG = {msg_js};
+        document.getElementById('copiar-wa-aave').addEventListener('click', function() {{
+            function ok() {{
+                document.getElementById('copiado-ok-aave').style.display = 'block';
+            }}
+            if (navigator.clipboard && navigator.clipboard.writeText) {{
+                navigator.clipboard.writeText(MSG).then(ok).catch(function() {{ fallback(); }});
+            }} else {{
+                fallback();
+            }}
+            function fallback() {{
+                var ta = document.createElement('textarea');
+                ta.value = MSG;
+                ta.style.position = 'fixed'; ta.style.left = '-9999px';
+                document.body.appendChild(ta);
+                ta.focus(); ta.select();
+                try {{ document.execCommand('copy'); ok(); }} catch(e) {{}}
+                document.body.removeChild(ta);
+            }}
+        }});
+        </script>
+        """, height=100)
 
 st.caption(
     f"Última actualización: {datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M UTC')} · "
