@@ -473,7 +473,8 @@ def combinar_holders(*dicts: dict) -> dict:
 
 # ── Exportación: PDF e informe WhatsApp ──────────────────────────────────────
 
-def generar_pdf_aave(stables: dict, df_col: pd.DataFrame, supply_holders: dict, borrow_holders: dict) -> bytes:
+def generar_pdf_aave(stables: dict, df_col: pd.DataFrame, supply_holders: dict, borrow_holders: dict,
+                      historical_resumen: dict = None) -> bytes:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4,
                              leftMargin=1.5 * cm, rightMargin=1.5 * cm,
@@ -537,6 +538,45 @@ def generar_pdf_aave(stables: dict, df_col: pd.DataFrame, supply_holders: dict, 
         ["Activo", "Total aportado", "APR supply", "Total prestado", "APR borrow", "Utilización"],
         filas_kpi,
     ))
+    story.append(Spacer(1, 0.3 * cm))
+    story.append(Paragraph(
+        "El APR mostrado arriba es el tipo instantáneo en el momento de generación del informe: al ser "
+        "un tipo variable, fluctúa en cada depósito, préstamo o repago. La tabla siguiente muestra la "
+        "<b>media histórica acumulada</b> desde el despliegue del contrato, más representativa de lo que "
+        "experimenta un inversor a largo plazo.",
+        nota_s,
+    ))
+    story.append(Spacer(1, 0.2 * cm))
+
+    filas_hist = []
+    for sym in ("USDT", "USDC"):
+        r = (historical_resumen or {}).get(sym)
+        if not r:
+            continue
+        delta_aportado = r["aportado_hoy"] - r["aportado_inicio"]
+        delta_prestado = r["prestado_hoy"] - r["prestado_inicio"]
+        filas_hist.append([
+            sym,
+            f"{r['supply_apr_medio'] * 100:.2f}%" if r.get("supply_apr_medio") is not None else "—",
+            f"{r['borrow_apr_medio'] * 100:.2f}%" if r.get("borrow_apr_medio") is not None else "—",
+            f"+${delta_aportado:,.0f}",
+            f"+${delta_prestado:,.0f}",
+            f"{r['dias_periodo']} días",
+        ])
+    if filas_hist:
+        story.append(tabla_estandar(
+            ["Activo", "APR supply medio", "APR borrow medio", "Δ Aportado", "Δ Prestado", "Periodo analizado"],
+            filas_hist,
+        ))
+        primera_fecha = min(
+            r["fecha_inicio"] for r in historical_resumen.values() if r.get("fecha_inicio") is not None
+        )
+        story.append(Spacer(1, 0.15 * cm))
+        story.append(Paragraph(
+            f"Histórico reconstruido on-chain desde {primera_fecha.strftime('%d/%m/%Y')} "
+            "(eventos Transfer y ReserveDataUpdated del contrato).",
+            nota_s,
+        ))
     story.append(Spacer(1, 0.5 * cm))
 
     # Concentración
@@ -660,6 +700,8 @@ if stable_tokens:
     with st.spinner("Reconstruyendo histórico on-chain (puede tardar 1-2 minutos la primera vez)…"):
         historical = build_historical_series_batch(stable_tokens)
 
+historical_resumen = {}  # resumen por activo, reutilizado en el PDF y el mensaje de WhatsApp
+
 for sym in ("USDT", "USDC"):
     hist = historical.get(sym)
     if not hist or hist["supply_series"].empty:
@@ -676,6 +718,17 @@ for sym in ("USDT", "USDC"):
         df_r = df_r.rename(columns={"supply_apr": "supply_apr_medio", "borrow_apr": "borrow_apr_medio"})
         df_m = pd.merge(df_m, df_r, on="fecha", how="left").sort_values("fecha")
         df_m[["supply_apr_medio", "borrow_apr_medio"]] = df_m[["supply_apr_medio", "borrow_apr_medio"]].ffill()
+
+    historical_resumen[sym] = {
+        "fecha_inicio": df_m["fecha"].iloc[0],
+        "dias_periodo": (df_m["fecha"].iloc[-1] - df_m["fecha"].iloc[0]).days,
+        "aportado_inicio": df_m["aportado"].iloc[0],
+        "aportado_hoy": df_m["aportado"].iloc[-1],
+        "prestado_inicio": df_m["prestado"].iloc[0],
+        "prestado_hoy": df_m["prestado"].iloc[-1],
+        "supply_apr_medio": df_m["supply_apr_medio"].iloc[-1] if "supply_apr_medio" in df_m.columns else None,
+        "borrow_apr_medio": df_m["borrow_apr_medio"].iloc[-1] if "borrow_apr_medio" in df_m.columns else None,
+    }
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
@@ -857,7 +910,7 @@ col_pdf, col_wa = st.columns([1, 1])
 with col_pdf:
     if st.button("📥 Generar PDF", type="primary", use_container_width=True):
         with st.spinner("Generando PDF…"):
-            pdf_bytes = generar_pdf_aave(stables, df_col, supply_holders, borrow_holders)
+            pdf_bytes = generar_pdf_aave(stables, df_col, supply_holders, borrow_holders, historical_resumen)
         st.download_button(
             label="⬇️ Descargar PDF",
             data=pdf_bytes,
@@ -877,10 +930,19 @@ with col_wa:
             info = stables.get(sym)
             if not info:
                 continue
+            hist_r = historical_resumen.get(sym)
             util_txt = f" · Util. {info['utilizacion'] * 100:.1f}%" if info.get("utilizacion") is not None else ""
             lineas.append(f"\n💰 *{sym}*")
-            lineas.append(f"  Aportado: *${info['supply_total']:,.0f}* (APR {info['supply_apr'] * 100:.2f}%)")
-            lineas.append(f"  Prestado: *${info['borrow_total']:,.0f}* (APR {info['borrow_apr'] * 100:.2f}%{util_txt})")
+            lineas.append(f"  Aportado: *${info['supply_total']:,.0f}* (APR actual {info['supply_apr'] * 100:.2f}%)")
+            lineas.append(f"  Prestado: *${info['borrow_total']:,.0f}* (APR actual {info['borrow_apr'] * 100:.2f}%{util_txt})")
+            if hist_r and hist_r.get("supply_apr_medio") is not None:
+                lineas.append(
+                    f"  📊 APR medio histórico: Supply {hist_r['supply_apr_medio'] * 100:.2f}% · "
+                    f"Borrow {hist_r['borrow_apr_medio'] * 100:.2f}% ({hist_r['dias_periodo']} días)"
+                )
+            if hist_r:
+                delta = hist_r["aportado_hoy"] - hist_r["aportado_inicio"]
+                lineas.append(f"  📈 Crecimiento del aportado en el periodo: +${delta:,.0f}")
 
         lineas.append("\n🐋 *Concentración de holders*")
         lineas.append(f"  💰 Suministradores: {len(supply_holders)} direcciones")
