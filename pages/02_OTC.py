@@ -19,7 +19,7 @@ import requests
 import io
 from datetime import datetime, timezone
 
-from utils import load_master_projects, strip_accents
+from utils import fetch_all_token_txs, load_master_projects, strip_accents
 
 # ── Constantes ────────────────────────────────────────────────────────────────
 
@@ -181,16 +181,9 @@ def fetch_otc_balances(wallet: str, api_key: str) -> tuple:
       - last_txs_dict  {contract_addr: [{"hash", "to", "value", "ts"}]}
       - fetch_ts       datetime UTC
     """
-    params = {
-        "chainid": POLYGON_CHAIN, "module": "account", "action": "tokentx",
-        "address": wallet, "startblock": 0, "endblock": 99999999,
-        "sort": "asc", "apikey": api_key,
-    }
-    try:
-        resp = requests.get(ETHERSCAN_BASE, params=params, timeout=30)
-        txs  = resp.json().get("result") or []
-    except Exception:
-        return {}, {}, datetime.now(timezone.utc)
+    # Etherscan limita tokentx a 1000 resultados por llamada: hay que paginar
+    # o los saldos se calculan solo con los transfers más antiguos.
+    txs = fetch_all_token_txs(wallet, api_key)
 
     # nombre_proyecto_lower → token_address  (para resolver aTokens por nombre)
     nombre_to_addr = {

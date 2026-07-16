@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import io
 import unicodedata
@@ -10,6 +11,9 @@ import pandas as pd
 import requests
 import plotly.graph_objects as go
 from dotenv import load_dotenv
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils import fetch_all_token_txs
 
 load_dotenv()
 
@@ -256,24 +260,9 @@ def fetch_xrnt_staked_rnt(token_id: str) -> float:
 def fetch_token_transfers(wallet: str) -> list:
     if not API_KEY:
         raise ValueError("No hay API Key configurada. Añade ETHERSCAN_API_KEY en el archivo .env")
-    params = {"chainid": POLYGON_CHAIN_ID, "module": "account", "action": "tokentx",
-              "address": wallet, "startblock": 0, "endblock": 99999999,
-              "sort": "asc", "apikey": API_KEY}
-    try:
-        r = requests.get(ETHERSCAN_V2_BASE, params=params, timeout=30)
-    except requests.exceptions.RequestException as e:
-        raise ValueError(f"Error de red: {e}")
-    if not r.text.strip():
-        raise ValueError("Respuesta vacía de la API.")
-    try:
-        data = r.json()
-    except Exception:
-        raise ValueError(f"Respuesta inesperada (HTTP {r.status_code}): {r.text[:300]}")
-    if data.get("status") == "0":
-        msg = data.get("result") or data.get("message", "")
-        if msg not in ("No transactions found", "No records found", ""):
-            raise ValueError(f"API: {msg}")
-    return data.get("result") or []
+    # Etherscan limita tokentx a 1000 resultados por llamada: hay que paginar
+    # o el análisis se queda solo con los transfers más antiguos de la wallet.
+    return fetch_all_token_txs(wallet, API_KEY)
 
 
 # ── Procesado ────────────────────────────────────────────────────────────────
@@ -781,20 +770,31 @@ def fetch_normal_transactions(wallet: str) -> list:
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_distributor_recipients() -> set:
-    """Conjunto de todas las direcciones que han recibido dividendos del distribuidor."""
+    """Direcciones que han recibido dividendos del distribuidor (últimos ~10.000 envíos).
+    Etherscan limita cada llamada a 1000 resultados, así que se recorren hasta 10
+    páginas en orden descendente: cubre los repartos recientes, que es lo relevante
+    para detectar vaults activos."""
     if not API_KEY:
         return set()
-    params = {
-        "chainid": POLYGON_CHAIN_ID, "module": "account", "action": "tokentx",
-        "address": DIVIDEND_DISTRIBUTOR,
-        "startblock": 0, "endblock": 99999999, "sort": "desc", "apikey": API_KEY,
-    }
-    try:
-        r = requests.get(ETHERSCAN_V2_BASE, params=params, timeout=30)
-        data = r.json()
-        return {tx["to"].lower() for tx in (data.get("result") or [])}
-    except Exception:
-        return set()
+    recipients = set()
+    for page in range(1, 11):
+        params = {
+            "chainid": POLYGON_CHAIN_ID, "module": "account", "action": "tokentx",
+            "address": DIVIDEND_DISTRIBUTOR,
+            "startblock": 0, "endblock": 99999999, "sort": "desc",
+            "page": page, "offset": 1000, "apikey": API_KEY,
+        }
+        try:
+            r = requests.get(ETHERSCAN_V2_BASE, params=params, timeout=30)
+            result = r.json().get("result")
+            if not isinstance(result, list):
+                break
+            recipients |= {tx["to"].lower() for tx in result}
+            if len(result) < 1000:
+                break
+        except Exception:
+            break
+    return recipients
 
 
 def detect_vault_address(wallet: str) -> str | None:
@@ -827,22 +827,10 @@ def detect_vault_address(wallet: str) -> str | None:
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_vault_transfers(vault_address: str) -> list:
-    """Obtiene todas las transferencias de stablecoin hacia el vault."""
+    """Obtiene todas las transferencias de stablecoin hacia el vault (paginado)."""
     if not API_KEY or not vault_address:
         return []
-    params = {
-        "chainid": POLYGON_CHAIN_ID, "module": "account", "action": "tokentx",
-        "address": vault_address,
-        "startblock": 0, "endblock": 99999999, "sort": "asc", "apikey": API_KEY,
-    }
-    try:
-        r = requests.get(ETHERSCAN_V2_BASE, params=params, timeout=30)
-        data = r.json()
-        if data.get("status") == "0":
-            return []
-        return data.get("result") or []
-    except Exception:
-        return []
+    return fetch_all_token_txs(vault_address, API_KEY)
 
 
 def process_dividends(transfers: list, wallet: str, vault_transfers: list = None) -> list:

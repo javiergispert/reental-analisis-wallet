@@ -277,6 +277,59 @@ def load_p2p_listings(_master_df: pd.DataFrame) -> pd.DataFrame:
 
 # ── Blockchain ────────────────────────────────────────────────────────────────
 
+def fetch_all_token_txs(wallet: str, api_key: str, max_rounds: int = 40) -> list:
+    """
+    Descarga TODOS los transfers ERC-20 de una wallet vía Etherscan tokentx.
+    Etherscan limita cada llamada a 1000 resultados y la ventana page×offset a
+    10.000, así que se pagina (hasta 10 páginas por ronda) y, si se agota la
+    ventana, se reanuda desde el último bloque visto en una nueva ronda,
+    deduplicando el solape del bloque frontera.
+    Devuelve la lista de txs en orden ascendente, o [] si la API falla.
+    """
+    if not api_key:
+        return []
+    wallet = wallet.lower()
+    all_txs = []
+    seen = set()
+    startblock = 0
+
+    for _ in range(max_rounds):
+        hit_window = True
+        for page in range(1, 11):
+            params = {
+                "chainid": POLYGON_CHAIN_ID, "module": "account", "action": "tokentx",
+                "address": wallet, "startblock": startblock, "endblock": 99999999,
+                "sort": "asc", "page": page, "offset": 1000, "apikey": api_key,
+            }
+            try:
+                resp = requests.get(ETHERSCAN_V2_BASE, params=params, timeout=30)
+                result = resp.json().get("result")
+            except Exception:
+                return all_txs
+            if not isinstance(result, list):
+                # "No transactions found" u otro error → no hay más datos fiables
+                return all_txs
+            for tx in result:
+                key = (tx.get("hash"), tx.get("contractAddress"), tx.get("from"),
+                       tx.get("to"), tx.get("value"), tx.get("tokenID", ""))
+                if key in seen:
+                    continue
+                seen.add(key)
+                all_txs.append(tx)
+            if len(result) < 1000:
+                hit_window = False
+                break
+        if not hit_window:
+            break
+        if not all_txs:
+            break
+        # Ventana agotada: nueva ronda desde el último bloque visto (incluido,
+        # para no perder txs del mismo bloque; el dedupe evita duplicados).
+        startblock = int(all_txs[-1]["blockNumber"])
+
+    return all_txs
+
+
 def fetch_wallet_token_balances(wallet: str, known_addresses: set, api_key: str) -> dict:
     """
     Devuelve {contract_address_lower: net_balance} para tokens Reental en la wallet.
@@ -285,18 +338,7 @@ def fetch_wallet_token_balances(wallet: str, known_addresses: set, api_key: str)
     if not api_key:
         return {}
     wallet = wallet.lower()
-    params = {
-        "chainid": POLYGON_CHAIN_ID, "module": "account", "action": "tokentx",
-        "address": wallet, "startblock": 0, "endblock": 99999999, "sort": "asc", "apikey": api_key,
-    }
-    try:
-        resp = requests.get(ETHERSCAN_V2_BASE, params=params, timeout=30)
-        data = resp.json()
-        if data.get("status") == "0":
-            return {}
-        txs = data.get("result") or []
-    except Exception:
-        return {}
+    txs = fetch_all_token_txs(wallet, api_key)
 
     balances = {}
     for tx in txs:

@@ -29,7 +29,7 @@ from reportlab.platypus import (
     HRFlowable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
 )
 
-from utils import load_master_projects, parse_pct, parse_float_val, strip_accents
+from utils import fetch_all_token_txs, load_master_projects, parse_pct, parse_float_val, strip_accents
 
 # ── Constantes ────────────────────────────────────────────────────────────────
 OTC_WALLET     = os.getenv("OTC_WALLET", "0xce0719ec1bda336ba069c6961ad167767829301a").lower()
@@ -104,17 +104,9 @@ def fetch_otc_raw_balances(wallet: str, api_key: str) -> dict:
     de la wallet OTC. Solo parámetros simples para que el hash de caché funcione.
     La resolución de aTokens y filtrado por proyecto se hace en construir_disponibilidad.
     """
-    params = {
-        "chainid": POLYGON_CHAIN, "module": "account", "action": "tokentx",
-        "address": wallet, "startblock": 0, "endblock": 99999999,
-        "sort": "asc", "apikey": api_key,
-    }
-    try:
-        resp   = requests.get(ETHERSCAN_BASE, params=params, timeout=30)
-        result = resp.json().get("result")
-        txs    = result if isinstance(result, list) else []
-    except Exception:
-        return {}
+    # Etherscan limita tokentx a 1000 resultados por llamada: hay que paginar
+    # o los saldos se calculan solo con los transfers más antiguos.
+    txs = fetch_all_token_txs(wallet, api_key)
 
     raw = {}
     for tx in txs:
