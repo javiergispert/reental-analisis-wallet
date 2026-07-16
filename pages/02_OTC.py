@@ -447,6 +447,22 @@ c5.markdown(kpi_card("🔖", "Reservas activas",      str(len(reservas_activas))
 
 st.markdown("<br>", unsafe_allow_html=True)
 
+
+def color_disponible(val):
+    if val == 0:   return "color:#dc2626;font-weight:600"
+    if val > 0:    return "color:#16a34a;font-weight:600"
+    return ""
+
+
+def color_reservado(val):
+    if val > 0:    return "color:#d97706;font-weight:600"
+    return ""
+
+
+def color_precio_otc(val):
+    return "color:#2563eb;font-weight:600"
+
+
 # Tabla de saldos por proyecto
 if saldos:
     filas = []
@@ -470,18 +486,6 @@ if saldos:
             "_addr":          addr,
         })
     df_saldos = pd.DataFrame(filas)
-
-    def color_disponible(val):
-        if val == 0:   return "color:#dc2626;font-weight:600"
-        if val > 0:    return "color:#16a34a;font-weight:600"
-        return ""
-
-    def color_reservado(val):
-        if val > 0:    return "color:#d97706;font-weight:600"
-        return ""
-
-    def color_precio_otc(val):
-        return "color:#2563eb;font-weight:600"
 
     styled = (
         df_saldos.drop(columns=["_addr"])
