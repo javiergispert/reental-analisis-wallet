@@ -13,7 +13,7 @@ import plotly.graph_objects as go
 from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils import fetch_all_token_txs
+from utils import fetch_all_account_txs, fetch_all_token_txs
 
 load_dotenv()
 
@@ -752,20 +752,11 @@ DIVIDEND_DISTRIBUTOR = "0xf9b135fd84ae6dc9d6e632a97235de5f08c0d61e"
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_normal_transactions(wallet: str) -> list:
-    """Transacciones normales (ETH) de la wallet — necesarias para detectar el vault."""
+    """Transacciones normales (ETH) de la wallet — necesarias para detectar el vault.
+    Paginado: wallets muy activas pueden superar el límite de 1000 por llamada."""
     if not API_KEY:
         return []
-    params = {
-        "chainid": POLYGON_CHAIN_ID, "module": "account", "action": "txlist",
-        "address": wallet, "startblock": 0, "endblock": 99999999,
-        "sort": "asc", "apikey": API_KEY,
-    }
-    try:
-        r = requests.get(ETHERSCAN_V2_BASE, params=params, timeout=30)
-        data = r.json()
-        return data.get("result") or [] if data.get("status") == "1" else []
-    except Exception:
-        return []
+    return fetch_all_account_txs(wallet, API_KEY, action="txlist")
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
