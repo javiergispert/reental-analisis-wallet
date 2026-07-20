@@ -632,7 +632,15 @@ def generar_pdf_aave(stables: dict, df_col: pd.DataFrame, supply_holders: dict, 
             fig = build_historical_fig(df_m, sym, dark=False)
             try:
                 png_bytes = fig.to_image(format="png", width=1000, height=420, scale=2)
-            except Exception:
+            except Exception as e:
+                # No se deja caer en silencio: si el renderizador de imágenes falla
+                # (p.ej. kaleido sin Chromium disponible en el entorno), se deja constancia
+                # explícita en el propio informe en vez de omitir el gráfico sin avisar.
+                story.append(Paragraph(
+                    f"⚠️ No se pudo generar el gráfico de {sym} ({type(e).__name__}: {str(e)[:150]}).",
+                    nota_s,
+                ))
+                story.append(Spacer(1, 0.2 * cm))
                 continue
             img_buf = io.BytesIO(png_bytes)
             img_h = content_width * (420 / 1000)
