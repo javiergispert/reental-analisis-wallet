@@ -37,7 +37,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import cm
 from reportlab.platypus import (
-    HRFlowable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
+    HRFlowable, Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
 )
 
 from utils import load_master_projects
@@ -471,10 +471,50 @@ def combinar_holders(*dicts: dict) -> dict:
     return combinado
 
 
+def build_historical_fig(df_m: pd.DataFrame, sym: str, dark: bool = True) -> go.Figure:
+    """Construye el gráfico de aportado/prestado/disponible + APR medio acumulado.
+    `dark=False` genera la variante clara usada al exportar la imagen al PDF."""
+    template = TEMPLATE_PLOTLY if dark else "plotly_white"
+    font_color = None if dark else NAVY_OSC
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=df_m["fecha"], y=df_m["aportado"], mode="lines", name="Aportado",
+        line=dict(color=DORADO, width=2), fill="tozeroy", fillcolor="rgba(245,166,35,0.12)",
+    ))
+    fig.add_trace(go.Scatter(
+        x=df_m["fecha"], y=df_m["prestado"], mode="lines", name="Prestado",
+        line=dict(color=AZUL_MED, width=2), fill="tozeroy", fillcolor="rgba(59,130,246,0.12)",
+    ))
+    fig.add_trace(go.Scatter(
+        x=df_m["fecha"], y=df_m["disponible"], mode="lines", name="Disponible",
+        line=dict(color="#25D366", width=2, dash="dot"),
+    ))
+    if "supply_apr_medio" in df_m.columns:
+        fig.add_trace(go.Scatter(
+            x=df_m["fecha"], y=df_m["supply_apr_medio"] * 100, mode="lines", name="APR Supply (media acum.)",
+            line=dict(color=DORADO, width=2, dash="dash"), yaxis="y2",
+        ))
+        fig.add_trace(go.Scatter(
+            x=df_m["fecha"], y=df_m["borrow_apr_medio"] * 100, mode="lines", name="APR Borrow (media acum.)",
+            line=dict(color=AZUL_MED, width=2, dash="dash"), yaxis="y2",
+        ))
+    fig.update_layout(
+        title=dict(text=f"{sym} — capital aportado, prestado y disponible", y=0.97, x=0.02, xanchor="left"),
+        template=template, height=420,
+        margin=dict(t=90, b=20, l=10, r=10),
+        yaxis=dict(title="USD"),
+        yaxis2=dict(title="APR % (media acumulada)", overlaying="y", side="right", showgrid=False),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        font=dict(color=font_color) if font_color else {},
+    )
+    return fig
+
+
 # ── Exportación: PDF e informe WhatsApp ──────────────────────────────────────
 
 def generar_pdf_aave(stables: dict, df_col: pd.DataFrame, supply_holders: dict, borrow_holders: dict,
-                      historical_resumen: dict = None) -> bytes:
+                      historical_resumen: dict = None, historical_dfs: dict = None) -> bytes:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4,
                              leftMargin=1.5 * cm, rightMargin=1.5 * cm,
@@ -578,6 +618,26 @@ def generar_pdf_aave(stables: dict, df_col: pd.DataFrame, supply_holders: dict, 
             nota_s,
         ))
     story.append(Spacer(1, 0.5 * cm))
+
+    # Gráficos de evolución histórica (renderizados con kaleido a partir de las
+    # mismas figuras que se muestran en la web, en variante clara para imprimir)
+    if historical_dfs:
+        story.append(seccion("Evolución histórica — aportado, prestado y APR medio"))
+        story.append(Spacer(1, 0.2 * cm))
+        content_width = A4[0] - 3 * cm
+        for sym in ("USDT", "USDC"):
+            df_m = historical_dfs.get(sym)
+            if df_m is None or df_m.empty:
+                continue
+            fig = build_historical_fig(df_m, sym, dark=False)
+            try:
+                png_bytes = fig.to_image(format="png", width=1000, height=420, scale=2)
+            except Exception:
+                continue
+            img_buf = io.BytesIO(png_bytes)
+            img_h = content_width * (420 / 1000)
+            story.append(Image(img_buf, width=content_width, height=img_h))
+            story.append(Spacer(1, 0.3 * cm))
 
     # Concentración
     story.append(seccion("Concentración de holders (USDT + USDC)"))
@@ -701,6 +761,7 @@ if stable_tokens:
         historical = build_historical_series_batch(stable_tokens)
 
 historical_resumen = {}  # resumen por activo, reutilizado en el PDF y el mensaje de WhatsApp
+historical_dfs = {}      # df_m por activo, reutilizado para renderizar el gráfico en el PDF
 
 for sym in ("USDT", "USDC"):
     hist = historical.get(sym)
@@ -729,37 +790,9 @@ for sym in ("USDT", "USDC"):
         "supply_apr_medio": df_m["supply_apr_medio"].iloc[-1] if "supply_apr_medio" in df_m.columns else None,
         "borrow_apr_medio": df_m["borrow_apr_medio"].iloc[-1] if "borrow_apr_medio" in df_m.columns else None,
     }
+    historical_dfs[sym] = df_m
 
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=df_m["fecha"], y=df_m["aportado"], mode="lines", name="Aportado",
-        line=dict(color=DORADO, width=2), fill="tozeroy", fillcolor="rgba(245,166,35,0.12)",
-    ))
-    fig.add_trace(go.Scatter(
-        x=df_m["fecha"], y=df_m["prestado"], mode="lines", name="Prestado",
-        line=dict(color=AZUL_MED, width=2), fill="tozeroy", fillcolor="rgba(59,130,246,0.12)",
-    ))
-    fig.add_trace(go.Scatter(
-        x=df_m["fecha"], y=df_m["disponible"], mode="lines", name="Disponible",
-        line=dict(color="#25D366", width=2, dash="dot"),
-    ))
-    if "supply_apr_medio" in df_m.columns:
-        fig.add_trace(go.Scatter(
-            x=df_m["fecha"], y=df_m["supply_apr_medio"] * 100, mode="lines", name="APR Supply (media acum.)",
-            line=dict(color=DORADO, width=2, dash="dash"), yaxis="y2",
-        ))
-        fig.add_trace(go.Scatter(
-            x=df_m["fecha"], y=df_m["borrow_apr_medio"] * 100, mode="lines", name="APR Borrow (media acum.)",
-            line=dict(color=AZUL_MED, width=2, dash="dash"), yaxis="y2",
-        ))
-    fig.update_layout(
-        title=dict(text=f"{sym} — capital aportado, prestado y disponible", y=0.97, x=0.02, xanchor="left"),
-        template=TEMPLATE_PLOTLY, height=420,
-        margin=dict(t=90, b=20, l=10, r=10),
-        yaxis=dict(title="USD"),
-        yaxis2=dict(title="APR % (media acumulada)", overlaying="y", side="right", showgrid=False),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-    )
+    fig = build_historical_fig(df_m, sym, dark=True)
     st.plotly_chart(fig, use_container_width=True)
 
     st.download_button(
@@ -910,7 +943,9 @@ col_pdf, col_wa = st.columns([1, 1])
 with col_pdf:
     if st.button("📥 Generar PDF", type="primary", use_container_width=True):
         with st.spinner("Generando PDF…"):
-            pdf_bytes = generar_pdf_aave(stables, df_col, supply_holders, borrow_holders, historical_resumen)
+            pdf_bytes = generar_pdf_aave(
+                stables, df_col, supply_holders, borrow_holders, historical_resumen, historical_dfs,
+            )
         st.download_button(
             label="⬇️ Descargar PDF",
             data=pdf_bytes,
