@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import sys
 import json
@@ -324,22 +326,28 @@ def match_aave_token(tx_symbol: str, tx_name: str, known_tokens: dict):
     return None
 
 
-def label_address(addr: str, wallet: str, atoken_contracts: dict, reental_addresses: set = None) -> str:
+def label_address(addr: str, wallet: str, atoken_contracts: dict, reental_addresses: set = None,
+                   own_wallets: dict = None, wallet_alias: str = None) -> str:
     addr = addr.lower()
     if addr == wallet:
-        return "Tu wallet"
+        return wallet_alias or "Tu wallet"
     if addr == ZERO_ADDRESS:
         return "Protocolo"
     if addr in atoken_contracts:
         return f"Aave — {atoken_contracts[addr]}"
+    if own_wallets and addr in own_wallets:
+        return f"Tu wallet «{own_wallets[addr]}»"
     if reental_addresses and addr in reental_addresses:
         return "Wallet Reental"
     return "Wallet de un tercero"
 
 
-def process_transfers(transfers: list, wallet: str, known_tokens: dict, reental_addresses: set = None) -> dict:
+def process_transfers(transfers: list, wallet: str, known_tokens: dict, reental_addresses: set = None,
+                       own_wallets: dict = None, wallet_alias: str = None) -> dict:
     wallet = wallet.lower()
     reental_addresses = reental_addresses or set()
+    own_wallets = own_wallets or {}
+    mi_label = wallet_alias or "Tu wallet"
 
     # Índice aToken address → project label
     atoken_contracts = {}
@@ -414,30 +422,31 @@ def process_transfers(transfers: list, wallet: str, known_tokens: dict, reental_
             # Clasificar la operación
             from_addr = tx["from"].lower()
             to_addr = tx["to"].lower()
+            es_transferencia_interna = False
 
             if is_aave:
                 if direction == "entrada":
                     tipo = "Colateralización en Aave"
-                    origen = label_address(from_addr, wallet, atoken_contracts, reental_addresses)
-                    destino = "Tu wallet"
+                    origen = label_address(from_addr, wallet, atoken_contracts, reental_addresses, own_wallets, wallet_alias)
+                    destino = mi_label
                 else:
                     tipo = "Descolateralización en Aave"
-                    origen = "Tu wallet"
-                    destino = label_address(to_addr, wallet, atoken_contracts, reental_addresses)
+                    origen = mi_label
+                    destino = label_address(to_addr, wallet, atoken_contracts, reental_addresses, own_wallets, wallet_alias)
             elif direction == "entrada":
                 if atoken_out:
                     # El usuario quemó aTokens en el mismo TX → está recuperando su colateral
                     tipo = "Descolateralización en Aave"
-                    origen = label_address(from_addr, wallet, atoken_contracts, reental_addresses)
-                    destino = "Tu wallet"
+                    origen = label_address(from_addr, wallet, atoken_contracts, reental_addresses, own_wallets, wallet_alias)
+                    destino = mi_label
                 elif stable_out > 0:
                     # Compra directa: el usuario pagó USDT desde su propia wallet
                     if from_addr in reental_addresses:
                         tipo = f"Compra de Tokens a Reental ({stable_out:,.2f} {stable_symbol})"
                     else:
                         tipo = f"Compra de Tokens a terceros ({stable_out:,.2f} {stable_symbol})"
-                    origen = label_address(from_addr, wallet, atoken_contracts, reental_addresses)
-                    destino = "Tu wallet"
+                    origen = label_address(from_addr, wallet, atoken_contracts, reental_addresses, own_wallets, wallet_alias)
+                    destino = mi_label
                 else:
                     # Comprobar patrón reinversión vault: USDT sale del vault → vendedor en misma TX
                     vault_info = get_vault_payment(tx["hash"], wallet)
@@ -446,22 +455,28 @@ def process_transfers(transfers: list, wallet: str, known_tokens: dict, reental_
                         vault_sym = normalize_stable_symbol(vault_sym)
                         tipo = f"Reinversión desde vault ({vault_amount:,.2f} {vault_sym})"
                         origen = f"Vault ({vault_addr[:8]}…{vault_addr[-4:]})"
-                        destino = "Tu wallet"
+                        destino = mi_label
                         stable_out = vault_amount
                         stable_symbol = vault_sym
+                    elif from_addr in own_wallets and from_addr != wallet:
+                        # Sin contraparte en stablecoin y el origen es otra wallet propia: transferencia interna
+                        tipo = f"Transferencia interna ← {own_wallets[from_addr]}"
+                        origen = label_address(from_addr, wallet, atoken_contracts, reental_addresses, own_wallets, wallet_alias)
+                        destino = mi_label
+                        es_transferencia_interna = True
                     else:
                         tipo = "Entrada de Tokens *"
-                        origen = label_address(from_addr, wallet, atoken_contracts, reental_addresses)
-                        destino = "Tu wallet"
+                        origen = label_address(from_addr, wallet, atoken_contracts, reental_addresses, own_wallets, wallet_alias)
+                        destino = mi_label
             else:  # salida
                 if atoken_in:
                     tipo = "Colateralización en Aave"
-                    origen = "Tu wallet"
-                    destino = label_address(to_addr, wallet, atoken_contracts, reental_addresses)
+                    origen = mi_label
+                    destino = label_address(to_addr, wallet, atoken_contracts, reental_addresses, own_wallets, wallet_alias)
                 elif stable_in > 0:
                     tipo = f"Venta de tokens ({stable_in:,.2f} {stable_symbol})"
-                    origen = "Tu wallet"
-                    destino = "Protocolo liquidación proyecto" if to_addr == ZERO_ADDRESS else label_address(to_addr, wallet, atoken_contracts, reental_addresses)
+                    origen = mi_label
+                    destino = "Protocolo liquidación proyecto" if to_addr == ZERO_ADDRESS else label_address(to_addr, wallet, atoken_contracts, reental_addresses, own_wallets, wallet_alias)
                 else:
                     # El USDT puede ir al vault del usuario en lugar de a la wallet directamente
                     vault_info = get_vault_payment(tx["hash"], wallet)
@@ -469,17 +484,23 @@ def process_transfers(transfers: list, wallet: str, known_tokens: dict, reental_
                         vault_addr, vault_amount, vault_sym = vault_info
                         vault_sym = normalize_stable_symbol(vault_sym)
                         tipo = f"Venta de tokens ({vault_amount:,.2f} {vault_sym} al vault)"
-                        origen = "Tu wallet"
-                        destino = "Protocolo liquidación proyecto" if to_addr == ZERO_ADDRESS else label_address(to_addr, wallet, atoken_contracts, reental_addresses)
+                        origen = mi_label
+                        destino = "Protocolo liquidación proyecto" if to_addr == ZERO_ADDRESS else label_address(to_addr, wallet, atoken_contracts, reental_addresses, own_wallets, wallet_alias)
                         stable_in = vault_amount
                         stable_symbol = vault_sym
+                    elif to_addr in own_wallets and to_addr != wallet:
+                        # Sin contraparte en stablecoin y el destino es otra wallet propia: transferencia interna
+                        tipo = f"Transferencia interna → {own_wallets[to_addr]}"
+                        origen = mi_label
+                        destino = label_address(to_addr, wallet, atoken_contracts, reental_addresses, own_wallets, wallet_alias)
+                        es_transferencia_interna = True
                     else:
-                        destino_label = label_address(to_addr, wallet, atoken_contracts, reental_addresses)
+                        destino_label = label_address(to_addr, wallet, atoken_contracts, reental_addresses, own_wallets, wallet_alias)
                         if destino_label == "Wallet Reental":
                             tipo = "Salida de Tokens *"
                         else:
                             tipo = "Salida de tokens"
-                        origen = "Tu wallet"
+                        origen = mi_label
                         destino = destino_label
 
             name = original_info.get("name") or tx_name
@@ -510,6 +531,9 @@ def process_transfers(transfers: list, wallet: str, known_tokens: dict, reental_
                 "stable_symbol": stable_symbol,
                 "tx_hash": tx["hash"],
                 "tx_link": f"https://polygonscan.com/tx/{tx['hash']}",
+                "es_transferencia_interna": es_transferencia_interna,
+                "wallet_addr": wallet,
+                "wallet_alias": mi_label,
             })
 
     # Ordenar movimientos por fecha dentro de cada token
@@ -553,6 +577,8 @@ def build_stablecoin_movements(token_data: dict) -> list:
                 "amount": amount,
                 "stable_symbol": m["stable_symbol"] or "USDT",
                 "tx_link": m["tx_link"],
+                "wallet_addr": m.get("wallet_addr"),
+                "wallet_alias": m.get("wallet_alias"),
             })
     rows.sort(key=lambda r: r["fecha"])
     return rows
@@ -1234,52 +1260,122 @@ def get_eurusd_on_date(date_str: str) -> float:
 
 # ── UI ───────────────────────────────────────────────────────────────────────
 
-wallet_input = st.text_input("🔑 Dirección de la wallet del inversor", placeholder="0x1234abcd...")
+MAX_WALLETS = 5
+
+if "wallet_slots" not in st.session_state:
+    st.session_state.wallet_slots = [{"address": "", "alias": ""}]
+
+st.caption(
+    "Añade una o varias wallets. Si añades más de una, la cartera se muestra combinada "
+    "y los movimientos entre tus propias wallets se identifican automáticamente como "
+    "transferencias internas (no como compra/venta)."
+)
+
+for idx, slot in enumerate(st.session_state.wallet_slots):
+    c_addr, c_alias, c_del = st.columns([3, 2, 1])
+    with c_addr:
+        st.session_state.wallet_slots[idx]["address"] = st.text_input(
+            "🔑 Dirección de la wallet" if idx == 0 else " ",
+            value=slot["address"], placeholder="0x1234abcd...",
+            key=f"aw_addr_{idx}", label_visibility="visible" if idx == 0 else "collapsed",
+        )
+    with c_alias:
+        st.session_state.wallet_slots[idx]["alias"] = st.text_input(
+            "🏷️ Alias (opcional)" if idx == 0 else " ",
+            value=slot["alias"], placeholder="ej. Wallet principal",
+            key=f"aw_alias_{idx}", label_visibility="visible" if idx == 0 else "collapsed",
+        )
+    with c_del:
+        if idx == 0:
+            st.markdown("&nbsp;", unsafe_allow_html=True)
+        if len(st.session_state.wallet_slots) > 1:
+            if st.button("✕", key=f"aw_del_{idx}", help="Quitar esta wallet", use_container_width=True):
+                st.session_state.wallet_slots.pop(idx)
+                st.rerun()
+
+if len(st.session_state.wallet_slots) < MAX_WALLETS:
+    if st.button("➕ Añadir otra wallet"):
+        st.session_state.wallet_slots.append({"address": "", "alias": ""})
+        st.rerun()
+else:
+    st.caption(f"Máximo {MAX_WALLETS} wallets simultáneas (más ralentizaría demasiado la carga).")
+
 filter_date = st.date_input("📅 Filtrar por fecha (opcional — saldo a esa fecha)", value=None)
 analyze_btn = st.button("🔍 Analizar cartera", type="primary", use_container_width=True)
 
 if analyze_btn:
-    wallet = wallet_input.strip().lower()
-    if not wallet or not wallet.startswith("0x") or len(wallet) != 42:
-        st.error("Introduce una dirección de wallet válida (0x... 42 caracteres).")
+    entradas = []
+    for slot in st.session_state.wallet_slots:
+        addr = slot["address"].strip().lower()
+        if not addr:
+            continue
+        if not addr.startswith("0x") or len(addr) != 42:
+            st.error(f"Dirección de wallet inválida: {slot['address']}")
+            st.stop()
+        entradas.append((addr, slot["alias"].strip()))
+
+    if not entradas:
+        st.error("Introduce al menos una dirección de wallet válida (0x... 42 caracteres).")
         st.stop()
 
-    progress_bar = st.progress(0, text="⏳ Iniciando análisis…")
+    # Deduplicar direcciones repetidas (misma wallet en varias filas) conservando la primera
+    seen_addrs, entradas_unicas = set(), []
+    for addr, alias in entradas:
+        if addr in seen_addrs:
+            continue
+        seen_addrs.add(addr)
+        entradas_unicas.append((addr, alias))
+    entradas = entradas_unicas
 
-    progress_bar.progress(10, text="📋 Cargando lista de tokens de Reental…")
+    own_wallets = {addr: (alias or f"Wallet {addr[:8]}") for addr, alias in entradas}
+
+    progress_bar = st.progress(0, text="⏳ Iniciando análisis…")
+    progress_bar.progress(5, text="📋 Cargando lista de tokens de Reental…")
     known_tokens = load_tokens()
     reental_addresses = load_reental_addresses()
 
-    progress_bar.progress(30, text="🔗 Consultando historial de transacciones en Polygon…")
-    try:
-        transfers = fetch_token_transfers(wallet)
-    except Exception as e:
-        progress_bar.empty()
-        st.error(f"Error al consultar Polygonscan: {e}")
-        st.stop()
+    merged_token_data = {}
+    raw_transfers_by_wallet = {}
+    vault_by_wallet = {}
+    n = len(entradas)
 
-    progress_bar.progress(55, text=f"🔍 Procesando {len(transfers)} transferencias encontradas…")
-    token_data = process_transfers(transfers, wallet, known_tokens, reental_addresses)
+    for i, (addr, _alias) in enumerate(entradas):
+        wallet_alias = own_wallets[addr]
+        base_pct = 10 + int(75 * i / n)
 
-    n_vault_candidates = sum(
-        1 for data in token_data.values()
-        for m in data["movements"]
-        if m["tipo"] == "Recepción / Distribución"
-    )
-    if n_vault_candidates:
-        progress_bar.progress(75, text=f"🏦 Verificando {n_vault_candidates} posibles reinversiones desde vault…")
+        progress_bar.progress(base_pct, text=f"🔗 [{wallet_alias}] Consultando historial de transacciones…")
+        try:
+            transfers = fetch_token_transfers(addr)
+        except Exception as e:
+            progress_bar.empty()
+            st.error(f"Error al consultar Polygonscan para «{wallet_alias}» ({addr}): {e}")
+            st.stop()
+        raw_transfers_by_wallet[addr] = transfers
 
-    progress_bar.progress(88, text="🏦 Buscando vault personal del inversor…")
-    vault_addr = detect_vault_address(wallet)
-    vault_transfers = fetch_vault_transfers(vault_addr) if vault_addr else []
+        progress_bar.progress(base_pct + 3, text=f"🔍 [{wallet_alias}] Procesando {len(transfers)} transferencias…")
+        wallet_token_data = process_transfers(transfers, addr, known_tokens, reental_addresses, own_wallets, wallet_alias)
+        for contract, data in wallet_token_data.items():
+            merged = merged_token_data.setdefault(contract, {"movements": [], "balance": 0.0, "info": data["info"]})
+            merged["movements"].extend(data["movements"])
+            merged["balance"] += data["balance"]
+
+        progress_bar.progress(base_pct + 6, text=f"🏦 [{wallet_alias}] Buscando vault personal…")
+        vault_addr_w = detect_vault_address(addr)
+        vault_transfers_w = fetch_vault_transfers(vault_addr_w) if vault_addr_w else []
+        vault_by_wallet[addr] = {"vault_addr": vault_addr_w, "vault_transfers": vault_transfers_w}
+
+    for data in merged_token_data.values():
+        data["movements"].sort(key=lambda m: m["fecha"])
 
     progress_bar.progress(95, text="📊 Preparando resultados…")
     st.session_state.update({
-        "token_data": token_data, "wallet": wallet,
+        "token_data": merged_token_data,
+        "own_wallets": own_wallets,
+        "wallets_analyzed": entradas,
+        "wallet": entradas[0][0],   # wallet "primaria": solo para compatibilidad en enlaces a Polygonscan
         "filter_date": filter_date,
-        "raw_transfers": transfers,
-        "vault_addr": vault_addr,
-        "vault_transfers": vault_transfers,
+        "raw_transfers_by_wallet": raw_transfers_by_wallet,
+        "vault_by_wallet": vault_by_wallet,
     })
     progress_bar.progress(100, text="✅ Análisis completado")
     progress_bar.empty()
@@ -1288,11 +1384,14 @@ if "token_data" not in st.session_state:
     st.stop()
 
 token_data = st.session_state["token_data"]
+own_wallets = st.session_state.get("own_wallets", {})
+wallets_analyzed = st.session_state.get("wallets_analyzed", [])
 wallet = st.session_state["wallet"]
 filter_date = st.session_state["filter_date"]
+es_multi_wallet = len(wallets_analyzed) > 1
 
 if not token_data:
-    st.info("No se encontraron tokens de Reental en esta wallet.")
+    st.info("No se encontraron tokens de Reental en " + ("estas wallets." if es_multi_wallet else "esta wallet."))
     st.stop()
 
 cutoff = filter_date if filter_date else date.today()
@@ -1310,6 +1409,9 @@ for contract, data in token_data.items():
 st.markdown("---")
 date_label = f" a fecha **{filter_date}**" if use_date_filter else ""
 st.subheader(f"📊 Resumen de cartera a la fecha indicada{date_label}")
+if es_multi_wallet:
+    _wallets_str = " · ".join(f"«{alias}» `{addr[:8]}…{addr[-4:]}`" for addr, alias in wallets_analyzed)
+    st.caption(f"Cartera combinada de {len(wallets_analyzed)} wallets: {_wallets_str}")
 
 all_dates = [m["fecha"] for d in token_data.values() for m in d["movements"]]
 primera_fecha = min(all_dates).strftime("%d/%m/%Y") if all_dates else "—"
@@ -1406,6 +1508,14 @@ def parse_fecha(s):
     except Exception:
         return None
 
+def polygonscan_token_link(token_addr: str) -> str:
+    """Enlace al token en Polygonscan. Con varias wallets no se filtra por dirección
+    (el filtro ?a= solo tendría sentido para una wallet concreta)."""
+    if es_multi_wallet:
+        return f"https://polygonscan.com/token/{token_addr}"
+    return f"https://polygonscan.com/token/{token_addr}?a={wallet}"
+
+
 if activos:
     today_str = date.today().strftime("%d/%m/%Y")
 
@@ -1419,7 +1529,7 @@ if activos:
             "Saldo": d["balance_display"],
             "Fecha real de fin de proyecto": fecha_fin,
             "Nº mov.": len(d["movements"]),
-            "Ver en Polygonscan": f"https://polygonscan.com/token/{d['info']['address']}?a={wallet}",
+            "Ver en Polygonscan": polygonscan_token_link(d["info"]["address"]),
         })
 
     df_activos = pd.DataFrame(rows)
@@ -1453,7 +1563,7 @@ if historicos:
         "Último movimiento": d["movements"][-1]["fecha_str"],
         "Fecha real de fin de proyecto": get_fecha_fin_display(d["info"], closing_dates),
         "Nº mov.": len(d["movements"]),
-        "Ver en Polygonscan": f"https://polygonscan.com/token/{d['info']['address']}?a={wallet}",
+        "Ver en Polygonscan": polygonscan_token_link(d["info"]["address"]),
     } for d in sorted(historicos.values(), key=lambda x: x["info"]["label"])]
     def style_fecha_fin_historicos(val):
         d = parse_fecha(str(val))
@@ -1472,6 +1582,27 @@ if historicos:
 else:
     st.info("No hay tokens históricos.")
 
+# ── Filtro de wallet (solo detalle; los KPIs y el gráfico siempre son agregados) ──
+selected_wallet_filter = None   # None = todas las wallets combinadas
+if es_multi_wallet:
+    st.markdown("---")
+    opciones_wallet = ["Todas (agregado)"] + [alias for _, alias in wallets_analyzed]
+    eleccion = st.selectbox(
+        "🔍 Ver detalle de:", opciones_wallet,
+        help="Los KPIs, el resumen y el gráfico de evolución de más arriba siempre muestran el agregado de todas tus wallets. "
+             "Este filtro solo afecta a las tablas de detalle de más abajo.",
+    )
+    if eleccion != "Todas (agregado)":
+        selected_wallet_filter = next(addr for addr, alias in wallets_analyzed if alias == eleccion)
+
+
+def filtrar_por_wallet(items: list) -> list:
+    """Filtra una lista de movimientos/eventos por la wallet elegida (None = sin filtrar)."""
+    if selected_wallet_filter is None:
+        return items
+    return [it for it in items if it.get("wallet_addr") == selected_wallet_filter]
+
+
 # ── Movimientos por token ─────────────────────────────────────────────────────
 st.markdown("---")
 st.subheader("📋 Movimientos por token")
@@ -1488,7 +1619,7 @@ option_labels = [
 selected_label = st.selectbox("Selecciona un token:", options=option_labels, key="token_selector")
 selected_idx = option_labels.index(selected_label)
 _, selected_data = all_tokens_sorted[selected_idx]
-movs = selected_data["movements"]
+movs = filtrar_por_wallet(selected_data["movements"])
 
 if movs:
     rows = []
@@ -1503,8 +1634,9 @@ if movs:
             saldo_stable -= m["stable_out"]
 
         # Rendimiento: únicamente USDT recibido al vender ESE token
-        # Las reinversiones desde vault NO computan: representan dividendos de OTROS tokens anteriores
-        es_venta = m["cantidad_neta"] < 0 and m["stable_in"] > 0
+        # Las reinversiones desde vault y las transferencias internas NO computan:
+        # no son una venta real (dividendos de otros tokens / movimiento entre wallets propias)
+        es_venta = m["cantidad_neta"] < 0 and m["stable_in"] > 0 and not m.get("es_transferencia_interna")
         if es_venta:
             rendimiento_acum += m["stable_in"]
         rendimiento_col = f"{rendimiento_acum:,.2f}" if rendimiento_acum > 0 else "—"
@@ -1518,7 +1650,7 @@ if movs:
         else:
             stable_col = "—"
 
-        rows.append({
+        row = {
             "Fecha": m["fecha_str"],
             "Operación": m["tipo"],
             "Origen": m["origen"],
@@ -1529,12 +1661,15 @@ if movs:
             "Saldo USDT": f"{saldo_stable:,.2f}",
             "Rendimiento acum.": rendimiento_col,
             "TX": m["tx_link"],
-        })
+        }
+        if es_multi_wallet:
+            row["Wallet"] = m.get("wallet_alias", "—")
+        rows.append(row)
 
     df_movs = pd.DataFrame(rows)
 
     def style_address_cell(val):
-        if val == "Tu wallet":
+        if val == "Tu wallet" or str(val).startswith("Tu wallet «") or val in own_wallets.values():
             return "background-color: #d4edda; color: #2d6a4f; font-weight: 500"
         if val == "Wallet Reental":
             return "background-color: #fde8c8; color: #8a4a00; font-weight: 500"
@@ -1547,26 +1682,32 @@ if movs:
 
     has_entrada_sin_usdt = any("Entrada de Tokens *" in str(r.get("Operación", "")) for r in rows)
     has_salida_sin_usdt  = any("Salida de Tokens *"  in str(r.get("Operación", "")) for r in rows)
-    if has_entrada_sin_usdt or has_salida_sin_usdt:
+    has_transferencia_interna = any("Transferencia interna" in str(r.get("Operación", "")) for r in rows)
+    if has_entrada_sin_usdt or has_salida_sin_usdt or has_transferencia_interna:
         partes = []
+        if has_transferencia_interna:
+            partes.append(
+                "**Transferencia interna**: movimiento entre tus propias wallets (declaradas arriba). "
+                "No se contabiliza como compra ni venta en el rendimiento acumulado ni en el informe fiscal."
+            )
         if has_entrada_sin_usdt:
             partes.append(
                 "**Entrada de Tokens \\***: no se identificó contraparte de USDT en la misma transacción. "
                 "Posibles causas: (1) compra con dinero FIAT (el pago queda en el banco, no en blockchain); "
                 "(2) el USDT fue enviado en una transacción separada; "
-                "(3) envío interno entre billeteras del propio inversor."
+                "(3) envío interno entre billeteras del propio inversor no declaradas arriba."
             )
         if has_salida_sin_usdt:
             partes.append(
                 "**Salida de Tokens \\***: los tokens salieron de tu billetera sin una contrapartida en USDT o USDC "
                 "en la misma transacción por alguna de las siguientes razones: (1) los tokens fueron enviados a una "
-                "billetera adicional controlada por el usuario; (2) los tokens fueron enviados a una billetera de un "
+                "billetera adicional controlada por el usuario y no declarada arriba; (2) los tokens fueron enviados a una billetera de un "
                 "tercero donde la contraprestación pudo haberse recibido vía cripto antes o después del envío, o por "
                 "transferencia FIAT — en ese caso habría que analizarlo en el banco."
             )
         st.caption("\\* " + "  \n\\* ".join(partes))
 else:
-    st.info("Sin movimientos para este token.")
+    st.info("Sin movimientos para este token" + (" con la wallet seleccionada." if selected_wallet_filter else "."))
 
 # ── Gráfico combinado ─────────────────────────────────────────────────────────
 st.markdown("---")
@@ -1643,32 +1784,36 @@ st.markdown("---")
 st.subheader("💵 Movimientos de Stablecoins relacionados con Reental")
 st.caption("Solo flujos de USDT/USDC directamente vinculados a compras, ventas o reinversiones de tokens inmobiliarios.")
 
-stable_movs = build_stablecoin_movements(token_data)
-if stable_movs:
+stable_movs = build_stablecoin_movements(token_data)   # SIN filtrar: se reutiliza en el CSV fiscal
+stable_movs_filtered = filtrar_por_wallet(stable_movs)  # para la tabla en pantalla
+if stable_movs_filtered:
     saldo = 0.0
     stable_rows = []
-    for m in stable_movs:
+    for m in stable_movs_filtered:
         if m["direction"] == "entrada":
             saldo += m["amount"]
             amount_str = f"+{m['amount']:,.2f} {m['stable_symbol']}"
         else:
             saldo -= m["amount"]
             amount_str = f"-{m['amount']:,.2f} {m['stable_symbol']}"
-        stable_rows.append({
+        row = {
             "Fecha": m["fecha_str"],
             "Token inmobiliario": m["token"],
             "Operación": m["operacion"],
             "Importe": amount_str,
             "Saldo acumulado": f"{saldo:,.2f} {m['stable_symbol']}",
             "TX": m["tx_link"],
-        })
+        }
+        if es_multi_wallet:
+            row["Wallet"] = m.get("wallet_alias", "—")
+        stable_rows.append(row)
     st.dataframe(pd.DataFrame(stable_rows), column_config={
         "TX": st.column_config.LinkColumn("Ver TX", width="small"),
     }, hide_index=True, use_container_width=True)
 
     # Métricas resumen
-    total_invertido = sum(m["amount"] for m in stable_movs if m["direction"] == "salida")
-    total_recibido  = sum(m["amount"] for m in stable_movs if m["direction"] == "entrada")
+    total_invertido = sum(m["amount"] for m in stable_movs_filtered if m["direction"] == "salida")
+    total_recibido  = sum(m["amount"] for m in stable_movs_filtered if m["direction"] == "entrada")
     balance_neto = total_recibido - total_invertido
     balance_color = "#16a34a" if balance_neto >= 0 else "#dc2626"
     _balance_sublabel = "USDT / USDC"
@@ -1679,36 +1824,55 @@ if stable_movs:
     if balance_neto < 0:
         st.caption("⚠️ Faltaría por considerar las operaciones realizadas con FIAT, como por ejemplo la compra de tokens inmobiliarios.")
 else:
-    st.info("No se detectaron flujos de stablecoins relacionados con Reental en esta wallet.")
+    st.info("No se detectaron flujos de stablecoins relacionados con Reental" + (" con la wallet seleccionada." if selected_wallet_filter else " en esta wallet."))
 
-raw_transfers    = st.session_state.get("raw_transfers", [])
-vault_addr       = st.session_state.get("vault_addr")
-vault_transfers  = st.session_state.get("vault_transfers", [])
-dividends = process_dividends(raw_transfers, wallet, vault_transfers)
+raw_transfers_by_wallet = st.session_state.get("raw_transfers_by_wallet", {})
+vault_by_wallet         = st.session_state.get("vault_by_wallet", {})
+
+dividends = []
+for _addr, _alias in wallets_analyzed:
+    _vinfo = vault_by_wallet.get(_addr, {})
+    _evs = process_dividends(
+        raw_transfers_by_wallet.get(_addr, []), _addr, _vinfo.get("vault_transfers"),
+    )
+    for _ev in _evs:
+        _ev["wallet_addr"], _ev["wallet_alias"] = _addr, _alias
+    dividends.extend(_evs)
+dividends.sort(key=lambda e: e["fecha"])
+
+vaults_detectados = {
+    alias: vault_by_wallet.get(addr, {}).get("vault_addr")
+    for addr, alias in wallets_analyzed
+    if vault_by_wallet.get(addr, {}).get("vault_addr")
+}
 
 # ── Dividendos recibidos de Reental ──────────────────────────────────────────
 st.markdown("---")
 st.subheader("💰 Dividendos recibidos de Reental")
 
-_vault_note = (
-    f"Incluye dividendos acumulados en tu vault personal (`{vault_addr[:8]}…{vault_addr[-4:]}`) "
-    "además de los recibidos directamente en esta wallet."
-    if vault_addr else
-    "Solo se muestran dividendos recibidos directamente en esta wallet "
-    "(no se detectó vault personal asociado)."
-)
+if vaults_detectados:
+    _detalle_vaults = "; ".join(
+        f"«{alias}» → `{v[:8]}…{v[-4:]}`" for alias, v in vaults_detectados.items()
+    )
+    _vault_note = f"Incluye dividendos acumulados en vault personal detectado en: {_detalle_vaults}."
+else:
+    _vault_note = (
+        "Solo se muestran dividendos recibidos directamente en wallet "
+        "(no se detectó vault personal asociado)."
+    )
 st.caption(
     "Pagos de rendimientos distribuidos por Reental. "
     "Cada fila es una distribución (puede incluir varios proyectos en el mismo TX). " + _vault_note
 )
 
-if dividends:
+dividends_filtered = filtrar_por_wallet(dividends)
+if dividends_filtered:
     saldo_div = 0.0
     div_rows = []
-    for ev in dividends:
+    for ev in dividends_filtered:
         saldo_div += ev["total"]
         detalle = "  +  ".join(f"{p:,.2f}" for p in ev["pagos"])
-        div_rows.append({
+        row = {
             "Fecha":          ev["fecha_str"],
             "Destino":        ev.get("destino", "Wallet directa"),
             "Nº proyectos":   ev["n_proyectos"],
@@ -1716,47 +1880,59 @@ if dividends:
             "Total recibido": f"{ev['total']:,.2f} {ev['sym']}",
             "Acumulado":      f"{saldo_div:,.2f} {ev['sym']}",
             "TX": ev["tx_link"],
-        })
+        }
+        if es_multi_wallet:
+            row["Wallet"] = ev.get("wallet_alias", "—")
+        div_rows.append(row)
 
     st.dataframe(pd.DataFrame(div_rows), column_config={
         "TX": st.column_config.LinkColumn("Ver TX", width="small"),
         "Nº proyectos": st.column_config.NumberColumn(width="small"),
     }, hide_index=True, use_container_width=True)
 
-    total_div      = sum(ev["total"] for ev in dividends)
-    total_wallet   = sum(ev["total"] for ev in dividends if ev.get("destino") == "Wallet directa")
-    total_vault    = sum(ev["total"] for ev in dividends if ev.get("destino") == "Vault personal")
+    total_div      = sum(ev["total"] for ev in dividends_filtered)
+    total_wallet   = sum(ev["total"] for ev in dividends_filtered if ev.get("destino") == "Wallet directa")
+    total_vault    = sum(ev["total"] for ev in dividends_filtered if ev.get("destino") == "Vault personal")
     c1, c2, c3 = st.columns(3)
     c1.markdown(kpi_card("💵", "Total dividendos",       f"{total_div:,.2f}",
                           value_color="#16a34a", sublabel="USDT / USDC (wallet + vault)"), unsafe_allow_html=True)
-    c2.markdown(kpi_card("📬", "Distribuciones",          str(len(dividends)),
+    c2.markdown(kpi_card("📬", "Distribuciones",          str(len(dividends_filtered)),
                           sublabel="pagos recibidos"), unsafe_allow_html=True)
-    c3.markdown(kpi_card("📊", "Media por distribución",  f"{total_div / len(dividends):,.2f}",
+    c3.markdown(kpi_card("📊", "Media por distribución",  f"{total_div / len(dividends_filtered):,.2f}",
                           sublabel="USDT / USDC"), unsafe_allow_html=True)
-    if vault_addr and total_vault > 0:
+    if vaults_detectados and total_vault > 0:
         st.caption(
             f"Desglose: **${total_wallet:,.2f}** recibidos en wallet directa · "
             f"**${total_vault:,.2f}** acumulados en vault personal"
         )
 else:
-    st.info("No se detectaron dividendos recibidos en esta wallet ni en su vault personal.")
+    st.info("No se detectaron dividendos recibidos" + (" con la wallet seleccionada." if selected_wallet_filter else " en esta wallet ni en su vault personal."))
 
 # ── Actividad en Aave ────────────────────────────────────────────────────────
 st.markdown("---")
 st.subheader("🏦 Actividad en Aave (USDT/USDC)")
 st.caption("Actividad en el protocolo Aave: préstamos otorgados (prestamista) y créditos tomados usando tokens inmobiliarios como garantía (prestatario).")
 
-aave_activity = process_aave_activity(raw_transfers, wallet)
-aave_lender   = aave_activity["lender"]
-aave_borrower = aave_activity["borrower"]
+aave_lender, aave_borrower = [], []
+for _addr, _alias in wallets_analyzed:
+    _act = process_aave_activity(raw_transfers_by_wallet.get(_addr, []), _addr)
+    for _m in _act["lender"]:
+        _m["wallet_addr"], _m["wallet_alias"] = _addr, _alias
+    for _m in _act["borrower"]:
+        _m["wallet_addr"], _m["wallet_alias"] = _addr, _alias
+    aave_lender.extend(_act["lender"])
+    aave_borrower.extend(_act["borrower"])
+aave_lender.sort(key=lambda m: m["fecha"])
+aave_borrower.sort(key=lambda m: m["fecha"])
 aave_lending  = aave_lender   # alias para el exportador CSV
 
 # ── Prestamista ───────────────────────────────────────────────────────────────
 st.markdown("#### 🏦 Como prestamista")
-if aave_lender:
+aave_lender_filtered = filtrar_por_wallet(aave_lender)
+if aave_lender_filtered:
     saldo_at = 0.0
     lender_rows = []
-    for m in aave_lender:
+    for m in aave_lender_filtered:
         if m["tipo"] == "Depósito préstamo":
             saldo_at += m["cantidad_atoken"]
             importe_str = f"-{m['stable_amount']:,.2f} {m['stable_symbol']}" if m["stable_amount"] else "—"
@@ -1774,23 +1950,25 @@ if aave_lender:
         }
         if m["interest_note"]:
             row["Intereses"] = m["interest_note"]
+        if es_multi_wallet:
+            row["Wallet"] = m.get("wallet_alias", "—")
         lender_rows.append(row)
 
     st.dataframe(pd.DataFrame(lender_rows), column_config={
         "TX": st.column_config.LinkColumn("Ver TX", width="small"),
     }, hide_index=True, use_container_width=True)
 
-    total_dep   = sum(m["stable_amount"] for m in aave_lender if m["tipo"] == "Depósito préstamo")
-    total_ret   = sum(m["stable_amount"] for m in aave_lender if m["tipo"] == "Retirada préstamo")
-    at_dep      = sum(m["cantidad_atoken"] for m in aave_lender if m["tipo"] == "Depósito préstamo")
-    at_ret      = sum(m["cantidad_atoken"] for m in aave_lender if m["tipo"] == "Retirada préstamo")
+    total_dep   = sum(m["stable_amount"] for m in aave_lender_filtered if m["tipo"] == "Depósito préstamo")
+    total_ret   = sum(m["stable_amount"] for m in aave_lender_filtered if m["tipo"] == "Retirada préstamo")
+    at_dep      = sum(m["cantidad_atoken"] for m in aave_lender_filtered if m["tipo"] == "Depósito préstamo")
+    at_ret      = sum(m["cantidad_atoken"] for m in aave_lender_filtered if m["tipo"] == "Retirada préstamo")
     saldo_vivo  = max(0.0, at_dep - at_ret)
     pos_abierta = saldo_vivo > 0.01
     int_netos   = max(0.0, total_ret + saldo_vivo - total_dep)
     rent_pct    = (int_netos / total_dep * 100) if total_dep > 0 else 0.0
 
     flujos_irr = []
-    for m in aave_lender:
+    for m in aave_lender_filtered:
         if m["tipo"] == "Depósito préstamo":
             flujos_irr.append((m["fecha"], -m["stable_amount"]))
         else:
@@ -1828,13 +2006,14 @@ if aave_lender:
 > ⚠️ Los aTokens se valoran a paridad 1:1 con USDT/USDC; variaciones del índice Aave pueden producir ligeras imprecisiones.
         """)
 else:
-    st.info("No se detectó actividad como prestamista en Aave en esta wallet.")
+    st.info("No se detectó actividad como prestamista en Aave" + (" con la wallet seleccionada." if selected_wallet_filter else " en esta wallet."))
 
 # ── Prestatario ───────────────────────────────────────────────────────────────
 st.markdown("#### 🏛️ Como prestatario")
-if aave_borrower:
+aave_borrower_filtered = filtrar_por_wallet(aave_borrower)
+if aave_borrower_filtered:
     borrower_rows = []
-    for m in aave_borrower:
+    for m in aave_borrower_filtered:
         if m["tipo"] in ("Préstamo recibido", "Pago de deuda"):
             importe_str = (
                 f"+{m['stable_amount']:,.2f} {m['stable_symbol']}" if m["tipo"] == "Préstamo recibido"
@@ -1842,25 +2021,28 @@ if aave_borrower:
             ) if m["stable_amount"] else "—"
         else:
             importe_str = "—"
-        borrower_rows.append({
+        row = {
             "Fecha":      m["fecha_str"],
             "Operación":  m["tipo"],
             "Detalle":    m["detalle"],
             "Cantidad":   f"{m['cantidad']:,.4f}",
             "USDT/USDC":  importe_str,
             "TX":         m["tx_link"],
-        })
+        }
+        if es_multi_wallet:
+            row["Wallet"] = m.get("wallet_alias", "—")
+        borrower_rows.append(row)
 
     st.dataframe(pd.DataFrame(borrower_rows), column_config={
         "TX": st.column_config.LinkColumn("Ver TX", width="small"),
     }, hide_index=True, use_container_width=True)
 
-    total_prestado  = sum(m["stable_amount"] for m in aave_borrower if m["tipo"] == "Préstamo recibido")
-    total_devuelto  = sum(m["stable_amount"] for m in aave_borrower if m["tipo"] == "Pago de deuda")
+    total_prestado  = sum(m["stable_amount"] for m in aave_borrower_filtered if m["tipo"] == "Préstamo recibido")
+    total_devuelto  = sum(m["stable_amount"] for m in aave_borrower_filtered if m["tipo"] == "Pago de deuda")
     coste_neto      = max(0.0, total_devuelto - total_prestado)
     deuda_viva      = max(0.0, total_prestado - total_devuelto)
-    n_garantias_dep = sum(1 for m in aave_borrower if m["tipo"] == "Garantía depositada")
-    n_garantias_ret = sum(1 for m in aave_borrower if m["tipo"] == "Garantía retirada")
+    n_garantias_dep = sum(1 for m in aave_borrower_filtered if m["tipo"] == "Garantía depositada")
+    n_garantias_ret = sum(1 for m in aave_borrower_filtered if m["tipo"] == "Garantía retirada")
     garantia_activa = n_garantias_dep > n_garantias_ret
 
     g_badge = (
@@ -1884,7 +2066,7 @@ if aave_borrower:
                          value_color="#dc2626" if deuda_viva > 0.01 else "#16a34a",
                          sublabel="USDT / USDC", badge=d_badge), unsafe_allow_html=True)
 else:
-    st.info("No se detectó actividad como prestatario en Aave en esta wallet.")
+    st.info("No se detectó actividad como prestatario en Aave" + (" con la wallet seleccionada." if selected_wallet_filter else " en esta wallet."))
 
 # ── Ecosistema RNT — Staking y Farming ───────────────────────────────────────
 st.markdown("---")
@@ -1893,10 +2075,17 @@ st.caption(
     "Actividad relacionada con el token RNT: staking, pool de liquidez RNT/USDT (SLP) y farming (frmRNT)."
 )
 
-xrnt_nft_transfers = fetch_nft_transfers(wallet, STAKING_RECEIVER)
-rnt_events = process_rnt_ecosystem(raw_transfers, wallet, xrnt_nft_transfers)
+rnt_events = []
+for _addr, _alias in wallets_analyzed:
+    _xrnt_nft_transfers = fetch_nft_transfers(_addr, STAKING_RECEIVER)
+    _evs = process_rnt_ecosystem(raw_transfers_by_wallet.get(_addr, []), _addr, _xrnt_nft_transfers)
+    for _ev in _evs:
+        _ev["wallet_addr"], _ev["wallet_alias"] = _addr, _alias
+    rnt_events.extend(_evs)
+rnt_events.sort(key=lambda e: e["fecha"])
 
-if rnt_events:
+rnt_events_filtered = filtrar_por_wallet(rnt_events)
+if rnt_events_filtered:
     # Calcular balances acumulados
     bal_rnt = bal_slp = bal_frmrnt = 0.0
     bal_xrnt_staked = 0.0    # RNT total en posición de staking (xRNT NFT)
@@ -1921,7 +2110,7 @@ if rnt_events:
         "Envío de RNT":                        "#ffd6d6",
     }
 
-    for ev in rnt_events:
+    for ev in rnt_events_filtered:
         bal_rnt    += ev["rnt_delta"]
         bal_slp    += ev["slp_delta"]
         bal_frmrnt += ev["frmrnt_delta"]
@@ -1935,14 +2124,17 @@ if rnt_events:
         bal_xrnt_staked += ev.get("xrnt_staked_delta", 0.0)
         bal_xrnt_count  += ev.get("xrnt_count_delta", 0)
 
-        rnt_rows.append({
+        row = {
             "Fecha":       ev["fecha_str"],
             "Operación":   ev["tipo"],
             "Detalle":     ev["detalle"],
             "Saldo RNT":   round(bal_rnt, 4),
             "Saldo frmRNT": round(bal_frmrnt, 6),
             "TX": ev["tx_link"],
-        })
+        }
+        if es_multi_wallet:
+            row["Wallet"] = ev.get("wallet_alias", "—")
+        rnt_rows.append(row)
 
     def style_operacion(val):
         color = OPERATION_COLORS.get(val, "")
@@ -1957,7 +2149,7 @@ if rnt_events:
     }, hide_index=True, use_container_width=True)
 
     # Notas a pie de tabla (asteriscos de eventos especiales)
-    notas_pie = [ev["nota_asterisco"] for ev in rnt_events if ev.get("nota_asterisco")]
+    notas_pie = [ev["nota_asterisco"] for ev in rnt_events_filtered if ev.get("nota_asterisco")]
     for nota in dict.fromkeys(notas_pie):  # deduplicar preservando orden
         st.caption(nota)
 
@@ -2020,14 +2212,20 @@ if rnt_events:
         else:
             st.success("✅ Han transcurrido más de 180 días desde el último depósito. El burning fee está en el mínimo: **2%**.")
 else:
-    st.info("No se detectó actividad en el ecosistema RNT (staking, farming o pool de liquidez) en esta wallet.")
+    st.info(
+        "No se detectó actividad en el ecosistema RNT (staking, farming o pool de liquidez)"
+        + (" con la wallet seleccionada." if selected_wallet_filter else " en esta wallet.")
+    )
 
 # ── Exportar (informe fiscal completo) ───────────────────────────────────────
 st.markdown("---")
 st.subheader("📄 Exportar informe fiscal completo")
 st.caption(
-    "Todos los movimientos de la wallet en orden cronológico: tokens inmobiliarios, "
-    "dividendos, stablecoins, ecosistema RNT y Aave. Diseñado para asesores fiscales."
+    "Todos los movimientos de " + ("las wallets analizadas" if es_multi_wallet else "la wallet") +
+    " en orden cronológico: tokens inmobiliarios, dividendos, stablecoins, ecosistema RNT y Aave. "
+    "Incluye la columna Wallet/Alias" + (" y marca las transferencias internas entre tus propias wallets "
+    "(categoría «Transferencia interna», excluidas del cómputo de compra/venta)." if es_multi_wallet else ".") +
+    " Diseñado para asesores fiscales."
 )
 
 @st.cache_data(show_spinner=False, ttl=86400)
@@ -2064,6 +2262,7 @@ def build_fiscal_csv() -> bytes:
             stable_in  = m.get("stable_in",  0.0) or 0.0
             stable_out = m.get("stable_out", 0.0) or 0.0
             es_entrada = cantidad > 0
+            es_interna = m.get("es_transferencia_interna", False)
 
             # Precio unitario
             if es_entrada and stable_out > 0 and abs(cantidad) > 0:
@@ -2089,20 +2288,29 @@ def build_fiscal_csv() -> bytes:
                 nota = "Precio no disponible."
 
             valor_usd = round(abs(cantidad) * precio_unit, 2) if precio_unit else None
+            categoria = "Transferencia interna" if es_interna else "Token inmobiliario"
+            if es_interna:
+                fuente_precio = "N/A — transferencia interna"
+                valor_usd = None
+                nota = (
+                    "No es una disposición fiscal: movimiento entre wallets propias del mismo titular "
+                    f"({m['origen']} → {m['destino']})."
+                )
 
             rows.append({
                 "Fecha UTC":        m["fecha_str"],
                 "Año fiscal":       m["fecha_str"][:4],
-                "Categoría":        "Token inmobiliario",
+                "Categoría":        categoria,
                 "Tipo operación":   m["tipo"],
                 "Activo":           f"{nombre} ({simbolo})",
                 "Cantidad":         round(cantidad, 6),
-                "Precio unit. USD": round(precio_unit, 4) if precio_unit else "",
+                "Precio unit. USD": round(precio_unit, 4) if (precio_unit and not es_interna) else "",
                 "Valor USD":        valor_usd if valor_usd else "",
                 "Fuente precio":    fuente_precio,
                 "Contraparte":      m["destino"] if es_entrada else m["origen"],
                 "TX Hash":          m["tx_hash"],
                 "Notas":            nota,
+                "Wallet/Alias":     m.get("wallet_alias", ""),
             })
 
     # ── 2. Dividendos ─────────────────────────────────────────────────────────
@@ -2124,6 +2332,7 @@ def build_fiscal_csv() -> bytes:
             "Contraparte":      "Reental (distribuidor)",
             "TX Hash":          ev.get("tx_link", "").replace("https://polygonscan.com/tx/", ""),
             "Notas":            nota_div,
+            "Wallet/Alias":     ev.get("wallet_alias", ""),
         })
 
     # ── 3. Stablecoins ────────────────────────────────────────────────────────
@@ -2142,6 +2351,7 @@ def build_fiscal_csv() -> bytes:
             "Contraparte":      "",
             "TX Hash":          m.get("tx_link", "").replace("https://polygonscan.com/tx/", ""),
             "Notas":            f"Relacionado con: {m['token']}",
+            "Wallet/Alias":     m.get("wallet_alias", ""),
         })
 
     # ── 4. Ecosistema RNT ─────────────────────────────────────────────────────
@@ -2203,6 +2413,7 @@ def build_fiscal_csv() -> bytes:
             "Contraparte":      "",
             "TX Hash":          ev.get("tx_link", "").replace("https://polygonscan.com/tx/", ""),
             "Notas":            nota_completa,
+            "Wallet/Alias":     ev.get("wallet_alias", ""),
         })
 
     # ── 5. Aave — Prestamista ─────────────────────────────────────────────────
@@ -2221,6 +2432,7 @@ def build_fiscal_csv() -> bytes:
             "Contraparte":      "Aave Protocol",
             "TX Hash":          m.get("tx_link", "").replace("https://polygonscan.com/tx/", ""),
             "Notas":            m.get("interest_note", ""),
+            "Wallet/Alias":     m.get("wallet_alias", ""),
         })
 
     # ── 6. Aave — Prestatario ─────────────────────────────────────────────────
@@ -2253,6 +2465,7 @@ def build_fiscal_csv() -> bytes:
             "Contraparte":      "Aave Protocol",
             "TX Hash":          m.get("tx_link", "").replace("https://polygonscan.com/tx/", ""),
             "Notas":            nota,
+            "Wallet/Alias":     m.get("wallet_alias", ""),
         })
 
     # Ordenar todo cronológicamente
@@ -2262,10 +2475,11 @@ def build_fiscal_csv() -> bytes:
 with st.spinner("Preparando informe fiscal…"):
     csv_fiscal = build_fiscal_csv()
 
+_csv_filename_suffix = wallet[:8] if not es_multi_wallet else f"multi{len(wallets_analyzed)}_{wallet[:8]}"
 st.download_button(
     "⬇️ Descargar informe fiscal completo (CSV)",
     data=csv_fiscal,
-    file_name=f"reental_informe_fiscal_{wallet[:8]}.csv",
+    file_name=f"reental_informe_fiscal_{_csv_filename_suffix}.csv",
     mime="text/csv",
     type="primary",
     use_container_width=True,
