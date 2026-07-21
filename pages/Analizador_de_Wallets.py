@@ -4,7 +4,6 @@ import os
 import sys
 import json
 import io
-import time
 import unicodedata
 from datetime import datetime, date, timedelta
 from collections import defaultdict
@@ -1243,23 +1242,39 @@ def get_rnt_price_usdt() -> float:
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def get_eurusd_on_date(date_str: str) -> float:
-    """Tipo de cambio EUR/USD para una fecha dada (YYYY-MM-DD). Usa CoinGecko (euro vs usd).
-    Devuelve None si no se puede obtener."""
+@st.cache_data(show_spinner=False, ttl=21600)
+def _eurusd_history() -> dict:
+    """Tipo de cambio EUR/USD diario de los últimos 365 días, en UNA sola
+    llamada (`market_chart/range` de Tether en EUR, invertido) en vez de una
+    petición por fecha — el mismo problema de rate-limit que en el precio de
+    RNT: consultar fecha a fecha agota el límite del plan gratuito de
+    CoinGecko a partir de la 6ª-7ª llamada seguida. Devuelve {"YYYY-MM-DD": tipo}."""
     try:
-        dd = date_str[8:10]; mm = date_str[5:7]; yyyy = date_str[:4]
+        hoy = datetime.utcnow()
+        desde = hoy - timedelta(days=364)
         r = requests.get(
-            "https://api.coingecko.com/api/v3/coins/tether/history",
-            params={"date": f"{dd}-{mm}-{yyyy}", "localization": "false"},
-            timeout=10,
+            "https://api.coingecko.com/api/v3/coins/tether/market_chart/range",
+            params={"vs_currency": "eur", "from": int(desde.timestamp()), "to": int(hoy.timestamp())},
+            timeout=20,
         )
+        r.raise_for_status()
         # Tether (USDT) en EUR nos da 1/EURUSD → invertimos
-        eur_price = r.json().get("market_data", {}).get("current_price", {}).get("eur")
-        if eur_price and float(eur_price) > 0:
-            return round(1.0 / float(eur_price), 4)
+        return {
+            datetime.utcfromtimestamp(ts / 1000).strftime("%Y-%m-%d"): round(1.0 / float(p), 4)
+            for ts, p in r.json().get("prices", []) if p
+        }
     except Exception:
-        pass
-    # Fallback: ECB via exchangerate.host (sin API key)
+        return {}
+
+
+def get_eurusd_on_date(date_str: str) -> float:
+    """Tipo de cambio EUR/USD (USD por 1 EUR) para una fecha dada (YYYY-MM-DD).
+    Si la fecha excede la ventana de 365 días de CoinGecko o el histórico no se
+    pudo obtener, usa como último recurso el tipo de cambio ACTUAL vía
+    Frankfurter/BCE — una aproximación, no el tipo exacto de esa fecha."""
+    rate = _eurusd_history().get(date_str[:10])
+    if rate:
+        return rate
     try:
         r2 = requests.get(
             "https://api.frankfurter.app/latest",
@@ -1955,8 +1970,8 @@ if dividends_filtered:
                           sublabel="USDT / USDC"), unsafe_allow_html=True)
     if vaults_detectados and total_vault > 0:
         st.caption(
-            f"Desglose: **${total_wallet:,.2f}** recibidos en wallet directa · "
-            f"**${total_vault:,.2f}** acumulados en vault personal"
+            f"Desglose: **{total_wallet:,.2f} USDT/USDC** recibidos en wallet directa · "
+            f"**{total_vault:,.2f} USDT/USDC** acumulados en vault personal"
         )
 else:
     st.info("No se detectaron dividendos recibidos" + (" con la wallet seleccionada." if selected_wallet_filter else " en esta wallet ni en su vault personal."))
@@ -2280,35 +2295,37 @@ st.caption(
     "al tipo de cambio de la fecha de cada operación."
 )
 
-@st.cache_data(show_spinner=False, ttl=86400)
+@st.cache_data(show_spinner=False, ttl=21600)
+def _rnt_price_history_usd() -> dict:
+    """Precio diario de RNT en USD para los últimos 365 días, obtenido en UNA
+    sola llamada a CoinGecko (`market_chart/range`) en vez de una petición por
+    fecha: consultar fecha a fecha (`coins/{id}/history`) agota el límite de
+    peticiones del plan gratuito a partir de la 6ª-7ª llamada seguida, lo que
+    hacía fallar incluso fechas recientes por rate-limit, no solo las que
+    exceden la ventana de 365 días. Devuelve {"YYYY-MM-DD": precio}; {} si la
+    consulta falla (todas las fechas quedarán entonces sin precio, nunca en 0)."""
+    try:
+        hoy = datetime.utcnow()
+        desde = hoy - timedelta(days=364)
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/coins/reental/market_chart/range",
+            params={"vs_currency": "usd", "from": int(desde.timestamp()), "to": int(hoy.timestamp())},
+            timeout=20,
+        )
+        r.raise_for_status()
+        return {
+            datetime.utcfromtimestamp(ts / 1000).strftime("%Y-%m-%d"): float(p)
+            for ts, p in r.json().get("prices", [])
+        }
+    except Exception:
+        return {}
+
+
 def get_rnt_price_on_date(date_str: str):
-    """
-    Devuelve el precio de RNT en USD para una fecha dada (formato YYYY-MM-DD).
-    Usa CoinGecko historical data. Devuelve None si no disponible: bien porque
-    la fecha excede la ventana de 365 días del plan gratuito (HTTP 401,
-    error_code 10012 — no hay forma de obtenerlo sin plan de pago), bien por
-    haber agotado el límite de peticiones (HTTP 429, mitigado con reintentos).
-    """
-    dd, mm, yyyy = date_str[8:10], date_str[5:7], date_str[:4]
-    cg_date = f"{dd}-{mm}-{yyyy}"
-    for intento, espera in enumerate((0, 1.5, 3.0)):
-        if espera:
-            time.sleep(espera)
-        try:
-            r = requests.get(
-                "https://api.coingecko.com/api/v3/coins/reental/history",
-                params={"date": cg_date, "localization": "false"},
-                timeout=10,
-            )
-            if r.status_code == 429 and intento < 2:
-                continue
-            price = r.json().get("market_data", {}).get("current_price", {}).get("usd")
-            return float(price) if price else None
-        except Exception:
-            if intento < 2:
-                continue
-            return None
-    return None
+    """Precio de RNT en USD para una fecha dada (YYYY-MM-DD). Devuelve None si
+    la fecha excede la ventana de 365 días del plan gratuito de CoinGecko, o si
+    el histórico no se pudo obtener — nunca se aproxima a 0 en ese caso."""
+    return _rnt_price_history_usd().get(date_str[:10])
 
 def _income_items() -> tuple:
     """Contribuciones de rendimiento con valor determinado, como
@@ -2412,26 +2429,28 @@ def build_capital_gains_fifo() -> dict:
                     take = min(lot["qty"], qty_sell)
                     coste_usd = take * lot["unit"]
                     _, coste_eur, _ = fiat_values(coste_usd, lot["fecha"])
+                    coste_eur = coste_eur if coste_eur != "" else None
                     if proceeds_known:
                         trans_usd = take * unit_proceeds
                         _, trans_eur, _ = fiat_values(trans_usd, fecha_venta)
+                        trans_eur = trans_eur if trans_eur != "" else None
                     else:
-                        trans_usd, trans_eur = None, ""
+                        trans_usd, trans_eur = None, None
 
                     if not proceeds_known:
-                        estado, gan_usd, gan_eur = "PENDIENTE — falta valor de transmisión", "", ""
+                        estado, gan_usd, gan_eur = "PENDIENTE — falta valor de transmisión", None, None
                     else:
                         estado = "Provisional — coste estimado (revisar)" if lot["pend"] else "Calculada"
                         gan_usd = round(trans_usd - coste_usd, 2)
-                        gan_eur = (round((trans_eur or 0.0) - (coste_eur or 0.0), 2)
-                                   if (trans_eur != "" and coste_eur != "") else "")
+                        gan_eur = (round(trans_eur - coste_eur, 2)
+                                   if (trans_eur is not None and coste_eur is not None) else None)
 
                     gains.append({
                         "Token": label, "id_lote": lot["id"],
                         "Fecha compra": lot["fecha"], "Fecha venta": fecha_venta,
                         "Cantidad": round(take, 6),
                         "Coste adq. USD": round(coste_usd, 2), "Coste adq. EUR": coste_eur,
-                        "Transmisión USD": round(trans_usd, 2) if proceeds_known else "",
+                        "Transmisión USD": round(trans_usd, 2) if proceeds_known else None,
                         "Transmisión EUR": trans_eur,
                         "Ganancia/pérdida USD": gan_usd, "Ganancia/pérdida EUR": gan_eur,
                         "Fuente coste": lot["fuente"], "Estado": estado,
@@ -2444,15 +2463,19 @@ def build_capital_gains_fifo() -> dict:
                 if qty_sell > 1e-9:
                     # Vendió más de lo que consta adquirido: sin lote de coste.
                     trans_usd = stin * qty_sell / (-cant) if proceeds_known else None
-                    _, trans_eur, _ = fiat_values(trans_usd, fecha_venta) if proceeds_known else (None, "", None)
+                    if proceeds_known:
+                        _, trans_eur, _ = fiat_values(trans_usd, fecha_venta)
+                        trans_eur = trans_eur if trans_eur != "" else None
+                    else:
+                        trans_eur = None
                     gains.append({
                         "Token": label, "id_lote": "(sin lote)",
-                        "Fecha compra": "", "Fecha venta": fecha_venta,
+                        "Fecha compra": None, "Fecha venta": fecha_venta,
                         "Cantidad": round(qty_sell, 6),
-                        "Coste adq. USD": "", "Coste adq. EUR": "",
-                        "Transmisión USD": round(trans_usd, 2) if proceeds_known else "",
+                        "Coste adq. USD": None, "Coste adq. EUR": None,
+                        "Transmisión USD": round(trans_usd, 2) if proceeds_known else None,
                         "Transmisión EUR": trans_eur,
-                        "Ganancia/pérdida USD": "", "Ganancia/pérdida EUR": "",
+                        "Ganancia/pérdida USD": None, "Ganancia/pérdida EUR": None,
                         "Fuente coste": "N/D", "Estado": "PENDIENTE — sin coste de adquisición registrado",
                     })
                     qty_sell = 0.0
@@ -2464,14 +2487,15 @@ def build_capital_gains_fifo() -> dict:
                 lots_abiertos.append({
                     "Token": label, "id_lote": lot["id"], "Fecha compra": lot["fecha"],
                     "Cantidad": round(lot["qty"], 6),
-                    "Coste USD": round(coste_usd, 2), "Coste EUR": coste_eur,
+                    "Coste USD": round(coste_usd, 2),
+                    "Coste EUR": coste_eur if coste_eur != "" else None,
                     "Fuente coste": lot["fuente"],
                 })
 
     calc_usd = sum(g["Ganancia/pérdida USD"] for g in gains
-                   if g["Estado"] == "Calculada" and g["Ganancia/pérdida USD"] != "")
+                   if g["Estado"] == "Calculada" and g["Ganancia/pérdida USD"] is not None)
     calc_eur = sum(g["Ganancia/pérdida EUR"] for g in gains
-                   if g["Estado"] == "Calculada" and g["Ganancia/pérdida EUR"] != "")
+                   if g["Estado"] == "Calculada" and g["Ganancia/pérdida EUR"] is not None)
     prov_n = sum(1 for g in gains if g["Estado"].startswith("Provisional"))
     pend_n = sum(1 for g in gains if g["Estado"].startswith("PENDIENTE"))
     gains.sort(key=lambda g: g["Fecha venta"])
@@ -2526,8 +2550,8 @@ def build_aggregate_report() -> dict:
             "Token": info["label"], "Nombre": info["name"],
             "Saldo": round(saldo, 6), "Divisa emisión": divisa,
             "Precio emisión": pe,
-            "Valor USD": round(v_usd, 2) if v_usd != "" else "",
-            "Valor EUR": round(v_eur, 2) if v_eur != "" else "",
+            "Valor USD": round(v_usd, 2) if v_usd != "" else None,
+            "Valor EUR": round(v_eur, 2) if v_eur != "" else None,
         })
         hold_usd += v_usd if v_usd != "" else 0.0
         hold_eur += v_eur if v_eur != "" else 0.0
