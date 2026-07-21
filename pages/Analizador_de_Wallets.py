@@ -1270,6 +1270,25 @@ def get_eurusd_on_date(date_str: str) -> float:
         return None
 
 
+def fiat_values(valor_usd, date_str):
+    """Convierte un importe en USD a (usd, eur, tipo_eur_usd) a la fecha dada.
+
+    `date_str` puede ser 'YYYY-MM-DD' o 'YYYY-MM-DD HH:MM' (se recorta a los 10
+    primeros caracteres). El tipo devuelto es USD por 1 EUR (p.ej. 1.1422), así
+    que EUR = USD / tipo. Si no hay importe o no se obtiene el tipo, el EUR y el
+    tipo se devuelven como cadena vacía para no falsear el informe."""
+    if valor_usd is None or valor_usd == "":
+        return valor_usd, "", ""
+    try:
+        usd = float(valor_usd)
+    except (TypeError, ValueError):
+        return valor_usd, "", ""
+    rate = get_eurusd_on_date(date_str[:10]) if date_str else None
+    if not rate:
+        return round(usd, 2), "", ""
+    return round(usd, 2), round(usd / rate, 2), rate
+
+
 # ── UI ───────────────────────────────────────────────────────────────────────
 
 MAX_WALLETS = 5
@@ -2250,15 +2269,14 @@ else:
         + (" con la wallet seleccionada." if selected_wallet_filter else " en esta wallet.")
     )
 
-# ── Exportar (informe fiscal completo) ───────────────────────────────────────
+# ── Informe fiscal (resumen agregado + exportables) ──────────────────────────
 st.markdown("---")
-st.subheader("📄 Exportar informe fiscal completo")
+st.subheader("📄 Informe fiscal")
 st.caption(
-    "Todos los movimientos de " + ("las wallets analizadas" if es_multi_wallet else "la wallet") +
-    " en orden cronológico: tokens inmobiliarios, dividendos, stablecoins, ecosistema RNT y Aave. "
-    "Incluye la columna Wallet/Alias" + (" y marca las transferencias internas entre tus propias wallets "
-    "(categoría «Transferencia interna», excluidas del cómputo de compra/venta)." if es_multi_wallet else ".") +
-    " Diseñado para asesores fiscales."
+    "Dos documentos complementarios para tu asesor fiscal: un **resumen agregado** con los "
+    "totales por naturaleza fiscal (para rellenar las casillas de los modelos) y un **CSV "
+    "cronológico y granular** como respaldo. Todos los importes se valoran en USD y en EUR "
+    "al tipo de cambio de la fecha de cada operación."
 )
 
 @st.cache_data(show_spinner=False, ttl=86400)
@@ -2279,6 +2297,369 @@ def get_rnt_price_on_date(date_str: str):
         return float(price) if price else None
     except Exception:
         return None
+
+def _income_items() -> list:
+    """Contribuciones de rendimiento como (fecha_str, concepto, valor_usd).
+
+    Solo rentas reales: dividendos, intereses de Aave como prestamista y
+    recompensas de staking/farming (eventos de *claim*, nunca las "Recepción de
+    RNT" cuyo origen es ambiguo)."""
+    items = []
+    for ev in (dividends or []):
+        items.append((ev["fecha_str"], "Dividendos inmobiliarios", ev.get("total", 0.0)))
+
+    for m in (aave_lender or []):
+        if m["tipo"] == "Retirada préstamo":
+            interes = (m.get("stable_amount") or 0.0) - (m.get("cantidad_atoken") or 0.0)
+            if interes > 0.001:
+                items.append((m["fecha_str"], "Intereses Aave (prestamista)", interes))
+
+    claim_events = [ev for ev in (rnt_events or [])
+                    if ev["tipo"] in ("Claim rewards de staking", "Claim rewards de farming")]
+    fechas = {ev["fecha_str"][:10] for ev in claim_events}
+    precios = {d: get_rnt_price_on_date(d) for d in fechas}
+    for ev in claim_events:
+        precio = precios.get(ev["fecha_str"][:10])
+        rnt  = ev.get("rnt_delta", 0.0) or 0.0
+        usdt = ev.get("usdt_delta", 0.0) or 0.0
+        valor = (rnt * precio if precio else 0.0) + usdt
+        concepto = "Staking (recompensas)" if "staking" in ev["tipo"] else "Farming (recompensas)"
+        items.append((ev["fecha_str"], concepto, valor))
+    return items
+
+
+def build_capital_gains_fifo() -> dict:
+    """Empareja compras y ventas de tokens inmobiliarios por FIFO y calcula la
+    ganancia/pérdida de cada operación. Excluye transferencias internas y los
+    movimientos de colateral de Aave (no son disposiciones).
+
+    El coste de adquisición es exacto cuando hay USDT en la misma TX; si no, se
+    estima con el precio de emisión (marcado como provisional). Cuando no se
+    conoce el valor de transmisión (venta a FIAT), la ganancia queda PENDIENTE."""
+    from collections import deque
+    gains, lots_abiertos = [], []
+
+    for contract, d in token_data.items():
+        info   = d["info"]
+        label  = info["label"]
+        divisa = info.get("divisa", "USD")
+        pe     = info.get("precio_emision") or 0.0
+        lots, lot_counter = deque(), 0
+
+        for m in d["movements"]:
+            if use_date_filter and m["fecha"].date() > cutoff:
+                continue
+            if m.get("es_transferencia_interna"):
+                continue
+            if m["tipo"].startswith(("Colateralización", "Descolateralización")):
+                continue
+
+            cant = m["cantidad_neta"]
+            if cant > 0:
+                qty  = cant
+                stout = m.get("stable_out", 0.0) or 0.0
+                if stout > 0:
+                    unit, fuente, pend = stout / qty, "TX exacta", False
+                elif pe > 0:
+                    rate = get_eurusd_on_date(m["fecha_str"][:10]) if divisa == "EUR" else None
+                    unit = pe * rate if (divisa == "EUR" and rate) else pe
+                    fuente, pend = "Estimación (precio emisión)", True
+                else:
+                    unit, fuente, pend = 0.0, "N/D", True
+                lot_counter += 1
+                lots.append({"id": f"{label}-L{lot_counter}", "qty": qty, "unit": unit,
+                             "fecha": m["fecha_str"], "fuente": fuente, "pend": pend})
+
+            elif cant < 0:
+                qty_sell = -cant
+                stin = m.get("stable_in", 0.0) or 0.0
+                proceeds_known = stin > 0
+                unit_proceeds = (stin / qty_sell) if proceeds_known else None
+                fecha_venta = m["fecha_str"]
+
+                while qty_sell > 1e-9 and lots:
+                    lot  = lots[0]
+                    take = min(lot["qty"], qty_sell)
+                    coste_usd = take * lot["unit"]
+                    _, coste_eur, _ = fiat_values(coste_usd, lot["fecha"])
+                    if proceeds_known:
+                        trans_usd = take * unit_proceeds
+                        _, trans_eur, _ = fiat_values(trans_usd, fecha_venta)
+                    else:
+                        trans_usd, trans_eur = None, ""
+
+                    if not proceeds_known:
+                        estado, gan_usd, gan_eur = "PENDIENTE — falta valor de transmisión", "", ""
+                    else:
+                        estado = "Provisional — coste estimado (revisar)" if lot["pend"] else "Calculada"
+                        gan_usd = round(trans_usd - coste_usd, 2)
+                        gan_eur = (round((trans_eur or 0.0) - (coste_eur or 0.0), 2)
+                                   if (trans_eur != "" and coste_eur != "") else "")
+
+                    gains.append({
+                        "Token": label, "id_lote": lot["id"],
+                        "Fecha compra": lot["fecha"], "Fecha venta": fecha_venta,
+                        "Cantidad": round(take, 6),
+                        "Coste adq. USD": round(coste_usd, 2), "Coste adq. EUR": coste_eur,
+                        "Transmisión USD": round(trans_usd, 2) if proceeds_known else "",
+                        "Transmisión EUR": trans_eur,
+                        "Ganancia/pérdida USD": gan_usd, "Ganancia/pérdida EUR": gan_eur,
+                        "Fuente coste": lot["fuente"], "Estado": estado,
+                    })
+                    lot["qty"] -= take
+                    qty_sell  -= take
+                    if lot["qty"] <= 1e-9:
+                        lots.popleft()
+
+                if qty_sell > 1e-9:
+                    # Vendió más de lo que consta adquirido: sin lote de coste.
+                    trans_usd = stin * qty_sell / (-cant) if proceeds_known else None
+                    _, trans_eur, _ = fiat_values(trans_usd, fecha_venta) if proceeds_known else (None, "", None)
+                    gains.append({
+                        "Token": label, "id_lote": "(sin lote)",
+                        "Fecha compra": "", "Fecha venta": fecha_venta,
+                        "Cantidad": round(qty_sell, 6),
+                        "Coste adq. USD": "", "Coste adq. EUR": "",
+                        "Transmisión USD": round(trans_usd, 2) if proceeds_known else "",
+                        "Transmisión EUR": trans_eur,
+                        "Ganancia/pérdida USD": "", "Ganancia/pérdida EUR": "",
+                        "Fuente coste": "N/D", "Estado": "PENDIENTE — sin coste de adquisición registrado",
+                    })
+                    qty_sell = 0.0
+
+        for lot in lots:
+            if lot["qty"] > 1e-9:
+                coste_usd = lot["qty"] * lot["unit"]
+                _, coste_eur, _ = fiat_values(coste_usd, lot["fecha"])
+                lots_abiertos.append({
+                    "Token": label, "id_lote": lot["id"], "Fecha compra": lot["fecha"],
+                    "Cantidad": round(lot["qty"], 6),
+                    "Coste USD": round(coste_usd, 2), "Coste EUR": coste_eur,
+                    "Fuente coste": lot["fuente"],
+                })
+
+    calc_usd = sum(g["Ganancia/pérdida USD"] for g in gains
+                   if g["Estado"] == "Calculada" and g["Ganancia/pérdida USD"] != "")
+    calc_eur = sum(g["Ganancia/pérdida EUR"] for g in gains
+                   if g["Estado"] == "Calculada" and g["Ganancia/pérdida EUR"] != "")
+    prov_n = sum(1 for g in gains if g["Estado"].startswith("Provisional"))
+    pend_n = sum(1 for g in gains if g["Estado"].startswith("PENDIENTE"))
+    gains.sort(key=lambda g: g["Fecha venta"])
+
+    return {
+        "gains": gains, "lots_abiertos": sorted(lots_abiertos, key=lambda r: r["Token"]),
+        "kpi": {"calc_usd": round(calc_usd, 2), "calc_eur": round(calc_eur, 2),
+                "prov_n": prov_n, "pend_n": pend_n},
+    }
+
+
+def build_aggregate_report() -> dict:
+    """Totales agregados por naturaleza fiscal, en USD y EUR (convertidos a la
+    fecha de cada operación), más la foto de saldos y deuda a la fecha de corte."""
+    # ── Rendimientos por (año, concepto) ──────────────────────────────────────
+    acc = defaultdict(lambda: {"usd": 0.0, "eur": 0.0})
+    tot = defaultdict(lambda: {"usd": 0.0, "eur": 0.0})
+    for fecha_str, concepto, usd in _income_items():
+        if not usd:
+            continue
+        año = fecha_str[:4]
+        _, eur, _ = fiat_values(usd, fecha_str)
+        for bucket in (acc[(año, concepto)], tot[concepto]):
+            bucket["usd"] += usd
+            if eur != "":
+                bucket["eur"] += eur
+
+    rend_rows = [
+        {"Año": año, "Concepto": concepto,
+         "Valor USD": round(v["usd"], 2), "Valor EUR": round(v["eur"], 2)}
+        for (año, concepto), v in sorted(acc.items())
+    ]
+
+    # ── Saldos a fecha de corte (tokens en cartera) ───────────────────────────
+    snap_rate = get_eurusd_on_date(cutoff.strftime("%Y-%m-%d"))
+    holdings_rows = []
+    hold_usd, hold_eur = 0.0, 0.0
+    for c, d in activos.items():
+        info   = d["info"]
+        saldo  = d["balance_display"]
+        pe     = info.get("precio_emision") or 0.0
+        divisa = info.get("divisa", "USD")
+        val_native = saldo * pe
+        if divisa == "EUR":
+            v_eur = val_native
+            v_usd = val_native * snap_rate if snap_rate else ""
+        else:
+            v_usd = val_native
+            v_eur = val_native / snap_rate if snap_rate else ""
+        holdings_rows.append({
+            "Token": info["label"], "Nombre": info["name"],
+            "Saldo": round(saldo, 6), "Divisa emisión": divisa,
+            "Precio emisión": pe,
+            "Valor USD": round(v_usd, 2) if v_usd != "" else "",
+            "Valor EUR": round(v_eur, 2) if v_eur != "" else "",
+        })
+        hold_usd += v_usd if v_usd != "" else 0.0
+        hold_eur += v_eur if v_eur != "" else 0.0
+
+    # ── Deuda viva en Aave a la fecha de corte ────────────────────────────────
+    prestado = devuelto = 0.0
+    for m in (aave_borrower or []):
+        if use_date_filter and m["fecha"].date() > cutoff:
+            continue
+        if m["tipo"] == "Préstamo recibido":
+            prestado += m.get("stable_amount") or 0.0
+        elif m["tipo"] == "Pago de deuda":
+            devuelto += m.get("stable_amount") or 0.0
+    deuda_usd = max(0.0, prestado - devuelto)
+    deuda_eur = deuda_usd / snap_rate if snap_rate else ""
+
+    return {
+        "rend_rows": rend_rows,
+        "rend_tot": dict(tot),
+        "holdings_rows": sorted(holdings_rows, key=lambda r: r["Token"]),
+        "holdings_tot": {"usd": round(hold_usd, 2), "eur": round(hold_eur, 2)},
+        "deuda_usd": round(deuda_usd, 2),
+        "deuda_eur": round(deuda_eur, 2) if deuda_eur != "" else "",
+        "snap_rate": snap_rate,
+        "capital_gains": build_capital_gains_fifo(),
+    }
+
+
+TOOL_VERSION = "1.0"
+
+# Mapa de referencia: cómo interpretar fiscalmente cada tipo de operación.
+# Es agnóstico a la jurisdicción: describe la NATURALEZA del hecho, no el tipo
+# impositivo concreto (que depende del país del inversor).
+FISCAL_GLOSARIO = [
+    {"Operación": "Compra de tokens (a Reental o a terceros)",
+     "Naturaleza fiscal": "Adquisición patrimonial",
+     "Tratamiento / nota": "Fija el coste de adquisición del lote; base de la futura ganancia/pérdida. La compra en sí no es hecho imponible."},
+    {"Operación": "Venta de tokens",
+     "Naturaleza fiscal": "Disposición patrimonial (ganancia/pérdida)",
+     "Tratamiento / nota": "Genera ganancia o pérdida = valor de transmisión − coste de adquisición (emparejado por FIFO)."},
+    {"Operación": "Reinversión desde vault",
+     "Naturaleza fiscal": "Doble: rendimiento + adquisición",
+     "Tratamiento / nota": "El dividendo es renta al recibirse; su reinversión crea un nuevo lote cuyo coste es el importe reinvertido."},
+    {"Operación": "Entrada / Salida de Tokens * (sin contrapartida USDT en la TX)",
+     "Naturaleza fiscal": "Adquisición o disposición de origen no determinado",
+     "Tratamiento / nota": "Revisar: posible compra/venta en FIAT o USDT en otra TX. Coste o valor de transmisión a completar por el inversor (ver hoja «Por completar»)."},
+    {"Operación": "Transferencia interna (entre wallets propias)",
+     "Naturaleza fiscal": "No sujeta",
+     "Tratamiento / nota": "Movimiento entre wallets del mismo titular; no altera el patrimonio ni genera renta."},
+    {"Operación": "Dividendo recibido de Reental",
+     "Naturaleza fiscal": "Rendimiento del capital",
+     "Tratamiento / nota": "Renta del ejercicio en que se cobra, al valor en fiat de ese día."},
+    {"Operación": "Colateralización / Descolateralización en Aave",
+     "Naturaleza fiscal": "No sujeta (no es disposición)",
+     "Tratamiento / nota": "Depositar/retirar tokens como garantía no cambia la titularidad económica; NO es una venta."},
+    {"Operación": "Préstamo recibido / Pago de deuda (Aave prestatario)",
+     "Naturaleza fiscal": "Financiación (no sujeta)",
+     "Tratamiento / nota": "El principal recibido/devuelto no es renta ni gasto. Solo los intereses pagados pueden ser deducibles según jurisdicción."},
+    {"Operación": "Depósito / Retirada de préstamo (Aave prestamista)",
+     "Naturaleza fiscal": "Rendimiento del capital (intereses)",
+     "Tratamiento / nota": "Los intereses cobrados (retirada − depósito) son renta; el principal no."},
+    {"Operación": "Claim rewards de staking / farming (RNT)",
+     "Naturaleza fiscal": "Rendimiento (recompensa)",
+     "Tratamiento / nota": "Renta al valor de mercado del RNT en la fecha de cobro; ese valor es el coste de adquisición del RNT para futuras plusvalías."},
+    {"Operación": "Recepción / Envío de RNT (no clasificado como recompensa)",
+     "Naturaleza fiscal": "Origen a determinar",
+     "Tratamiento / nota": "No se computa como renta automáticamente (puede ser compra, traspaso o airdrop). Revisar manualmente."},
+]
+
+
+def build_por_completar_rows() -> list:
+    """Adquisiciones y disposiciones cuyo importe no se puede determinar on-chain
+    (p.ej. compra/venta en FIAT o USDT en otra TX). El inversor/fiscalista rellena
+    las columnas vacías con el dato real que tenga (extracto bancario, etc.)."""
+    rows = []
+    for contract, d in token_data.items():
+        info = d["info"]
+        pe = info.get("precio_emision") or 0.0
+        for m in d["movements"]:
+            if m.get("es_transferencia_interna"):
+                continue
+            tipo = m["tipo"]
+            if tipo.startswith(("Colateralización", "Descolateralización")):
+                continue
+            cant = m["cantidad_neta"]
+            stin  = m.get("stable_in", 0.0) or 0.0
+            stout = m.get("stable_out", 0.0) or 0.0
+            base = {
+                "Fecha UTC": m["fecha_str"], "Token": info["label"],
+                "Cantidad": round(cant, 6),
+                "Importe FIAT real (a completar)": "", "Divisa": "", "Notas del inversor": "",
+                "Wallet/Alias": m.get("wallet_alias", ""),
+            }
+            if cant > 0 and stout == 0:
+                rows.append({**base, "Concepto": "Adquisición — coste a completar",
+                             "Coste estimado USD (precio emisión)": round(cant * pe, 2) if pe else ""})
+            elif cant < 0 and stin == 0:
+                rows.append({**base, "Concepto": "Disposición — valor de transmisión a completar",
+                             "Coste estimado USD (precio emisión)": ""})
+    rows.sort(key=lambda r: r["Fecha UTC"])
+    return rows
+
+
+def build_report_meta() -> list:
+    """Cabecera del informe: metadatos, alcance y disclaimer."""
+    wallets_txt = "; ".join(f"{alias} ({addr[:8]}…{addr[-4:]})" for addr, alias in wallets_analyzed)
+    ejercicio = (f"Saldos y foto de patrimonio a fecha {cutoff.strftime('%Y-%m-%d')}"
+                 if use_date_filter else "Histórico completo (sin filtro de fecha)")
+    return [
+        {"Campo": "Informe", "Valor": "Reental — Informe fiscal agregado"},
+        {"Campo": "Versión de la herramienta", "Valor": TOOL_VERSION},
+        {"Campo": "Generado (UTC)", "Valor": datetime.utcnow().strftime("%Y-%m-%d %H:%M")},
+        {"Campo": "Wallets analizadas", "Valor": wallets_txt},
+        {"Campo": "Alcance temporal", "Valor": ejercicio},
+        {"Campo": "Divisas", "Valor": "USD y EUR (tipo de cambio a la fecha de cada operación; USDT asumido a la par del USD)"},
+        {"Campo": "Zona horaria", "Valor": "Todas las fechas en UTC"},
+        {"Campo": "Método de plusvalías", "Valor": "FIFO (primero en entrar, primero en salir) — ver hoja «Plusvalías»"},
+        {"Campo": "Aviso", "Valor": ("Este informe NO es asesoramiento fiscal; las cifras deben validarse por un "
+                                     "profesional. Los importes marcados como estimados o pendientes (p.ej. compras "
+                                     "en FIAT) deben completarse con los datos del inversor antes de presentar impuestos.")},
+    ]
+
+
+def build_aggregate_xlsx(agg: dict) -> bytes:
+    """Documento agregado en XLSX multi-hoja (Informe · Resumen · Rendimientos ·
+    Saldos · Por completar · Glosario) para que el asesor fiscal trabaje con los
+    totales sin hashes ni contratos."""
+    buf = io.BytesIO()
+    rend_tot_usd = sum(v["usd"] for v in agg["rend_tot"].values())
+    rend_tot_eur = sum(v["eur"] for v in agg["rend_tot"].values())
+
+    resumen = [
+        {"Bloque": f"Rendimientos — {k}", "Valor USD": round(v["usd"], 2), "Valor EUR": round(v["eur"], 2)}
+        for k, v in agg["rend_tot"].items()
+    ]
+    resumen += [
+        {"Bloque": "Rendimientos — TOTAL", "Valor USD": round(rend_tot_usd, 2), "Valor EUR": round(rend_tot_eur, 2)},
+        {"Bloque": "Patrimonio — Valor tokens en cartera",
+         "Valor USD": agg["holdings_tot"]["usd"], "Valor EUR": agg["holdings_tot"]["eur"]},
+        {"Bloque": "Patrimonio — Deuda viva en Aave",
+         "Valor USD": agg["deuda_usd"], "Valor EUR": agg["deuda_eur"]},
+    ]
+
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        pd.DataFrame(build_report_meta()).to_excel(writer, sheet_name="Informe", index=False)
+        pd.DataFrame(resumen).to_excel(writer, sheet_name="Resumen", index=False)
+        rend = agg["rend_rows"] or [{"Año": "", "Concepto": "(sin rendimientos en el periodo)",
+                                     "Valor USD": "", "Valor EUR": ""}]
+        pd.DataFrame(rend).to_excel(writer, sheet_name="Rendimientos", index=False)
+        hold = agg["holdings_rows"] or [{"Token": "(cartera vacía a la fecha de corte)"}]
+        pd.DataFrame(hold).to_excel(writer, sheet_name="Saldos", index=False)
+
+        cg = agg["capital_gains"]
+        gains = cg["gains"] or [{"Estado": "(sin ventas en el periodo)"}]
+        pd.DataFrame(gains).to_excel(writer, sheet_name="Plusvalías", index=False)
+        lots = cg["lots_abiertos"] or [{"Token": "(sin lotes abiertos)"}]
+        pd.DataFrame(lots).to_excel(writer, sheet_name="Lotes abiertos", index=False)
+
+        pc = build_por_completar_rows() or [{"Concepto": "(nada pendiente: todos los costes se determinaron on-chain)"}]
+        pd.DataFrame(pc).to_excel(writer, sheet_name="Por completar", index=False)
+        pd.DataFrame(FISCAL_GLOSARIO).to_excel(writer, sheet_name="Glosario", index=False)
+    return buf.getvalue()
+
 
 def build_fiscal_csv() -> bytes:
     rows = []
@@ -2501,19 +2882,144 @@ def build_fiscal_csv() -> bytes:
             "Wallet/Alias":     m.get("wallet_alias", ""),
         })
 
+    # Enriquecer cada fila con su valor en EUR al tipo de cambio de la fecha.
+    # get_eurusd_on_date está cacheado, así que fechas repetidas no repiten API.
+    for r in rows:
+        _, eur, rate = fiat_values(r.get("Valor USD", ""), r.get("Fecha UTC", ""))
+        r["Valor EUR"]    = eur
+        r["Tipo EUR/USD"] = rate
+
     # Ordenar todo cronológicamente
     rows.sort(key=lambda r: r["Fecha UTC"])
-    return pd.DataFrame(rows).to_csv(index=False).encode("utf-8")
+    df = pd.DataFrame(rows)
 
-with st.spinner("Preparando informe fiscal…"):
+    # Colocar las columnas EUR justo detrás de "Valor USD"
+    cols = list(df.columns)
+    if "Valor USD" in cols and "Valor EUR" in cols:
+        for c in ("Valor EUR", "Tipo EUR/USD"):
+            cols.remove(c)
+        i = cols.index("Valor USD") + 1
+        cols[i:i] = ["Valor EUR", "Tipo EUR/USD"]
+        df = df[cols]
+
+    return df.to_csv(index=False).encode("utf-8")
+
+with st.spinner("Calculando resumen fiscal agregado…"):
+    agg = build_aggregate_report()
+
+# ── Resumen agregado (KPIs) ───────────────────────────────────────────────────
+st.markdown("##### 🧾 Resumen agregado")
+
+_orden_conceptos = [
+    "Dividendos inmobiliarios", "Intereses Aave (prestamista)",
+    "Staking (recompensas)", "Farming (recompensas)",
+]
+_iconos = {
+    "Dividendos inmobiliarios": "🏠", "Intereses Aave (prestamista)": "🏦",
+    "Staking (recompensas)": "🔒", "Farming (recompensas)": "🌾",
+}
+_rend_total_usd = sum(v["usd"] for v in agg["rend_tot"].values())
+_rend_total_eur = sum(v["eur"] for v in agg["rend_tot"].values())
+
+st.caption("Rendimientos (rentas del ejercicio), por naturaleza fiscal:")
+_rcols = st.columns(4)
+for _i, _concepto in enumerate(_orden_conceptos):
+    _v = agg["rend_tot"].get(_concepto, {"usd": 0.0, "eur": 0.0})
+    _rcols[_i].markdown(kpi_card(
+        _iconos[_concepto], _concepto,
+        f"${_v['usd']:,.2f}",
+        sublabel=f"€{_v['eur']:,.2f}",
+    ), unsafe_allow_html=True)
+
+st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+st.caption("Patrimonio a la fecha de corte (para modelos de bienes/patrimonio):")
+_scols = st.columns(3)
+_scols[0].markdown(kpi_card("💰", "Total rendimientos",
+                            f"${_rend_total_usd:,.2f}", sublabel=f"€{_rend_total_eur:,.2f}"),
+                   unsafe_allow_html=True)
+_scols[1].markdown(kpi_card("🏘️", "Valor tokens en cartera",
+                            f"${agg['holdings_tot']['usd']:,.2f}", sublabel=f"€{agg['holdings_tot']['eur']:,.2f}"),
+                   unsafe_allow_html=True)
+_deuda_eur_lbl = f"€{agg['deuda_eur']:,.2f}" if agg["deuda_eur"] != "" else "—"
+_scols[2].markdown(kpi_card("⚠️", "Deuda viva en Aave",
+                            f"${agg['deuda_usd']:,.2f}", sublabel=_deuda_eur_lbl,
+                            value_color="#dc2626" if agg["deuda_usd"] > 0.01 else "#16a34a"),
+                   unsafe_allow_html=True)
+
+st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+st.caption("Ganancias patrimoniales por ventas de tokens (método FIFO):")
+_cg = agg["capital_gains"]
+_gcols = st.columns(3)
+_gcols[0].markdown(kpi_card("📈", "Ganancia patrimonial calculable",
+                            f"${_cg['kpi']['calc_usd']:,.2f}", sublabel=f"€{_cg['kpi']['calc_eur']:,.2f}",
+                            value_color="#16a34a" if _cg['kpi']['calc_usd'] >= 0 else "#dc2626"),
+                   unsafe_allow_html=True)
+_gcols[1].markdown(kpi_card("🟠", "Operaciones provisionales",
+                            str(_cg['kpi']['prov_n']), sublabel="coste estimado (revisar)"),
+                   unsafe_allow_html=True)
+_gcols[2].markdown(kpi_card("🔴", "Operaciones pendientes",
+                            str(_cg['kpi']['pend_n']), sublabel="falta dato — ver «Por completar»"),
+                   unsafe_allow_html=True)
+
+if _cg["kpi"]["prov_n"] or _cg["kpi"]["pend_n"]:
+    st.caption(
+        "⚠️ La ganancia calculable solo suma operaciones con coste y transmisión exactos on-chain. "
+        "Las provisionales/pendientes requieren completar el valor real (p.ej. compras o ventas en FIAT) "
+        "en la hoja «Por completar» del XLSX."
+    )
+
+_exp_cols = st.columns(2)
+if agg["rend_rows"]:
+    with _exp_cols[0].expander("Ver rendimientos por año"):
+        st.dataframe(pd.DataFrame(agg["rend_rows"]), hide_index=True, use_container_width=True)
+if _cg["gains"]:
+    with _exp_cols[1].expander("Ver detalle de plusvalías (FIFO)"):
+        st.dataframe(pd.DataFrame(_cg["gains"]), hide_index=True, use_container_width=True)
+
+# ── Descargables ──────────────────────────────────────────────────────────────
+st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+_csv_filename_suffix = wallet[:8] if not es_multi_wallet else f"multi{len(wallets_analyzed)}_{wallet[:8]}"
+
+with st.spinner("Preparando resumen agregado (XLSX)…"):
+    xlsx_agg = build_aggregate_xlsx(agg)
+st.caption(
+    "**Resumen agregado (XLSX)** — hojas Informe · Resumen · Rendimientos · Saldos · "
+    "Plusvalías (FIFO) · Lotes abiertos · Por completar · Glosario, con los totales listos para las "
+    "casillas de los modelos y la lista de importes que el inversor debe completar (compras en FIAT). "
+    "Sin hashes ni contratos."
+)
+st.download_button(
+    "⬇️ Descargar resumen agregado (XLSX)",
+    data=xlsx_agg,
+    file_name=f"reental_resumen_fiscal_{_csv_filename_suffix}.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    type="primary",
+    use_container_width=True,
+)
+
+st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+with st.spinner("Preparando CSV granular…"):
     csv_fiscal = build_fiscal_csv()
 
-_csv_filename_suffix = wallet[:8] if not es_multi_wallet else f"multi{len(wallets_analyzed)}_{wallet[:8]}"
+st.caption(
+    "**CSV granular** — todos los movimientos en orden cronológico (tokens inmobiliarios, "
+    "dividendos, stablecoins, ecosistema RNT y Aave), con columna Wallet/Alias" +
+    (" y transferencias internas marcadas" if es_multi_wallet else "") + ". Respaldo legal para la autoridad fiscal."
+)
 st.download_button(
-    "⬇️ Descargar informe fiscal completo (CSV)",
+    "⬇️ Descargar CSV granular (respaldo)",
     data=csv_fiscal,
     file_name=f"reental_informe_fiscal_{_csv_filename_suffix}.csv",
     mime="text/csv",
     type="primary",
     use_container_width=True,
 )
+
+with st.expander("📖 Glosario — cómo interpretar fiscalmente cada operación"):
+    st.dataframe(pd.DataFrame(FISCAL_GLOSARIO), hide_index=True, use_container_width=True)
+    st.caption(
+        "Este informe **no es asesoramiento fiscal**: describe la naturaleza de cada operación de forma "
+        "agnóstica a la jurisdicción; el tipo impositivo concreto lo determina el país del inversor. "
+        "Las fechas están en UTC y el USDT se asume a la par del USD. Los importes marcados como estimados "
+        "o pendientes (p.ej. compras en FIAT) deben completarse con los datos del inversor."
+    )
