@@ -547,6 +547,18 @@ def balance_at_date(movements: list, cutoff: date) -> float:
     return sum(m["cantidad_neta"] for m in movements if m["fecha"].date() <= cutoff)
 
 
+def balances_por_wallet(movements: list, cutoff: date, use_date_filter: bool) -> dict:
+    """Desglosa el saldo de un token por wallet de origen: {wallet_addr: {"alias", "balance"}}."""
+    result = {}
+    for m in movements:
+        if use_date_filter and m["fecha"].date() > cutoff:
+            continue
+        addr = m.get("wallet_addr")
+        entry = result.setdefault(addr, {"alias": m.get("wallet_alias", "—"), "balance": 0.0})
+        entry["balance"] += m["cantidad_neta"]
+    return result
+
+
 def build_stablecoin_movements(token_data: dict) -> list:
     """
     Extrae todos los flujos de stablecoins relacionados con Reental
@@ -1522,15 +1534,33 @@ if activos:
     rows = []
     for d in sorted(activos.values(), key=lambda x: x["info"]["label"]):
         fecha_fin = get_fecha_fin_display(d["info"], closing_dates)
-        rows.append({
+        base_row = {
             "Token": d["info"]["label"],
             "Nombre": d["info"]["name"],
             "Tipo": "🏦 Token Inmobiliario Colateralizado" if d["info"].get("is_aave") else "🏠 Token Inmobiliario",
-            "Saldo": d["balance_display"],
             "Fecha real de fin de proyecto": fecha_fin,
-            "Nº mov.": len(d["movements"]),
             "Ver en Polygonscan": polygonscan_token_link(d["info"]["address"]),
-        })
+        }
+        if es_multi_wallet:
+            # Un token puede estar repartido entre varias wallets: una fila por wallet con saldo.
+            desglose = balances_por_wallet(d["movements"], cutoff, use_date_filter)
+            for w_addr, w_info in sorted(desglose.items(), key=lambda x: x[1]["alias"]):
+                if round(w_info["balance"], 6) <= 0.000001:
+                    continue
+                n_mov = sum(1 for m in d["movements"] if m.get("wallet_addr") == w_addr
+                            and (not use_date_filter or m["fecha"].date() <= cutoff))
+                rows.append({
+                    **base_row,
+                    "Wallet": w_info["alias"],
+                    "Saldo": round(w_info["balance"], 6),
+                    "Nº mov.": n_mov,
+                })
+        else:
+            rows.append({
+                **base_row,
+                "Saldo": d["balance_display"],
+                "Nº mov.": len(d["movements"]),
+            })
 
     df_activos = pd.DataFrame(rows)
 
@@ -1546,8 +1576,11 @@ if activos:
         "Nº mov.": st.column_config.NumberColumn(width="small"),
         "Tipo": st.column_config.TextColumn(width="small"),
         "Saldo": st.column_config.NumberColumn(width="small"),
+        "Wallet": st.column_config.TextColumn(width="small"),
         "Fecha real de fin de proyecto": st.column_config.TextColumn(width="medium"),
     }, hide_index=True, use_container_width=True)
+    if es_multi_wallet:
+        st.caption("Un mismo token puede aparecer en varias filas si está repartido entre distintas wallets.")
 else:
     st.info("No hay tokens con saldo" + (" a esa fecha." if use_date_filter else "."))
 
