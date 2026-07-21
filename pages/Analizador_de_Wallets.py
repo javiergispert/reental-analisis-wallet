@@ -4,6 +4,7 @@ import os
 import sys
 import json
 import io
+import time
 import unicodedata
 from datetime import datetime, date, timedelta
 from collections import defaultdict
@@ -2283,28 +2284,46 @@ st.caption(
 def get_rnt_price_on_date(date_str: str):
     """
     Devuelve el precio de RNT en USD para una fecha dada (formato YYYY-MM-DD).
-    Usa CoinGecko historical data. Devuelve None si no disponible.
+    Usa CoinGecko historical data. Devuelve None si no disponible: bien porque
+    la fecha excede la ventana de 365 días del plan gratuito (HTTP 401,
+    error_code 10012 — no hay forma de obtenerlo sin plan de pago), bien por
+    haber agotado el límite de peticiones (HTTP 429, mitigado con reintentos).
     """
-    try:
-        dd, mm, yyyy = date_str[8:10], date_str[5:7], date_str[:4]
-        cg_date = f"{dd}-{mm}-{yyyy}"
-        r = requests.get(
-            "https://api.coingecko.com/api/v3/coins/reental/history",
-            params={"date": cg_date, "localization": "false"},
-            timeout=10,
-        )
-        price = r.json().get("market_data", {}).get("current_price", {}).get("usd")
-        return float(price) if price else None
-    except Exception:
-        return None
+    dd, mm, yyyy = date_str[8:10], date_str[5:7], date_str[:4]
+    cg_date = f"{dd}-{mm}-{yyyy}"
+    for intento, espera in enumerate((0, 1.5, 3.0)):
+        if espera:
+            time.sleep(espera)
+        try:
+            r = requests.get(
+                "https://api.coingecko.com/api/v3/coins/reental/history",
+                params={"date": cg_date, "localization": "false"},
+                timeout=10,
+            )
+            if r.status_code == 429 and intento < 2:
+                continue
+            price = r.json().get("market_data", {}).get("current_price", {}).get("usd")
+            return float(price) if price else None
+        except Exception:
+            if intento < 2:
+                continue
+            return None
+    return None
 
-def _income_items() -> list:
-    """Contribuciones de rendimiento como (fecha_str, concepto, valor_usd).
+def _income_items() -> tuple:
+    """Contribuciones de rendimiento con valor determinado, como
+    (fecha_str, concepto, valor_usd), y por separado las recompensas de RNT
+    cuyo precio a la fecha del claim no se pudo obtener.
 
     Solo rentas reales: dividendos, intereses de Aave como prestamista y
     recompensas de staking/farming (eventos de *claim*, nunca las "Recepción de
-    RNT" cuyo origen es ambiguo)."""
-    items = []
+    RNT" cuyo origen es ambiguo).
+
+    Cuando CoinGecko no devuelve precio para la fecha del claim (fuera de la
+    ventana de 365 días del plan gratuito, o límite de peticiones agotado),
+    la recompensa en RNT NUNCA se valora como $0: se reporta aparte en
+    `pendientes_rnt` para que se complete con el precio de mercado real."""
+    items, pendientes_rnt = [], []
     for ev in (dividends or []):
         items.append((ev["fecha_str"], "Dividendos inmobiliarios", ev.get("total", 0.0)))
 
@@ -2322,10 +2341,21 @@ def _income_items() -> list:
         precio = precios.get(ev["fecha_str"][:10])
         rnt  = ev.get("rnt_delta", 0.0) or 0.0
         usdt = ev.get("usdt_delta", 0.0) or 0.0
-        valor = (rnt * precio if precio else 0.0) + usdt
         concepto = "Staking (recompensas)" if "staking" in ev["tipo"] else "Farming (recompensas)"
-        items.append((ev["fecha_str"], concepto, valor))
-    return items
+        if precio:
+            items.append((ev["fecha_str"], concepto, rnt * precio + usdt))
+            continue
+        if usdt:
+            items.append((ev["fecha_str"], concepto, usdt))
+        if rnt > 0:
+            pendientes_rnt.append({
+                "Fecha UTC": ev["fecha_str"], "Concepto": concepto,
+                "Cantidad RNT": round(rnt, 6),
+                "Motivo": ("Precio de RNT no disponible en CoinGecko para esta fecha: fuera de la "
+                           "ventana de 365 días del plan gratuito, o límite de peticiones agotado. "
+                           "Completar con el precio de mercado real de RNT en la fecha del cobro."),
+            })
+    return items, pendientes_rnt
 
 
 def build_capital_gains_fifo() -> dict:
@@ -2459,7 +2489,8 @@ def build_aggregate_report() -> dict:
     # ── Rendimientos por (año, concepto) ──────────────────────────────────────
     acc = defaultdict(lambda: {"usd": 0.0, "eur": 0.0})
     tot = defaultdict(lambda: {"usd": 0.0, "eur": 0.0})
-    for fecha_str, concepto, usd in _income_items():
+    income_items, pendientes_rnt = _income_items()
+    for fecha_str, concepto, usd in income_items:
         if not usd:
             continue
         año = fecha_str[:4]
@@ -2516,6 +2547,7 @@ def build_aggregate_report() -> dict:
     return {
         "rend_rows": rend_rows,
         "rend_tot": dict(tot),
+        "rend_pendiente_rnt": sorted(pendientes_rnt, key=lambda r: r["Fecha UTC"]),
         "holdings_rows": sorted(holdings_rows, key=lambda r: r["Token"]),
         "holdings_tot": {"usd": round(hold_usd, 2), "eur": round(hold_eur, 2)},
         "deuda_usd": round(deuda_usd, 2),
@@ -2622,8 +2654,9 @@ def build_report_meta() -> list:
 
 def build_aggregate_xlsx(agg: dict) -> bytes:
     """Documento agregado en XLSX multi-hoja (Informe · Resumen · Rendimientos ·
-    Saldos · Por completar · Glosario) para que el asesor fiscal trabaje con los
-    totales sin hashes ni contratos."""
+    RNT sin valorar · Saldos · Plusvalías · Lotes abiertos · Por completar ·
+    Glosario) para que el asesor fiscal trabaje con los totales sin hashes ni
+    contratos."""
     buf = io.BytesIO()
     rend_tot_usd = sum(v["usd"] for v in agg["rend_tot"].values())
     rend_tot_eur = sum(v["eur"] for v in agg["rend_tot"].values())
@@ -2646,6 +2679,8 @@ def build_aggregate_xlsx(agg: dict) -> bytes:
         rend = agg["rend_rows"] or [{"Año": "", "Concepto": "(sin rendimientos en el periodo)",
                                      "Valor USD": "", "Valor EUR": ""}]
         pd.DataFrame(rend).to_excel(writer, sheet_name="Rendimientos", index=False)
+        pend_rnt = agg["rend_pendiente_rnt"] or [{"Concepto": "(ningún claim de RNT sin valorar)"}]
+        pd.DataFrame(pend_rnt).to_excel(writer, sheet_name="RNT sin valorar", index=False)
         hold = agg["holdings_rows"] or [{"Token": "(cartera vacía a la fecha de corte)"}]
         pd.DataFrame(hold).to_excel(writer, sheet_name="Saldos", index=False)
 
@@ -2931,6 +2966,16 @@ for _i, _concepto in enumerate(_orden_conceptos):
         sublabel=f"€{_v['eur']:,.2f}",
     ), unsafe_allow_html=True)
 
+if agg["rend_pendiente_rnt"]:
+    _n_pend = len(agg["rend_pendiente_rnt"])
+    _rnt_pend_total = sum(r["Cantidad RNT"] for r in agg["rend_pendiente_rnt"])
+    st.caption(
+        f"🟠 **{_n_pend} recompensa(s) de RNT sin valorar** ({_rnt_pend_total:,.4f} RNT en total): "
+        "el precio de RNT no estaba disponible en CoinGecko para esas fechas (fuera de la ventana "
+        "de 365 días del plan gratuito, o límite de peticiones). No se han contado como $0 — "
+        "revisar la hoja «RNT sin valorar» del XLSX y completar con el precio de mercado real."
+    )
+
 st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 st.caption("Patrimonio a la fecha de corte (para modelos de bienes/patrimonio):")
 _scols = st.columns(3)
@@ -2968,13 +3013,16 @@ if _cg["kpi"]["prov_n"] or _cg["kpi"]["pend_n"]:
         "en la hoja «Por completar» del XLSX."
     )
 
-_exp_cols = st.columns(2)
+_exp_cols = st.columns(3) if agg["rend_pendiente_rnt"] else st.columns(2)
 if agg["rend_rows"]:
     with _exp_cols[0].expander("Ver rendimientos por año"):
         st.dataframe(pd.DataFrame(agg["rend_rows"]), hide_index=True, use_container_width=True)
 if _cg["gains"]:
     with _exp_cols[1].expander("Ver detalle de plusvalías (FIFO)"):
         st.dataframe(pd.DataFrame(_cg["gains"]), hide_index=True, use_container_width=True)
+if agg["rend_pendiente_rnt"]:
+    with _exp_cols[2].expander("Ver RNT sin valorar"):
+        st.dataframe(pd.DataFrame(agg["rend_pendiente_rnt"]), hide_index=True, use_container_width=True)
 
 # ── Descargables ──────────────────────────────────────────────────────────────
 st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
@@ -2983,10 +3031,10 @@ _csv_filename_suffix = wallet[:8] if not es_multi_wallet else f"multi{len(wallet
 with st.spinner("Preparando resumen agregado (XLSX)…"):
     xlsx_agg = build_aggregate_xlsx(agg)
 st.caption(
-    "**Resumen agregado (XLSX)** — hojas Informe · Resumen · Rendimientos · Saldos · "
-    "Plusvalías (FIFO) · Lotes abiertos · Por completar · Glosario, con los totales listos para las "
-    "casillas de los modelos y la lista de importes que el inversor debe completar (compras en FIAT). "
-    "Sin hashes ni contratos."
+    "**Resumen agregado (XLSX)** — hojas Informe · Resumen · Rendimientos · RNT sin valorar · "
+    "Saldos · Plusvalías (FIFO) · Lotes abiertos · Por completar · Glosario, con los totales listos "
+    "para las casillas de los modelos y la lista de importes que el inversor debe completar "
+    "(compras en FIAT, recompensas de RNT sin precio histórico disponible). Sin hashes ni contratos."
 )
 st.download_button(
     "⬇️ Descargar resumen agregado (XLSX)",
