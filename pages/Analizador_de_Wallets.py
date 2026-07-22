@@ -4,6 +4,7 @@ import os
 import sys
 import json
 import io
+import time
 import unicodedata
 from datetime import datetime, date, timedelta
 from collections import defaultdict
@@ -786,7 +787,84 @@ def get_fecha_fin_display(info: dict, closing_dates: dict) -> str:
     return estado if estado else "—"
 
 
-DIVIDEND_DISTRIBUTOR = "0xf9b135fd84ae6dc9d6e632a97235de5f08c0d61e"
+# Distribuidores de dividendos conocidos. Reental ha migrado de contrato con el
+# tiempo (p. ej. 0xc163… activo 2023-2025, 0xf9b1… desde 2025), así que un único
+# `from` hardcodeado se comería la historia antigua. Esta lista solo acelera el
+# caso conocido; la detección REAL (que auto-descubre distribuidores nuevos) es
+# por orquestador + método de la transacción (ver tx_es_dividendo).
+DIVIDEND_DISTRIBUTORS = {
+    "0xf9b135fd84ae6dc9d6e632a97235de5f08c0d61e",
+    "0xc1636217ce488540a4fb4aed26839f080c9d56d7",
+}
+# Contrato orquestador y selector de método con los que Reental reparte los
+# dividendos mensuales a la wallet o al vault, con independencia del contrato
+# distribuidor que financie el pago en cada época.
+DIVIDEND_ORCHESTRATOR = "0x079ce6640e2f4ec39b1da8e4b072b8beecf09a2b"
+DIVIDEND_METHOD_ID    = "0xafc13168"
+OWNER_SELECTOR        = "0x8da5cb5b"   # owner()
+
+# Selectores de método con los que un inversor opera SU vault (reinvertir el
+# saldo en tokens, reclamar, etc.). Son funciones del propio contrato vault, así
+# que el destino de una transacción de la wallet que use uno de ellos ES su
+# vault. Permite identificarlo a coste cero (el txlist ya está descargado) y sin
+# depender de ventanas de 10.000 filas ni de cuándo se cobró el último dividendo.
+VAULT_METHOD_IDS = {"0x346476f1", "0x2eb652a9", "0x8696e4ff", "0x753d3c76"}
+
+
+def _etherscan_proxy(params: dict):
+    """GET al endpoint proxy de Etherscan con reintento ante rate-limit. Devuelve
+    el JSON, o None si no se pudo. El plan gratuito limita a ~5 llamadas/seg y en
+    ese caso responde con un mensaje (no con hex), así que hay que reintentar en
+    vez de interpretar la respuesta."""
+    params = {**params, "chainid": POLYGON_CHAIN_ID, "apikey": API_KEY}
+    for intento, espera in enumerate((0, 0.5, 1.0)):
+        if espera:
+            time.sleep(espera)
+        try:
+            r = requests.get(ETHERSCAN_V2_BASE, params=params, timeout=15)
+            j = r.json()
+            if r.status_code == 429 or "rate limit" in str(j).lower():
+                continue
+            return j
+        except Exception:
+            if intento == 2:
+                return None
+    return None
+
+
+@st.cache_data(show_spinner=False, ttl=86400)
+def read_owner(contract: str):
+    """Lee owner() del contrato vía eth_call. Los vaults personales de Reental
+    devuelven la wallet propietaria, lo que permite identificar el vault de forma
+    determinista. Devuelve la dirección en minúsculas o None.
+
+    Parseo estricto: solo se acepta un valor hexadecimal de 32 bytes; cualquier
+    otra cosa (mensaje de rate-limit, revert, EOA sin código) devuelve None, para
+    no confundir un mensaje de error con una dirección."""
+    if not API_KEY or not contract:
+        return None
+    j = _etherscan_proxy({"module": "proxy", "action": "eth_call",
+                          "to": contract, "data": OWNER_SELECTOR, "tag": "latest"})
+    res = (j or {}).get("result", "")
+    if isinstance(res, str) and res.startswith("0x") and len(res) == 66:
+        return ("0x" + res[-40:]).lower()
+    return None
+
+
+@st.cache_data(show_spinner=False, ttl=86400)
+def tx_es_dividendo(tx_hash: str) -> bool:
+    """True si la transacción es un reparto de dividendos de Reental, identificado
+    por su orquestador + método, sin depender del contrato distribuidor concreto
+    (así se auto-detectan distribuidores nuevos que Reental introduzca)."""
+    if not API_KEY:
+        return False
+    j = _etherscan_proxy({"module": "proxy", "action": "eth_getTransactionByHash",
+                          "txhash": tx_hash})
+    t = (j or {}).get("result", {}) or {}
+    to     = (t.get("to") or "").lower()
+    method = (t.get("input") or "0x")[:10].lower()
+    return to == DIVIDEND_ORCHESTRATOR and method == DIVIDEND_METHOD_ID
+
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_normal_transactions(wallet: str) -> list:
@@ -799,59 +877,72 @@ def fetch_normal_transactions(wallet: str) -> list:
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_distributor_recipients() -> set:
-    """Direcciones que han recibido dividendos del distribuidor (últimos ~10.000 envíos).
-    Etherscan limita cada llamada a 1000 resultados, así que se recorren hasta 10
-    páginas en orden descendente: cubre los repartos recientes, que es lo relevante
-    para detectar vaults activos."""
+    """Direcciones que han recibido dividendos de los distribuidores conocidos
+    (últimos ~10.000 envíos de cada uno). Solo se usa para PRIORIZAR candidatos en
+    la detección del vault; no es un filtro duro, así que basta con cubrir los
+    repartos recientes."""
     if not API_KEY:
         return set()
     recipients = set()
-    for page in range(1, 11):
-        params = {
-            "chainid": POLYGON_CHAIN_ID, "module": "account", "action": "tokentx",
-            "address": DIVIDEND_DISTRIBUTOR,
-            "startblock": 0, "endblock": 99999999, "sort": "desc",
-            "page": page, "offset": 1000, "apikey": API_KEY,
-        }
-        try:
-            r = requests.get(ETHERSCAN_V2_BASE, params=params, timeout=30)
-            result = r.json().get("result")
-            if not isinstance(result, list):
+    for dist in DIVIDEND_DISTRIBUTORS:
+        for page in range(1, 11):
+            params = {
+                "chainid": POLYGON_CHAIN_ID, "module": "account", "action": "tokentx",
+                "address": dist,
+                "startblock": 0, "endblock": 99999999, "sort": "desc",
+                "page": page, "offset": 1000, "apikey": API_KEY,
+            }
+            try:
+                r = requests.get(ETHERSCAN_V2_BASE, params=params, timeout=30)
+                result = r.json().get("result")
+                if not isinstance(result, list):
+                    break
+                recipients |= {tx["to"].lower() for tx in result}
+                if len(result) < 1000:
+                    break
+            except Exception:
                 break
-            recipients |= {tx["to"].lower() for tx in result}
-            if len(result) < 1000:
-                break
-        except Exception:
-            break
     return recipients
 
 
 def detect_vault_address(wallet: str) -> str | None:
     """
-    Detecta el vault personal del inversor cruzando dos fuentes:
-    1. Contratos que la wallet ha llamado directamente (txlist normal).
-    2. Direcciones que han recibido USDT del distribuidor de Reental.
-    La intersección es el vault personal.
+    Identifica el vault del inversor de forma determinista y a coste casi cero:
+    el vault es el contrato al que la wallet ha enviado transacciones usando un
+    método propio de vault (VAULT_METHOD_IDS), confirmado con owner() == wallet.
+
+    El método se lee del txlist (ya descargado), así que no dependemos del límite
+    de 10.000 filas de la API ni de cuándo se cobró el último dividendo — el fallo
+    de la lógica antigua, que cruzaba con los receptores recientes del distribuidor
+    y se dejaba fuera los vaults con dividendos antiguos. Si por lo que sea el
+    método no aparece, se recurre como respaldo a los contratos llamados que han
+    recibido dividendos recientemente.
     """
     wallet = wallet.lower()
     normal_txs = fetch_normal_transactions(wallet)
     if not normal_txs:
         return None
 
+    # Candidatos primarios: destinos llamados con un método propio de vault.
+    candidates, seen = [], set()
+    for tx in normal_txs:
+        if (tx["from"].lower() == wallet and tx.get("to")
+                and (tx.get("methodId") or "").lower() in VAULT_METHOD_IDS):
+            addr = tx["to"].lower()
+            if addr not in seen:
+                seen.add(addr)
+                candidates.append(addr)
+    for addr in candidates:
+        if read_owner(addr) == wallet:
+            return addr
+
+    # Respaldo: contratos llamados que aparecen como receptores de dividendos.
     called = {tx["to"].lower() for tx in normal_txs
-              if tx.get("to") and tx["from"].lower() == wallet
-              and tx["to"].lower() != wallet}  # excluir self-transfers
-
-    if not called:
-        return None
-
-    dist_recipients = fetch_distributor_recipients()
-    candidates = called & dist_recipients
-
-    if not candidates:
-        return None
-    # Si hay varios candidatos, devolver el primero (raro en la práctica)
-    return next(iter(candidates))
+              if tx.get("to") and tx["from"].lower() == wallet and tx["to"].lower() != wallet}
+    for addr in (called & fetch_distributor_recipients()):
+        if read_owner(addr) == wallet:
+            return addr
+    return None
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
@@ -862,24 +953,45 @@ def fetch_vault_transfers(vault_address: str) -> list:
     return fetch_all_token_txs(vault_address, API_KEY)
 
 
-def process_dividends(transfers: list, wallet: str, vault_transfers: list = None) -> list:
+def process_dividends(transfers: list, wallet: str, vault_transfers: list = None,
+                      vault_addr: str = None) -> list:
     """
-    Detecta pagos de dividendos desde el distribuidor de Reental hacia:
+    Detecta pagos de dividendos de Reental hacia:
     a) la wallet directamente, y
     b) el vault personal del usuario (dividendos acumulados sin retirar).
-    Combina ambas fuentes y devuelve la lista ordenada por fecha.
+
+    Un cobro se identifica como dividendo si la transferencia de stablecoin viene
+    de un distribuidor conocido O si su transacción usa el orquestador+método de
+    reparto (lo que auto-detecta distribuidores nuevos que Reental introduzca sin
+    tener que hardcodearlos). La verificación por método se hace una sola vez por
+    dirección de origen distinta para acotar las llamadas a la API.
     """
     wallet = wallet.lower()
+    # Cachés locales de esta ejecución: fuentes ya clasificadas como (no) dividendo.
+    es_dist = set(DIVIDEND_DISTRIBUTORS)
+    no_dist = set()
 
     def _build_events(tx_list: list, recipient: str, destino_label: str) -> list:
-        div_txs = defaultdict(list)
+        by_hash = defaultdict(list)
         for tx in tx_list:
-            if (tx["from"].lower() == DIVIDEND_DISTRIBUTOR
-                    and tx["to"].lower() == recipient
-                    and tx["contractAddress"].lower() in STABLECOIN_CONTRACTS):
-                div_txs[tx["hash"]].append(tx)
+            if (tx["to"].lower() == recipient
+                    and tx["contractAddress"].lower() in STABLECOIN_CONTRACTS
+                    and tx["from"].lower() != ZERO_ADDRESS):
+                by_hash[tx["hash"]].append(tx)
+
         evs = []
-        for tx_hash, group in div_txs.items():
+        for tx_hash, group in by_hash.items():
+            frm = group[0]["from"].lower()
+            if frm in es_dist:
+                pass
+            elif frm in no_dist:
+                continue
+            elif tx_es_dividendo(tx_hash):
+                es_dist.add(frm)          # distribuidor nuevo descubierto
+            else:
+                no_dist.add(frm)
+                continue
+
             dt = datetime.utcfromtimestamp(int(group[0]["timeStamp"]))
             pagos, total, sym = [], 0.0, "USDT"
             for tx in group:
@@ -904,16 +1016,8 @@ def process_dividends(transfers: list, wallet: str, vault_transfers: list = None
 
     events = _build_events(transfers, wallet, "Wallet directa")
 
-    if vault_transfers:
-        # La vault puede tener cualquier dirección; buscamos al distribuidor como from
-        vault_addr = next(
-            (tx["to"].lower() for tx in vault_transfers
-             if tx["from"].lower() == DIVIDEND_DISTRIBUTOR
-             and tx["contractAddress"].lower() in STABLECOIN_CONTRACTS),
-            None,
-        )
-        if vault_addr:
-            events += _build_events(vault_transfers, vault_addr, "Vault personal")
+    if vault_transfers and vault_addr:
+        events += _build_events(vault_transfers, vault_addr.lower(), "Vault personal")
 
     events.sort(key=lambda e: e["fecha"])
     return events
@@ -1839,8 +1943,12 @@ if history:
 
 # ── Movimientos de Stablecoins relacionados con Reental ──────────────────────
 st.markdown("---")
-st.subheader("💵 Movimientos de Stablecoins relacionados con Reental")
-st.caption("Solo flujos de USDT/USDC directamente vinculados a compras, ventas o reinversiones de tokens inmobiliarios.")
+st.subheader("💵 Compraventa de tokens con USDT/USDC (en la misma transacción)")
+st.caption(
+    "Solo operaciones donde el intercambio token↔stablecoin ocurrió **en la misma transacción on-chain**: "
+    "compras, ventas y reinversiones desde el vault. **No** incluye compras/ventas pagadas en FIAT, dividendos, "
+    "flujos de Aave, ni USDT enviado en una transacción aparte (esos se ven en sus secciones y en el informe fiscal)."
+)
 
 stable_movs = build_stablecoin_movements(token_data)   # SIN filtrar: se reutiliza en el CSV fiscal
 stable_movs_filtered = filtrar_por_wallet(stable_movs)  # para la tabla en pantalla
@@ -1891,7 +1999,8 @@ dividends = []
 for _addr, _alias in wallets_analyzed:
     _vinfo = vault_by_wallet.get(_addr, {})
     _evs = process_dividends(
-        raw_transfers_by_wallet.get(_addr, []), _addr, _vinfo.get("vault_transfers"),
+        raw_transfers_by_wallet.get(_addr, []), _addr,
+        _vinfo.get("vault_transfers"), _vinfo.get("vault_addr"),
     )
     for _ev in _evs:
         _ev["wallet_addr"], _ev["wallet_alias"] = _addr, _alias
