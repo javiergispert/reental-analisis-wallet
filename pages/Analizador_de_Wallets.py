@@ -817,7 +817,8 @@ def _etherscan_proxy(params: dict):
     ese caso responde con un mensaje (no con hex), así que hay que reintentar en
     vez de interpretar la respuesta."""
     params = {**params, "chainid": POLYGON_CHAIN_ID, "apikey": API_KEY}
-    for intento, espera in enumerate((0, 0.5, 1.0)):
+    esperas = (0, 0.6, 1.2, 2.0, 3.0)
+    for intento, espera in enumerate(esperas):
         if espera:
             time.sleep(espera)
         try:
@@ -827,7 +828,7 @@ def _etherscan_proxy(params: dict):
                 continue
             return j
         except Exception:
-            if intento == 2:
+            if intento == len(esperas) - 1:
                 return None
     return None
 
@@ -909,14 +910,18 @@ def detect_vault_address(wallet: str) -> str | None:
     """
     Identifica el vault del inversor de forma determinista y a coste casi cero:
     el vault es el contrato al que la wallet ha enviado transacciones usando un
-    método propio de vault (VAULT_METHOD_IDS), confirmado con owner() == wallet.
+    método propio de vault (VAULT_METHOD_IDS).
 
     El método se lee del txlist (ya descargado), así que no dependemos del límite
     de 10.000 filas de la API ni de cuándo se cobró el último dividendo — el fallo
     de la lógica antigua, que cruzaba con los receptores recientes del distribuidor
-    y se dejaba fuera los vaults con dividendos antiguos. Si por lo que sea el
-    método no aparece, se recurre como respaldo a los contratos llamados que han
-    recibido dividendos recientemente.
+    y se dejaba fuera los vaults con dividendos antiguos.
+
+    owner() se usa para DESAMBIGUAR/descartar (si devuelve otra dirección, el
+    contrato es de un tercero), pero NO para exigir confirmación: como el método
+    ya es específico del vault, si owner() no se puede leer (p. ej. rate-limit en
+    plena carga del análisis) se acepta igualmente el candidato, para no perder el
+    vault por un fallo transitorio de la API.
     """
     wallet = wallet.lower()
     normal_txs = fetch_normal_transactions(wallet)
@@ -932,9 +937,17 @@ def detect_vault_address(wallet: str) -> str | None:
             if addr not in seen:
                 seen.add(addr)
                 candidates.append(addr)
+
+    tentativo = None
     for addr in candidates:
-        if read_owner(addr) == wallet:
-            return addr
+        owner = read_owner(addr)
+        if owner == wallet:
+            return addr                      # confirmado
+        if owner is None and tentativo is None:
+            tentativo = addr                 # no confirmable (rate-limit): el método ya es fiable
+        # owner == otra dirección → contrato ajeno, se descarta
+    if tentativo is not None:
+        return tentativo
 
     # Respaldo: contratos llamados que aparecen como receptores de dividendos.
     called = {tx["to"].lower() for tx in normal_txs
@@ -2008,7 +2021,7 @@ for _addr, _alias in wallets_analyzed:
 dividends.sort(key=lambda e: e["fecha"])
 
 vaults_detectados = {
-    alias: vault_by_wallet.get(addr, {}).get("vault_addr")
+    (alias or own_wallets.get(addr, addr[:8])): vault_by_wallet.get(addr, {}).get("vault_addr")
     for addr, alias in wallets_analyzed
     if vault_by_wallet.get(addr, {}).get("vault_addr")
 }
@@ -2019,7 +2032,8 @@ st.subheader("💰 Dividendos recibidos de Reental")
 
 if vaults_detectados:
     _detalle_vaults = "; ".join(
-        f"«{alias}» → `{v[:8]}…{v[-4:]}`" for alias, v in vaults_detectados.items()
+        (f"«{alias}» → `{v[:8]}…{v[-4:]}`" if es_multi_wallet else f"`{v[:8]}…{v[-4:]}`")
+        for alias, v in vaults_detectados.items()
     )
     _vault_note = f"Incluye dividendos acumulados en vault personal detectado en: {_detalle_vaults}."
 else:
