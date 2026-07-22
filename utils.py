@@ -3,6 +3,7 @@ Funciones compartidas entre app.py y el simulador.
 """
 import os
 import io
+import time
 import unicodedata
 from datetime import datetime, date
 
@@ -285,7 +286,17 @@ def fetch_all_account_txs(wallet: str, api_key: str, action: str = "tokentx",
     page×offset a 10.000, así que se pagina (hasta 10 páginas por ronda) y, si
     se agota la ventana, se reanuda desde el último bloque visto en una nueva
     ronda, deduplicando el solape del bloque frontera.
-    Devuelve la lista de txs en orden ascendente, o [] si la API falla.
+
+    Cada página se reintenta ante fallo transitorio (rate-limit del plan
+    gratuito, timeout de red): Etherscan responde esos casos con un `result`
+    en forma de mensaje de texto, no de lista. Sin reintento, un solo fallo a
+    mitad de un histórico largo (habitual cuando el análisis ya ha hecho muchas
+    llamadas previas) truncaba silenciosamente el resto — p. ej. perdiendo años
+    de histórico de un vault. Una lista vacía legítima ("sin más transacciones")
+    sigue devolviendo `[]` inmediatamente, sin reintentar.
+
+    Devuelve la lista de txs en orden ascendente, o [] si la API sigue fallando
+    tras los reintentos.
     """
     if not api_key:
         return []
@@ -304,13 +315,23 @@ def fetch_all_account_txs(wallet: str, api_key: str, action: str = "tokentx",
             }
             if contractaddress:
                 params["contractaddress"] = contractaddress.lower()
-            try:
-                resp = requests.get(ETHERSCAN_V2_BASE, params=params, timeout=30)
-                result = resp.json().get("result")
-            except Exception:
-                return all_txs
+
+            result = None
+            for intento, espera in enumerate((0, 0.6, 1.2, 2.0, 3.0)):
+                if espera:
+                    time.sleep(espera)
+                try:
+                    resp = requests.get(ETHERSCAN_V2_BASE, params=params, timeout=30)
+                    result = resp.json().get("result")
+                except Exception:
+                    result = None
+                    continue
+                if isinstance(result, list):
+                    break  # éxito (incluye lista vacía legítima)
+                # result no es una lista: rate-limit u otro error transitorio → reintentar
             if not isinstance(result, list):
-                # "No transactions found" u otro error → no hay más datos fiables
+                # Se agotaron los reintentos: devolvemos lo acumulado hasta ahora
+                # en vez de fingir que el histórico termina aquí.
                 return all_txs
             for tx in result:
                 key = (tx.get("hash"), tx.get("contractAddress"), tx.get("from"),
