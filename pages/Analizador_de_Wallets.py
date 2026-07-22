@@ -1693,21 +1693,12 @@ if movs:
     rows = []
     saldo_tokens = 0.0
     saldo_stable = 0.0
-    rendimiento_acum = 0.0
     for m in movs:
         saldo_tokens += m["cantidad_neta"]
         if m["stable_in"] > 0 and m["cantidad_neta"] < 0:
             saldo_stable += m["stable_in"]
         elif m["stable_out"] > 0 and m["cantidad_neta"] > 0:
             saldo_stable -= m["stable_out"]
-
-        # Rendimiento: únicamente USDT recibido al vender ESE token
-        # Las reinversiones desde vault y las transferencias internas NO computan:
-        # no son una venta real (dividendos de otros tokens / movimiento entre wallets propias)
-        es_venta = m["cantidad_neta"] < 0 and m["stable_in"] > 0 and not m.get("es_transferencia_interna")
-        if es_venta:
-            rendimiento_acum += m["stable_in"]
-        rendimiento_col = f"{rendimiento_acum:,.2f}" if rendimiento_acum > 0 else "—"
 
         tokens_col = f"+{m['cantidad']:,.4f}" if m["cantidad_neta"] > 0 else f"-{m['cantidad']:,.4f}"
 
@@ -1727,7 +1718,6 @@ if movs:
             "Saldo tokens": round(saldo_tokens, 4),
             "Stablecoin": stable_col,
             "Saldo USDT": f"{saldo_stable:,.2f}",
-            "Rendimiento acum.": rendimiento_col,
             "TX": m["tx_link"],
         }
         if es_multi_wallet:
