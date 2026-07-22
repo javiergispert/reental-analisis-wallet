@@ -5,3 +5,6 @@ __pycache__/
 otc_reservas.json
 otc_ofertas.json
 otc_precios.json
+
+# Archivos de restauración con datos personales — nunca commitear
+RESTAURAR_*

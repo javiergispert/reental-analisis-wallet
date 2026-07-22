@@ -58,12 +58,27 @@ def _get_client():
 def _ws(tab: str):
     return _get_client().open_by_key(SPREADSHEET_ID).worksheet(tab)
 
+# El estado de cada pestaña se guarda como UN único JSON. Como una celda de
+# Google Sheets admite máx. 50.000 caracteres y la lista de reservas ya rozaba
+# ese techo (65 reservas ≈ 49.900 chars), el blob se reparte en varios trozos
+# por la columna A (A1, A2, A3…) y se reensambla al leer. Así el límite de una
+# celda deja de ser un techo para el número de reservas.
+_CHUNK_SIZE = 45000     # margen de seguridad bajo el límite duro de 50.000
+_MAX_ROWS   = 60        # filas a leer/limpiar (≈2,7 M caracteres ≈ miles de reservas)
+
 def _raw_read(tab: str) -> str | None:
-    """Lee el contenido de A1 con reintentos. Devuelve el string crudo o None."""
+    """Lee el blob completo repartido por la columna A y lo reensambla
+    concatenando celdas consecutivas hasta el primer hueco. Con reintentos."""
     for intento in range(4):
         try:
-            val = _ws(tab).acell("A1").value
-            return val
+            filas = _ws(tab).get(f"A1:A{_MAX_ROWS}")
+            partes = []
+            for fila in filas:
+                val = fila[0] if fila else ""
+                if not val:
+                    break            # primer hueco = fin del blob
+                partes.append(val)
+            return "".join(partes) if partes else None
         except Exception:
             if intento < 3:
                 time.sleep(1.5)
@@ -74,43 +89,77 @@ def _cached_read(tab: str) -> str | None:
     """Caché de lectura de 6 segundos: evita golpes simultáneos a la API."""
     return _raw_read(tab)
 
-def _read_list(tab: str) -> list:
-    val = _cached_read(tab)
+def _parse_list(val: str | None):
+    """Parsea el blob a lista. Devuelve None si el JSON está corrupto (señal
+    para que el llamante reintente por otra vía en lugar de perder datos)."""
     if not val:
         return []
     try:
         parsed = json.loads(val)
     except Exception:
-        return []
+        return None
     if isinstance(parsed, list):
         return parsed
-    # Formato antiguo: migrar (un solo dict en A1 = una sola reserva)
-    if isinstance(parsed, dict):
-        migrated = [parsed]
-        _write(tab, migrated)
-        _cached_read.clear()
-        return migrated
+    if isinstance(parsed, dict):      # formato antiguo: un dict = una reserva
+        return [parsed]
     return []
 
-def _read_dict(tab: str) -> dict:
-    val = _cached_read(tab)
+def _parse_dict(val: str | None):
     if not val:
         return {}
     try:
         parsed = json.loads(val)
-        return parsed if isinstance(parsed, dict) else {}
     except Exception:
-        return {}
+        return None
+    return parsed if isinstance(parsed, dict) else {}
 
-def _write(tab: str, data):
+def _read_list(tab: str) -> list:
+    parsed = _parse_list(_cached_read(tab))
+    if parsed is None:
+        # El blob reensamblado no parsea (p.ej. un resto antiguo en A2 de un
+        # estado previo). Degradar con gracia leyendo solo A1.
+        try:
+            parsed = _parse_list(_ws(tab).acell("A1").value)
+        except Exception:
+            parsed = None
+    return parsed or []
+
+def _read_dict(tab: str) -> dict:
+    parsed = _parse_dict(_cached_read(tab))
+    if parsed is None:
+        try:
+            parsed = _parse_dict(_ws(tab).acell("A1").value)
+        except Exception:
+            parsed = None
+    return parsed or {}
+
+def _write(tab: str, data) -> bool:
+    """Guarda `data` como JSON repartido en trozos por la columna A, en UNA
+    sola escritura que además vacía filas sobrantes de escrituras anteriores
+    (evita dejar restos que corrompan la relectura). `raw=True` guarda los
+    trozos tal cual, sin que Sheets interprete uno que empiece por '=', '+' o
+    un número como fórmula. Devuelve True si la escritura tuvo éxito."""
+    blob   = json.dumps(data, ensure_ascii=False)
+    chunks = [blob[i:i + _CHUNK_SIZE] for i in range(0, len(blob), _CHUNK_SIZE)] or [""]
+    total  = max(len(chunks), _MAX_ROWS)
+    filas  = [[chunks[i]] if i < len(chunks) else [""] for i in range(total)]
     for intento in range(4):
         try:
-            _ws(tab).update("A1", [[json.dumps(data, ensure_ascii=False)]])
+            _ws(tab).update(filas, f"A1:A{total}", raw=True)
             _cached_read.clear()   # invalida caché inmediatamente tras escritura
-            return
+            return True
         except Exception:
             if intento < 3:
                 time.sleep(1.5)
+    return False
+
+def _fresh_list(tab: str) -> list:
+    """Relectura SIN caché, para mutar justo antes de guardar y minimizar la
+    ventana de carrera frente a copias cargadas antes en el script."""
+    return _parse_list(_raw_read(tab)) or []
+
+def _fresh_dict(tab: str) -> dict:
+    return _parse_dict(_raw_read(tab)) or {}
 
 # ── Persistencia de reservas ──────────────────────────────────────────────────
 
@@ -135,6 +184,74 @@ def load_ofertas() -> list:
 
 def save_ofertas(ofertas: list):
     _write(TAB_OFERTAS, ofertas)
+
+# ── 🛠️ Mantenimiento TEMPORAL — Restaurar reservas ───────────────────────────
+# Panel de un solo uso para reimportar las reservas tras la pérdida de datos del
+# 22/07/2026. Pega el JSON completo (la caja de texto no tiene el límite de
+# 50.000 caracteres de una celda) y la app lo guarda con el nuevo almacenamiento
+# multi-celda. ELIMINAR ESTE BLOQUE una vez restaurado.
+with st.expander("🛠️ Mantenimiento — Restaurar reservas (temporal)", expanded=False):
+    st.caption(
+        "Uso único: pega aquí el JSON de reservas reconstruido y pulsa importar. "
+        "Sobrescribe por completo la pestaña «Reservas». Verifica el recuento antes de confirmar."
+    )
+    actuales = load_reservas()
+    st.info(f"Estado actual en la hoja: **{len(actuales)}** reservas.")
+    _raw_import = st.text_area(
+        "JSON de reservas (lista completa)",
+        height=180,
+        key="restore_json",
+        placeholder='[{"id": "RES-...", ...}, ...]',
+    )
+    _parsed_import, _err_import = None, None
+    if _raw_import.strip():
+        try:
+            _cand = json.loads(_raw_import)
+            if not isinstance(_cand, list):
+                _err_import = "El JSON debe ser una lista de reservas ([...])."
+            elif not all(isinstance(x, dict) and "id" in x for x in _cand):
+                _err_import = "Cada elemento debe ser un objeto con campo «id»."
+            else:
+                _ids = [x["id"] for x in _cand]
+                if len(_ids) != len(set(_ids)):
+                    _err_import = "Hay ids duplicados en el JSON."
+                else:
+                    _parsed_import = _cand
+        except Exception as _e:
+            _err_import = f"JSON inválido: {_e}"
+
+    if _err_import:
+        st.error(_err_import)
+    elif _parsed_import is not None:
+        from collections import Counter as _Counter
+        _est = _Counter(x.get("estado") for x in _parsed_import)
+        st.success(
+            f"✅ JSON válido: **{len(_parsed_import)}** reservas "
+            f"({dict(_est)}). Tamaño: {len(_raw_import):,} caracteres."
+        )
+        _confirmo = st.checkbox(
+            f"Confirmo que quiero SOBRESCRIBIR las {len(actuales)} reservas actuales "
+            f"por estas {len(_parsed_import)}.",
+            key="restore_confirm",
+        )
+        if st.button("💾 Importar y guardar", type="primary", disabled=not _confirmo, key="restore_go"):
+            ok = _write(TAB_RESERVAS, _parsed_import)
+            if ok:
+                _cached_read.clear()
+                _verif = _fresh_list(TAB_RESERVAS)
+                if len(_verif) == len(_parsed_import):
+                    st.success(
+                        f"✅ Restauradas {len(_verif)} reservas y verificadas releyendo la hoja. "
+                        "Ya puedes eliminar este panel de mantenimiento."
+                    )
+                    st.balloons()
+                else:
+                    st.warning(
+                        f"Se escribió, pero al releer aparecen {len(_verif)} (esperadas "
+                        f"{len(_parsed_import)}). Revisa la hoja antes de continuar."
+                    )
+            else:
+                st.error("La escritura falló tras varios reintentos. No se ha cambiado nada. Inténtalo de nuevo.")
 
 # ── Tipo de cambio EUR/USD ────────────────────────────────────────────────────
 
@@ -318,70 +435,81 @@ if not otc_balances:
 
 # ── Cargar reservas y detectar envíos ────────────────────────────────────────
 
-reservas = load_reservas()
-changed  = False
-TOL      = 0.001   # tolerancia para considerar importe exacto
+TOL = 0.001   # tolerancia para considerar importe exacto
 
-for r in reservas:
-    if r.get("estado") in ("completada", "cancelada"):
-        continue
-    contract   = r.get("token_address", "").lower()
-    wallet_inv = r.get("wallet_inversor", "").lower()
-    n_reservado = float(r.get("n_tokens", 0))
-    if not contract or not wallet_inv:
-        continue
+def _detectar_envios(reservas: list) -> bool:
+    """Marca como completadas las reservas activas que ya tengan un envío
+    on-chain a la wallet del inversor. Muta `reservas` in-place y devuelve
+    True si cambió algo."""
+    changed = False
+    for r in reservas:
+        if r.get("estado") in ("completada", "cancelada"):
+            continue
+        contract   = r.get("token_address", "").lower()
+        wallet_inv = r.get("wallet_inversor", "").lower()
+        n_reservado = float(r.get("n_tokens", 0))
+        if not contract or not wallet_inv:
+            continue
 
-    txs_salientes = last_txs.get(contract, [])
-    # Solo TX posteriores a la fecha de creación de la reserva
-    try:
-        ts_reserva = datetime.strptime(r["fecha_reserva"], "%d/%m/%Y %H:%M").timestamp()
-    except Exception:
-        ts_reserva = 0
-    txs_match = [
-        tx for tx in txs_salientes
-        if tx["to"] == wallet_inv and tx["ts"] >= ts_reserva
-    ]
-    if not txs_match:
-        continue
+        txs_salientes = last_txs.get(contract, [])
+        # Solo TX posteriores a la fecha de creación de la reserva
+        try:
+            ts_reserva = datetime.strptime(r["fecha_reserva"], "%d/%m/%Y %H:%M").timestamp()
+        except Exception:
+            ts_reserva = 0
+        txs_match = [
+            tx for tx in txs_salientes
+            if tx["to"] == wallet_inv and tx["ts"] >= ts_reserva
+        ]
+        if not txs_match:
+            continue
 
-    # Preferir la TX cuyo importe coincida exactamente; si no, la más antigua
-    tx_exacta = next((tx for tx in txs_match if abs(tx["value"] - n_reservado) <= TOL), None)
-    tx_elegida = tx_exacta or txs_match[0]
+        # Preferir la TX cuyo importe coincida exactamente; si no, la más antigua
+        tx_exacta = next((tx for tx in txs_match if abs(tx["value"] - n_reservado) <= TOL), None)
+        tx_elegida = tx_exacta or txs_match[0]
 
-    enviado     = tx_elegida["value"]
-    diferencia  = round(enviado - n_reservado, 6)
-    fecha_envio = datetime.utcfromtimestamp(tx_elegida["ts"]).strftime("%d/%m/%Y %H:%M")
+        enviado     = tx_elegida["value"]
+        diferencia  = round(enviado - n_reservado, 6)
+        fecha_envio = datetime.utcfromtimestamp(tx_elegida["ts"]).strftime("%d/%m/%Y %H:%M")
 
-    r["tx_envio"]       = tx_elegida["hash"]
-    r["fecha_envio"]    = fecha_envio
-    r["tokens_enviados"] = round(enviado, 3)
+        r["tx_envio"]       = tx_elegida["hash"]
+        r["fecha_envio"]    = fecha_envio
+        r["tokens_enviados"] = round(enviado, 3)
 
-    if diferencia < -TOL:
-        # Envío parcial: tokens enviados < reservados
-        pendientes = round(abs(diferencia), 3)
-        r["estado"]        = "completada"
-        r["envio_parcial"] = True
-        r["tokens_pendientes"] = pendientes
-        r["nota_envio"] = (
-            f"⚠️ Envío parcial: se enviaron {enviado:.3f} tokens de los {n_reservado:.3f} reservados. "
-            f"Faltan {pendientes:.3f} tokens. Si el inversor tiene pendiente recibir más, "
-            f"realiza una nueva reserva por los {pendientes:.3f} tokens pendientes."
-        )
-    else:
-        # Envío exacto o con exceso
-        r["estado"]        = "completada"
-        r["envio_parcial"] = False
-        if diferencia > TOL:
+        if diferencia < -TOL:
+            # Envío parcial: tokens enviados < reservados
+            pendientes = round(abs(diferencia), 3)
+            r["estado"]        = "completada"
+            r["envio_parcial"] = True
+            r["tokens_pendientes"] = pendientes
             r["nota_envio"] = (
-                f"Se enviaron {enviado:.3f} tokens ({diferencia:+.3f} respecto a los {n_reservado:.3f} reservados)."
+                f"⚠️ Envío parcial: se enviaron {enviado:.3f} tokens de los {n_reservado:.3f} reservados. "
+                f"Faltan {pendientes:.3f} tokens. Si el inversor tiene pendiente recibir más, "
+                f"realiza una nueva reserva por los {pendientes:.3f} tokens pendientes."
             )
         else:
-            r["nota_envio"] = None
+            # Envío exacto o con exceso
+            r["estado"]        = "completada"
+            r["envio_parcial"] = False
+            if diferencia > TOL:
+                r["nota_envio"] = (
+                    f"Se enviaron {enviado:.3f} tokens ({diferencia:+.3f} respecto a los {n_reservado:.3f} reservados)."
+                )
+            else:
+                r["nota_envio"] = None
 
-    changed = True
+        changed = True
+    return changed
 
-if changed:
-    save_reservas(reservas)
+reservas = load_reservas()
+# Si la detección sobre la copia (cacheada) de pantalla indica cambios, los
+# aplicamos sobre una relectura FRESCA de la hoja y guardamos esa, para no
+# pisar reservas que otro usuario/pestaña haya creado mientras tanto.
+if _detectar_envios(reservas):
+    fresh = _fresh_list(TAB_RESERVAS)
+    _detectar_envios(fresh)
+    save_reservas(fresh)
+    reservas = fresh
 
 # ── Calcular saldos reservados y disponibles ──────────────────────────────────
 
@@ -595,12 +723,13 @@ with st.expander("🔐 Gestión de precios OTC mínimos (acceso administrador)",
                 if not autor.strip():
                     st.warning("Indica tu nombre antes de guardar.")
                 else:
-                    precios_otc[addr] = {
+                    precios_frescos = _fresh_dict(TAB_PRECIOS)
+                    precios_frescos[addr] = {
                         "precio_otc":  new_price,
                         "updated_at":  datetime.utcnow().strftime("%d/%m/%Y %H:%M"),
                         "updated_by":  autor.strip(),
                     }
-                    save_precios_otc(precios_otc)
+                    save_precios_otc(precios_frescos)
                     st.success(f"✅ Precio de {d['nombre']} actualizado a {new_price:.2f} {d['divisa']}")
                     st.rerun()
             if updated_info:
@@ -700,7 +829,7 @@ with st.expander("📢 Publicar oferta de token de tercero", expanded=False):
                     "fecha_publicacion": datetime.utcnow().strftime("%d/%m/%Y %H:%M"),
                     "estado":            "activa",
                 }
-                todas_ofertas = load_ofertas()
+                todas_ofertas = _fresh_list(TAB_OFERTAS)
                 todas_ofertas.append(nueva_oferta)
                 save_ofertas(todas_ofertas)
                 st.success(
@@ -907,7 +1036,7 @@ with _exp_reserva:
                     "tx_envio":         None,
                     "fecha_envio":      None,
                 }
-                reservas_all = load_reservas()
+                reservas_all = _fresh_list(TAB_RESERVAS)
                 reservas_all.append(nueva)
                 save_reservas(reservas_all)
                 for _k in ["nr_proyecto", "nr_comercial", "nr_inversor", "nr_wallet",
@@ -1107,7 +1236,7 @@ def render_reservas(lista: list, editable: bool = False):
                         cf1, cf2 = st.columns(2)
                         tx_manual = cf1.text_input("Hash de TX (opcional)", placeholder="0x…", key=f"tx_manual_{r['id']}")
                         if cf1.button("Confirmar", key=f"yes_force_{r['id']}", type="primary"):
-                            all_r = load_reservas()
+                            all_r = _fresh_list(TAB_RESERVAS)
                             for item in all_r:
                                 if item["id"] == r["id"]:
                                     item["estado"]          = "completada"
@@ -1179,7 +1308,7 @@ def render_reservas(lista: list, editable: bool = False):
                             for e in errores_edit:
                                 st.error(e)
                         else:
-                            all_r = load_reservas()
+                            all_r = _fresh_list(TAB_RESERVAS)
                             for item in all_r:
                                 if item["id"] == r["id"]:
                                     item["n_tokens"]         = float(new_tokens)
@@ -1200,7 +1329,7 @@ def render_reservas(lista: list, editable: bool = False):
                     st.warning(f"¿Cancelar la reserva **{r['id']}** de {r['inversor']}? La reserva quedará marcada como cancelada pero permanecerá en el historial.")
                     cc1, cc2, _ = st.columns([1, 1, 6])
                     if cc1.button("Sí, cancelar", key=f"yes_cancel_{r['id']}", type="primary"):
-                        all_r = load_reservas()
+                        all_r = _fresh_list(TAB_RESERVAS)
                         for item in all_r:
                             if item["id"] == r["id"]:
                                 item["estado"] = "cancelada"
@@ -1217,7 +1346,7 @@ def render_reservas(lista: list, editable: bool = False):
                     st.error(f"¿Eliminar definitivamente la reserva **{r['id']}**? Esta acción no se puede deshacer.")
                     cd1, cd2, _ = st.columns([1, 1, 6])
                     if cd1.button("Sí, eliminar", key=f"yes_delete_{r['id']}", type="primary"):
-                        all_r = load_reservas()
+                        all_r = _fresh_list(TAB_RESERVAS)
                         all_r = [item for item in all_r if item["id"] != r["id"]]
                         save_reservas(all_r)
                         st.session_state.pop(f"confirm_delete_{r['id']}", None)
@@ -1336,7 +1465,7 @@ elif _active_tab == "ofertas":
                         # La lógica de guardado va DENTRO del with st.form para que
                         # new_tokens/new_precio/new_divisa tengan los valores enviados
                         if guardar:
-                            ofs = load_ofertas()
+                            ofs = _fresh_list(TAB_OFERTAS)
                             for _of in ofs:
                                 if _of["id"] == o["id"]:
                                     _of["n_tokens"]     = round(float(new_tokens), 3)
@@ -1355,7 +1484,7 @@ elif _active_tab == "ofertas":
                     st.error(f"¿Eliminar definitivamente la oferta **{o['id']}**?")
                     cx1, cx2, _ = st.columns([1, 1, 6])
                     if cx1.button("Sí, eliminar", key=f"yes_del_of_{o['id']}", type="primary"):
-                        ofs = load_ofertas()
+                        ofs = _fresh_list(TAB_OFERTAS)
                         for _of in ofs:
                             if _of["id"] == o["id"]:
                                 _of["estado"] = "eliminada"
