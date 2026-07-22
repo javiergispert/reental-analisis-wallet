@@ -203,10 +203,18 @@ with st.expander("🛠️ Mantenimiento — Restaurar reservas (temporal)", expa
         key="restore_json",
         placeholder='[{"id": "RES-...", ...}, ...]',
     )
+    # Limpia BOM (﻿, que str.strip() NO quita), espacios y comillas
+    # tipográficas que algunos navegadores/portapapeles añaden al pegar.
+    _clean = (_raw_import or "").strip().strip("﻿").strip("​").strip()
+    # Recorta cualquier basura antes del primer '[' o después del último ']'
+    _ini, _fin = _clean.find("["), _clean.rfind("]")
+    if _ini > 0 or (0 <= _fin < len(_clean) - 1):
+        if _ini != -1 and _fin != -1 and _fin > _ini:
+            _clean = _clean[_ini:_fin + 1]
     _parsed_import, _err_import = None, None
-    if _raw_import.strip():
+    if _clean:
         try:
-            _cand = json.loads(_raw_import)
+            _cand = json.loads(_clean)
             if not isinstance(_cand, list):
                 _err_import = "El JSON debe ser una lista de reservas ([...])."
             elif not all(isinstance(x, dict) and "id" in x for x in _cand):
@@ -218,7 +226,12 @@ with st.expander("🛠️ Mantenimiento — Restaurar reservas (temporal)", expa
                 else:
                     _parsed_import = _cand
         except Exception as _e:
-            _err_import = f"JSON inválido: {_e}"
+            # Diagnóstico: qué llegó realmente al cuadro de texto.
+            _err_import = (
+                f"JSON inválido: {_e}\n\n"
+                f"Diagnóstico — caracteres recibidos: {len(_raw_import):,} · "
+                f"empieza por: {_raw_import[:50]!r} · termina en: {_raw_import[-50:]!r}"
+            )
 
     if _err_import:
         st.error(_err_import)
