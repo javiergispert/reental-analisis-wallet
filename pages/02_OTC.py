@@ -45,145 +45,36 @@ st.caption(
     "Reservas guardadas en servidor."
 )
 
-# ── Google Sheets — cliente por sesión ───────────────────────────────────────
-
-def _get_client():
-    """Cliente gspread independiente por sesión para evitar conflictos entre usuarios."""
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds  = Credentials.from_service_account_info(
-        dict(st.secrets["gcp_service_account"]), scopes=scopes
-    )
-    return gspread.authorize(creds)
-
-def _ws(tab: str):
-    return _get_client().open_by_key(SPREADSHEET_ID).worksheet(tab)
-
-# El estado de cada pestaña se guarda como UN único JSON. Como una celda de
-# Google Sheets admite máx. 50.000 caracteres y la lista de reservas ya rozaba
-# ese techo (65 reservas ≈ 49.900 chars), el blob se reparte en varios trozos
-# por la columna A (A1, A2, A3…) y se reensambla al leer. Así el límite de una
-# celda deja de ser un techo para el número de reservas.
-_CHUNK_SIZE = 45000     # margen de seguridad bajo el límite duro de 50.000
-_MAX_ROWS   = 60        # filas a leer/limpiar (≈2,7 M caracteres ≈ miles de reservas)
-
-def _raw_read(tab: str) -> str | None:
-    """Lee el blob completo repartido por la columna A y lo reensambla
-    concatenando celdas consecutivas hasta el primer hueco. Con reintentos."""
-    for intento in range(4):
-        try:
-            filas = _ws(tab).get(f"A1:A{_MAX_ROWS}")
-            partes = []
-            for fila in filas:
-                val = fila[0] if fila else ""
-                if not val:
-                    break            # primer hueco = fin del blob
-                partes.append(val)
-            return "".join(partes) if partes else None
-        except Exception:
-            if intento < 3:
-                time.sleep(1.5)
-    return None
-
-@st.cache_data(ttl=6, show_spinner=False)
-def _cached_read(tab: str) -> str | None:
-    """Caché de lectura de 6 segundos: evita golpes simultáneos a la API."""
-    return _raw_read(tab)
-
-def _parse_list(val: str | None):
-    """Parsea el blob a lista. Devuelve None si el JSON está corrupto (señal
-    para que el llamante reintente por otra vía en lugar de perder datos)."""
-    if not val:
-        return []
-    try:
-        parsed = json.loads(val)
-    except Exception:
-        return None
-    if isinstance(parsed, list):
-        return parsed
-    if isinstance(parsed, dict):      # formato antiguo: un dict = una reserva
-        return [parsed]
-    return []
-
-def _parse_dict(val: str | None):
-    if not val:
-        return {}
-    try:
-        parsed = json.loads(val)
-    except Exception:
-        return None
-    return parsed if isinstance(parsed, dict) else {}
-
-def _read_list(tab: str) -> list:
-    parsed = _parse_list(_cached_read(tab))
-    if parsed is None:
-        # El blob reensamblado no parsea (p.ej. un resto antiguo en A2 de un
-        # estado previo). Degradar con gracia leyendo solo A1.
-        try:
-            parsed = _parse_list(_ws(tab).acell("A1").value)
-        except Exception:
-            parsed = None
-    return parsed or []
-
-def _read_dict(tab: str) -> dict:
-    parsed = _parse_dict(_cached_read(tab))
-    if parsed is None:
-        try:
-            parsed = _parse_dict(_ws(tab).acell("A1").value)
-        except Exception:
-            parsed = None
-    return parsed or {}
-
-def _write(tab: str, data) -> bool:
-    """Guarda `data` como JSON repartido en trozos por la columna A, en UNA
-    sola escritura que además vacía filas sobrantes de escrituras anteriores
-    (evita dejar restos que corrompan la relectura). `raw=True` guarda los
-    trozos tal cual, sin que Sheets interprete uno que empiece por '=', '+' o
-    un número como fórmula. Devuelve True si la escritura tuvo éxito."""
-    blob   = json.dumps(data, ensure_ascii=False)
-    chunks = [blob[i:i + _CHUNK_SIZE] for i in range(0, len(blob), _CHUNK_SIZE)] or [""]
-    total  = max(len(chunks), _MAX_ROWS)
-    filas  = [[chunks[i]] if i < len(chunks) else [""] for i in range(total)]
-    for intento in range(4):
-        try:
-            _ws(tab).update(filas, f"A1:A{total}", raw=True)
-            _cached_read.clear()   # invalida caché inmediatamente tras escritura
-            return True
-        except Exception:
-            if intento < 3:
-                time.sleep(1.5)
-    return False
-
-def _fresh_list(tab: str) -> list:
-    """Relectura SIN caché, para mutar justo antes de guardar y minimizar la
-    ventana de carrera frente a copias cargadas antes en el script."""
-    return _parse_list(_raw_read(tab)) or []
-
-def _fresh_dict(tab: str) -> dict:
-    return _parse_dict(_raw_read(tab)) or {}
-
-# ── Persistencia de reservas ──────────────────────────────────────────────────
+# ── Persistencia OTC (módulo común otc_storage) ──────────────────────────────
+# La lógica de lectura/escritura del Google Sheet vive en otc_storage.py y la
+# comparten esta página y 03_Analisis_P2P.py. Mantener una única implementación
+# evita que se desincronicen (p.ej. leer solo A1 de un dato que ya ocupa A1+A2).
+import otc_storage as _store
 
 def load_reservas() -> list:
-    return _read_list(TAB_RESERVAS)
+    return _store.read_list(TAB_RESERVAS)
 
 def save_reservas(reservas: list):
-    _write(TAB_RESERVAS, reservas)
-
-# ── Persistencia de precios OTC ───────────────────────────────────────────────
+    _store.write(TAB_RESERVAS, reservas)
 
 def load_precios_otc() -> dict:
-    return _read_dict(TAB_PRECIOS)
+    return _store.read_dict(TAB_PRECIOS)
 
 def save_precios_otc(precios: dict):
-    _write(TAB_PRECIOS, precios)
-
-# ── Persistencia de ofertas de terceros ──────────────────────────────────────
+    _store.write(TAB_PRECIOS, precios)
 
 def load_ofertas() -> list:
-    return _read_list(TAB_OFERTAS)
+    return _store.read_list(TAB_OFERTAS)
 
 def save_ofertas(ofertas: list):
-    _write(TAB_OFERTAS, ofertas)
+    _store.write(TAB_OFERTAS, ofertas)
+
+def _fresh_list(tab: str) -> list:
+    """Relectura SIN caché, para mutar justo antes de guardar."""
+    return _store.read_list(tab, fresh=True)
+
+def _fresh_dict(tab: str) -> dict:
+    return _store.read_dict(tab, fresh=True)
 
 # ── Tipo de cambio EUR/USD ────────────────────────────────────────────────────
 

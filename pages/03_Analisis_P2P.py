@@ -63,37 +63,19 @@ TIPO_RENTA_LABELS = {
     "mixto":      "Mixta (recurrente + final)",
 }
 
-# ── Google Sheets ─────────────────────────────────────────────────────────────
-
-def _get_gsheet_client():
-    """Usa st.secrets igual que 02_OTC.py (correcto en Streamlit Cloud)."""
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds  = Credentials.from_service_account_info(
-        dict(st.secrets["gcp_service_account"]), scopes=scopes
-    )
-    return gspread.authorize(creds)
-
-def _read_gsheet_tab_fresh(tab: str) -> list:
-    """Sin caché — para datos que cambian frecuentemente (reservas, ofertas)."""
-    for intento in range(4):
-        try:
-            gc  = _get_gsheet_client()
-            ws  = gc.open_by_key(SPREADSHEET_ID).worksheet(tab)
-            val = ws.acell("A1").value
-            if not val:
-                return []
-            parsed = json.loads(val)
-            return parsed if isinstance(parsed, list) else []
-        except Exception:
-            if intento < 3:
-                time.sleep(1.5)
-    return []
+# ── Google Sheets (módulo común otc_storage) ──────────────────────────────────
+# Misma capa de persistencia que 02_OTC.py: lee el JSON troceado por la columna
+# A y lo reensambla. ANTES esta página leía solo la celda A1, y al superar las
+# reservas los 45.000 caracteres (2 celdas) obtenía un JSON truncado → lista
+# vacía → no restaba reservas → mostraba saldos BRUTOS. Al centralizar la
+# lectura, ese fallo no puede volver a desincronizarse entre páginas.
+import otc_storage as _store
 
 def load_reservas_otc() -> list:
-    return _read_gsheet_tab_fresh(TAB_RESERVAS)
+    return _store.read_list(TAB_RESERVAS, fresh=True)
 
 def load_ofertas_otc() -> list:
-    return _read_gsheet_tab_fresh(TAB_OFERTAS)
+    return _store.read_list(TAB_OFERTAS, fresh=True)
 
 # ── Saldos wallet OTC desde Etherscan ─────────────────────────────────────────
 
@@ -230,20 +212,9 @@ def construir_disponibilidad(master_df: pd.DataFrame) -> list:
     return disponibles
 
 
-@st.cache_data(show_spinner=False, ttl=CACHE_TTL)
 def _load_precios_otc_cached() -> dict:
-    try:
-        gc  = _get_gsheet_client()
-        if not gc:
-            return {}
-        ws  = gc.open_by_key(SPREADSHEET_ID).worksheet("precios_otc")
-        val = ws.acell("A1").value
-        if not val:
-            return {}
-        parsed = json.loads(val)
-        return parsed if isinstance(parsed, dict) else {}
-    except Exception:
-        return {}
+    # Delegado al módulo común (caché de 6 s incluida). Antes leía solo A1.
+    return _store.read_dict(_store.TAB_PRECIOS)
 
 
 # ── Cálculo del ranking ───────────────────────────────────────────────────────
