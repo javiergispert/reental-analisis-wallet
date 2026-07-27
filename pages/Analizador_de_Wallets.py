@@ -1103,6 +1103,7 @@ def process_rnt_ecosystem(transfers: list, wallet: str, nft_transfers: list = No
         xrnt_received_tids = []      # tokenIDs recibidos (para lookup de RNT)
         xrnt_sent          = False   # xRNT NFT enviado a otra wallet
         xrnt_dest          = None
+        xrnt_burned        = 0       # xRNT NFT quemado al deshacer el staking
 
         # Detectar xRNT NFT transfers desde tokennfttx
         for nft in nft_by_hash.get(tx_hash, []):
@@ -1110,6 +1111,10 @@ def process_rnt_ecosystem(transfers: list, wallet: str, nft_transfers: list = No
             nft_to   = nft.get("to", "").lower()
             if nft_from == ZERO_ADDRESS and nft_to == wallet:
                 xrnt_minted = True
+            elif nft_from == wallet and nft_to == ZERO_ADDRESS:
+                # Quema del NFT = se deshace la posición de staking. Sin esta rama
+                # el contador de posiciones vivas nunca bajaba (quedaba inflado).
+                xrnt_burned += 1
             elif nft_from != ZERO_ADDRESS and nft_to == wallet:
                 xrnt_received = True
                 xrnt_sender   = nft_from
@@ -1146,6 +1151,8 @@ def process_rnt_ecosystem(transfers: list, wallet: str, nft_transfers: list = No
                 # ERC-721 NFT de staking (xRNT): value=0, identificado por el tokenId en la API
                 if to_addr == wallet and from_addr == ZERO_ADDRESS:
                     xrnt_minted = True
+                elif from_addr == wallet and to_addr == ZERO_ADDRESS:
+                    xrnt_burned += 1        # se deshace la posición de staking
                 elif to_addr == wallet and from_addr != ZERO_ADDRESS:
                     xrnt_received = True
                     xrnt_sender   = from_addr
@@ -1231,6 +1238,52 @@ def process_rnt_ecosystem(transfers: list, wallet: str, nft_transfers: list = No
                 "detalle": (f"Retirado: {slp_out:,.6f} SLP"
                             f" → Recibido: {rnt_in:,.4f} RNT + {usdt_in:,.2f} {usdt_sym}"),
                 "rnt_delta": rnt_in, "slp_delta": -slp_out, "frmrnt_delta": 0.0, "usdt_delta": usdt_in,
+            }
+        elif rnt_in > 0 and (xrnt_burned > 0 or rnt_from == STAKING_RECEIVER):
+            # Deshacer staking: el contrato devuelve el RNT y quema el NFT xRNT.
+            # Se descuenta del contador de posiciones vivas y del RNT stakeado.
+            nota_q = f" · {xrnt_burned} posición(es) xRNT cerrada(s)" if xrnt_burned else ""
+            ev = {
+                "tipo": "Retirada de staking (unstaking)",
+                "detalle": f"Recuperado: {rnt_in:,.4f} RNT del staking{nota_q}",
+                "rnt_delta": rnt_in, "slp_delta": 0.0, "frmrnt_delta": 0.0, "usdt_delta": 0.0,
+                # Solo se descuenta posición si consta la quema del NFT; si el RNT
+                # viene del contrato sin quema, se ajusta el stakeado pero no el contador.
+                "xrnt_staked_delta": -rnt_in, "xrnt_count_delta": -xrnt_burned,
+            }
+        elif rnt_out > 0 and rnt_to == POOL_ROUTER:
+            # Venta contra el pool RNT/USDT de Reental. El importe recibido ya va
+            # neto de la comisión que el pool retiene, así que el precio efectivo
+            # refleja lo que realmente obtuvo el inversor.
+            if usdt_in > 0:
+                precio = usdt_in / rnt_out if rnt_out else 0
+                detalle = (f"Vendido: {rnt_out:,.4f} RNT → Recibido: {usdt_in:,.2f} {usdt_sym}"
+                           f" ({precio:,.5f} {usdt_sym}/RNT)")
+            else:
+                # La contrapartida no llegó en stablecoin (p.ej. swap enrutado a
+                # MATIC u otro activo): no se inventa importe, se marca como
+                # indeterminado para que el informe fiscal lo trate como pendiente.
+                detalle = (f"Vendido: {rnt_out:,.4f} RNT al pool "
+                           f"· contrapartida no recibida en USDT/USDC (swap a otro activo)")
+            ev = {
+                "tipo": "Venta de RNT al pool de Reental",
+                "detalle": detalle,
+                "rnt_delta": -rnt_out, "slp_delta": 0.0, "frmrnt_delta": 0.0, "usdt_delta": usdt_in,
+            }
+        elif rnt_in > 0 and rnt_from == POOL_ROUTER:
+            # Compra contra el pool: la cara opuesta de la venta. Registrar el USDT
+            # pagado es lo que permite conocer el coste de adquisición del RNT.
+            if usdt_out > 0:
+                precio = usdt_out / rnt_in if rnt_in else 0
+                detalle = (f"Comprado: {rnt_in:,.4f} RNT → Pagado: {usdt_out:,.2f} {usdt_sym}"
+                           f" ({precio:,.5f} {usdt_sym}/RNT)")
+            else:
+                detalle = (f"Comprado: {rnt_in:,.4f} RNT del pool "
+                           f"· contrapartida no pagada en USDT/USDC (swap desde otro activo)")
+            ev = {
+                "tipo": "Compra de RNT al pool de Reental",
+                "detalle": detalle,
+                "rnt_delta": rnt_in, "slp_delta": 0.0, "frmrnt_delta": 0.0, "usdt_delta": -usdt_out,
             }
         elif rnt_in > 0:
             ev = {
@@ -2498,6 +2551,9 @@ if rnt_events_filtered:
         "Claim rewards de farming":            "#d4edda",
         "Añadir liquidez al pool RNT/USDT":   "#e8f4fd",
         "Retirar liquidez del pool RNT/USDT":  "#fff3cd",
+        "Retirada de staking (unstaking)":      "#fff3cd",
+        "Venta de RNT al pool de Reental":      "#ffd6d6",
+        "Compra de RNT al pool de Reental":     "#e8f4fd",
         "Recepción de RNT":                    "#d4edda",
         "Envío de RNT":                        "#ffd6d6",
     }
@@ -2941,6 +2997,15 @@ FISCAL_GLOSARIO = [
     {"Operación": "Claim rewards de staking / farming (RNT)",
      "Naturaleza fiscal": "Rendimiento (recompensa)",
      "Tratamiento / nota": "Renta al valor de mercado del RNT en la fecha de cobro; ese valor es el coste de adquisición del RNT para futuras plusvalías."},
+    {"Operación": "Venta de RNT al pool de Reental",
+     "Naturaleza fiscal": "Disposición (ganancia/pérdida patrimonial)",
+     "Tratamiento / nota": "Venta contra el pool RNT/USDT. El valor de transmisión es el USDT recibido en la misma TX (neto de la comisión del pool), por lo que es un importe exacto, no estimado."},
+    {"Operación": "Compra de RNT al pool de Reental",
+     "Naturaleza fiscal": "Adquisición (no sujeta)",
+     "Tratamiento / nota": "Compra contra el pool RNT/USDT. El USDT pagado en la misma TX es el coste de adquisición exacto del RNT recibido."},
+    {"Operación": "Retirada de staking (unstaking)",
+     "Naturaleza fiscal": "No sujeta (no es disposición)",
+     "Tratamiento / nota": "Recuperar el RNT depositado y quemar el NFT xRNT no cambia la titularidad económica: no es venta. Las recompensas cobradas sí son renta y se registran aparte."},
     {"Operación": "Recepción / Envío de RNT (no clasificado como recompensa)",
      "Naturaleza fiscal": "Origen a determinar",
      "Tratamiento / nota": "No se computa como renta automáticamente (puede ser compra, traspaso o airdrop). Revisar manualmente."},
@@ -3166,13 +3231,29 @@ def build_fiscal_csv() -> bytes:
         slp_d = ev.get("slp_delta", 0.0)
         frm_d = ev.get("frmrnt_delta", 0.0)
 
+        usdt_d = ev.get("usdt_delta", 0.0)
+
         if rnt_d != 0:
             activo   = "RNT"
             cantidad = round(rnt_d, 6)
-            p_unit   = precio_rnt
-            fuente   = "CoinGecko histórico" if precio_rnt else "N/D"
-            valor    = round(abs(cantidad) * precio_rnt, 2) if precio_rnt else ""
-            nota_rnt = "" if precio_rnt else "Precio RNT no disponible en CoinGecko para esta fecha."
+            # En las operaciones contra el pool, la contrapartida en stablecoin va
+            # en la MISMA transacción: ese importe es el valor real de la operación
+            # y es mejor dato que el cierre diario de CoinGecko.
+            if ev["tipo"] in ("Venta de RNT al pool de Reental",
+                              "Compra de RNT al pool de Reental") and usdt_d != 0:
+                valor    = round(abs(usdt_d), 2)
+                p_unit   = round(abs(usdt_d) / abs(rnt_d), 8) if rnt_d else ""
+                fuente   = "TX exacta"
+                nota_rnt = ("Precio efectivo de la operación contra el pool "
+                            "(neto de la comisión que retiene el pool).")
+            else:
+                p_unit   = precio_rnt
+                fuente   = "CoinGecko histórico" if precio_rnt else "N/D"
+                valor    = round(abs(cantidad) * precio_rnt, 2) if precio_rnt else ""
+                nota_rnt = "" if precio_rnt else "Precio RNT no disponible en CoinGecko para esta fecha."
+                if ev["tipo"] == "Venta de RNT al pool de Reental":
+                    nota_rnt = (nota_rnt + " Venta al pool sin contrapartida en USDT/USDC "
+                                "(swap a otro activo): importe pendiente de determinar.").strip()
         elif slp_d != 0:
             activo   = "SLP (RNT/USDT)"
             cantidad = round(slp_d, 8)
