@@ -5,6 +5,7 @@ import os
 import io
 import time
 import unicodedata
+from collections import defaultdict
 from datetime import datetime, date
 
 import requests
@@ -302,11 +303,23 @@ def fetch_all_account_txs(wallet: str, api_key: str, action: str = "tokentx",
         return []
     wallet = wallet.lower()
     all_txs = []
-    seen = set()
+    # Cuántas veces se ha aceptado ya cada transferencia. No basta con un set de
+    # claves únicas: `tokentx` NO devuelve logIndex, así que dos eventos Transfer
+    # distintos de la misma TX con idéntico emisor, receptor e importe (una compra
+    # troceada en lotes iguales, un reparto por lotes) producen exactamente la
+    # misma clave y el segundo se descartaba en silencio, infravalorando el saldo.
+    # Se cuenta cuántas veces aparece cada clave POR RONDA y se conserva el
+    # máximo, no la suma: dentro de una ronda las repeticiones legítimas se
+    # aceptan, y el solape entre rondas no las duplica porque no supera la cuenta
+    # ya registrada.
+    aceptadas = defaultdict(int)
     startblock = 0
 
     for _ in range(max_rounds):
         hit_window = True
+        vistas_ronda  = defaultdict(int)
+        ultimo_bloque = None
+        nuevas_ronda  = 0
         for page in range(1, 11):
             params = {
                 "chainid": POLYGON_CHAIN_ID, "module": "account", "action": action,
@@ -334,22 +347,31 @@ def fetch_all_account_txs(wallet: str, api_key: str, action: str = "tokentx",
                 # en vez de fingir que el histórico termina aquí.
                 return all_txs
             for tx in result:
+                # logIndex se mantiene en la clave por si el endpoint lo trae
+                # (entonces desambigua por sí solo); cuando falta, el recuento
+                # por ronda es lo que evita perder repeticiones legítimas.
                 key = (tx.get("hash"), tx.get("contractAddress"), tx.get("from"),
                        tx.get("to"), tx.get("value"), tx.get("tokenID", ""), tx.get("logIndex", ""))
-                if key in seen:
-                    continue
-                seen.add(key)
-                all_txs.append(tx)
+                vistas_ronda[key] += 1
+                if vistas_ronda[key] > aceptadas[key]:
+                    all_txs.append(tx)
+                    nuevas_ronda += 1
+                ultimo_bloque = int(tx["blockNumber"])
             if len(result) < 1000:
                 hit_window = False
                 break
+        for k, n in vistas_ronda.items():
+            if n > aceptadas[k]:
+                aceptadas[k] = n
         if not hit_window:
             break
-        if not all_txs:
+        if ultimo_bloque is None:
             break
         # Ventana agotada: nueva ronda desde el último bloque visto (incluido,
-        # para no perder txs del mismo bloque; el dedupe evita duplicados).
-        startblock = int(all_txs[-1]["blockNumber"])
+        # para no perder txs del mismo bloque; el recuento evita duplicarlas).
+        if ultimo_bloque == startblock and nuevas_ronda == 0:
+            break   # la ronda no avanzó ni aportó nada: no hay más que traer
+        startblock = ultimo_bloque
 
     return all_txs
 
