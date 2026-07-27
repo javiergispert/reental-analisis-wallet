@@ -47,23 +47,25 @@ ETHERSCAN_BASE   = "https://api.etherscan.io/v2/api"
 API_KEY          = os.getenv("ETHERSCAN_API_KEY", "")
 POLYGON_CHAIN_ID = 137
 
-RNT_LEND_POOL = "0x67dc8037db6309dd5571d82c65f5f593f7da1505"
+# Primitivas on-chain y constantes del pool: módulo común compartido con
+# Analizador_de_Wallets.py (ver aave_lend.py). Una única implementación evita
+# que las páginas se desincronicen y hace que compartan la misma caché.
+import aave_lend as _al
 
-STABLES = {
-    "0xc2132d05d31c914a87c6611c10748aeb04b58e8f": "USDT",
-    "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359": "USDC",
-}
+RNT_LEND_POOL = _al.RNT_LEND_POOL
+
+STABLES = _al.STABLES
 
 # Selectores de función (4 primeros bytes de keccak256 de la firma)
-SEL_GET_RESERVES_LIST = "0xd1946dbc"   # getReservesList()
-SEL_GET_RESERVE_DATA  = "0x35ea6a75"   # getReserveData(address)
-SEL_TOTAL_SUPPLY      = "0x18160ddd"   # totalSupply()
+SEL_GET_RESERVES_LIST = _al.SEL_GET_RESERVES_LIST   # getReservesList()
+SEL_GET_RESERVE_DATA  = _al.SEL_GET_RESERVE_DATA    # getReserveData(address)
+SEL_TOTAL_SUPPLY      = _al.SEL_TOTAL_SUPPLY        # totalSupply()
 
-TRANSFER_TOPIC              = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
-RESERVE_DATA_UPDATED_TOPIC  = "0x804c9b842b2748a22bb64b345453a3de7ca54a6ca45ce00d415894979e22897a"
-ZERO_ADDR      = "0x0000000000000000000000000000000000000000"
+TRANSFER_TOPIC              = _al.TRANSFER_TOPIC
+RESERVE_DATA_UPDATED_TOPIC  = _al.RESERVE_DATA_UPDATED_TOPIC
+ZERO_ADDR      = _al.ZERO_ADDR
 
-RAY = 10 ** 27
+RAY = _al.RAY
 
 # Tramos de concentración por valor en USD (ballenas/tiburones/delfines/peces)
 TIERS = [
@@ -95,38 +97,12 @@ st.caption(
 
 # ── Llamadas on-chain vía Etherscan (eth_call) ───────────────────────────────
 
-# La key de Etherscan usada admite ~3 llamadas/seg; se limita el ritmo globalmente
-# (entre hilos) en vez de confiar solo en el nº de workers, que puede generar ráfagas.
-_RATE_LOCK = threading.Lock()
-_RATE_MIN_INTERVAL = 0.4  # ~2.5 llamadas/seg, margen de seguridad
-_last_call_ts = [0.0]
-
-
-def _throttle():
-    with _RATE_LOCK:
-        wait = _last_call_ts[0] + _RATE_MIN_INTERVAL - time.monotonic()
-        if wait > 0:
-            time.sleep(wait)
-        _last_call_ts[0] = time.monotonic()
+# El throttle global (compartido entre hilos y entre páginas) vive en aave_lend.
+_throttle = _al._throttle
 
 
 def _eth_call(to: str, data: str, retries: int = 6) -> str:
-    for attempt in range(retries):
-        _throttle()
-        try:
-            r = requests.get(ETHERSCAN_BASE, params={
-                "chainid": POLYGON_CHAIN_ID, "module": "proxy", "action": "eth_call",
-                "to": to, "data": data, "tag": "latest", "apikey": API_KEY,
-            }, timeout=20)
-            payload = r.json()
-            result = payload.get("result")
-            if isinstance(result, str) and result.startswith("0x"):
-                return result
-            # "Max calls per sec rate limit reached" u otros errores de la key → reintentar
-            time.sleep(0.5 * (attempt + 1))
-        except Exception:
-            time.sleep(0.5 * (attempt + 1))
-    return ""
+    return _al.eth_call(to, data, API_KEY, retries=retries)
 
 
 @st.cache_data(show_spinner=False, ttl=86400)
@@ -175,82 +151,16 @@ def fetch_total_supply(token_address: str, decimals: int = 18) -> float:
 # Etherscan limita getLogs a 10.000 resultados por consulta (page × offset).
 # Para tokens con más eventos, se parte el rango de bloques recursivamente.
 
-def _get_logs_page(address: str, topic0: str, from_block: int, to_block, page: int,
-                    topic1: str = None, retries: int = 6) -> list:
-    params = {
-        "chainid": POLYGON_CHAIN_ID, "module": "logs", "action": "getLogs",
-        "address": address, "topic0": topic0,
-        "fromBlock": from_block, "toBlock": to_block,
-        "page": page, "offset": 1000, "apikey": API_KEY,
-    }
-    if topic1:
-        params["topic1"] = topic1
-        params["topic0_1_opr"] = "and"
-    for attempt in range(retries):
-        _throttle()
-        try:
-            r = requests.get(ETHERSCAN_BASE, params=params, timeout=25)
-            payload = r.json()
-            if "too large" in str(payload.get("message", "")).lower():
-                return None  # señal: hay que partir el rango de bloques
-            result = payload.get("result")
-            if isinstance(result, list):
-                return result
-            if result == "No records found" or payload.get("message") == "No records found":
-                return []
-            time.sleep(0.5 * (attempt + 1))
-        except Exception:
-            time.sleep(0.5 * (attempt + 1))
-    return []
-
-
 def _fetch_logs_range(address: str, topic0: str, from_block: int, to_block: int,
                        topic1: str = None, depth: int = 0) -> list:
     """Descarga todos los logs de `address`/`topic0` en [from_block, to_block],
     partiendo el rango recursivamente si excede el límite de 10.000 resultados."""
-    all_logs = []
-    hit_cap = False
-    page = 1
-    while page <= 10:
-        chunk = _get_logs_page(address, topic0, from_block, to_block, page, topic1=topic1)
-        if chunk is None:
-            hit_cap = True  # Etherscan rechazó explícitamente: rango demasiado grande
-            break
-        all_logs.extend(chunk)
-        if len(chunk) < 1000:
-            return all_logs  # última página parcial: no hay más datos
-        page += 1
-    else:
-        # Se agotaron las 10 páginas y la última seguía llena (10.000 exactos):
-        # no podemos distinguir "justo 10.000" de "hay más", así que partimos por seguridad.
-        hit_cap = True
-
-    if hit_cap:
-        if depth > 40 or to_block <= from_block:
-            return all_logs
-        mid = (from_block + to_block) // 2
-        left = _fetch_logs_range(address, topic0, from_block, mid, topic1=topic1, depth=depth + 1)
-        right = _fetch_logs_range(address, topic0, mid + 1, to_block, topic1=topic1, depth=depth + 1)
-        return left + right
-    return all_logs
+    return _al.fetch_logs_range(address, topic0, from_block, to_block, API_KEY,
+                                topic1=topic1, depth=depth)
 
 
-@st.cache_data(show_spinner=False, ttl=300)
 def fetch_latest_block() -> int:
-    for attempt in range(4):
-        _throttle()
-        try:
-            r = requests.get(ETHERSCAN_BASE, params={
-                "chainid": POLYGON_CHAIN_ID, "module": "proxy", "action": "eth_blockNumber",
-                "apikey": API_KEY,
-            }, timeout=15)
-            result = r.json().get("result")
-            if isinstance(result, str) and result.startswith("0x"):
-                return int(result, 16)
-        except Exception:
-            pass
-        time.sleep(0.5 * (attempt + 1))
-    return 0
+    return _al.fetch_latest_block(API_KEY)
 
 
 @st.cache_data(show_spinner=False, ttl=21600)
@@ -277,41 +187,10 @@ def fetch_all_transfers(token_address: str) -> list:
     return parsed
 
 
-@st.cache_data(show_spinner=False, ttl=21600)
 def fetch_rate_history(reserve_address: str) -> pd.DataFrame:
-    """Media histórica acumulada (desde el despliegue hasta cada día) de los tipos
-    supply/borrow de una reserva, a partir de los eventos ReserveDataUpdated que
-    emite el Pool en cada operación sobre ese activo.
-
-    Se usa la media acumulada en vez del tipo puntual porque, al ser un tipo de
-    interés variable, refleja mejor lo que experimenta un inversor a largo plazo:
-    el tipo instantáneo es muy ruidoso (cambia en cada depósito/préstamo/repago).
-    """
-    latest_block = fetch_latest_block()
-    if not latest_block:
-        return pd.DataFrame()
-    topic1 = "0x" + "0" * 24 + reserve_address[2:].lower()
-    raw_logs = _fetch_logs_range(RNT_LEND_POOL, RESERVE_DATA_UPDATED_TOPIC, 0, latest_block, topic1=topic1)
-    rows = []
-    for log in raw_logs:
-        try:
-            hexd = log["data"][2:]
-            words = [hexd[i:i + 64] for i in range(0, len(hexd), 64)]
-            liquidity_rate = int(words[0], 16) / RAY
-            borrow_rate = int(words[2], 16) / RAY
-            ts = datetime.fromtimestamp(int(log["timeStamp"], 16), tz=timezone.utc).replace(tzinfo=None)
-            rows.append({"fecha": ts, "supply_apr": liquidity_rate, "borrow_apr": borrow_rate})
-        except Exception:
-            continue
-    if not rows:
-        return pd.DataFrame()
-    df = pd.DataFrame(rows).sort_values("fecha")
-    # Media dentro de cada día (para no sobreponderar días con mucha actividad)…
-    daily_mean = df.set_index("fecha")[["supply_apr", "borrow_apr"]].resample("1D").mean()
-    daily_mean = daily_mean.ffill()
-    # …y luego media acumulada desde el primer día hasta cada uno de ellos.
-    daily_avg_acumulada = daily_mean.expanding().mean().reset_index()
-    return daily_avg_acumulada
+    """Media histórica acumulada de los tipos supply/borrow de una reserva.
+    Implementación (y caché de 6 h) en aave_lend, compartida con el analizador."""
+    return _al.fetch_rate_history(reserve_address, API_KEY)
 
 
 def build_daily_supply_series(transfers: list, decimals: int) -> pd.DataFrame:

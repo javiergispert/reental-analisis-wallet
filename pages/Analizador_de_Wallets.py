@@ -16,6 +16,7 @@ import plotly.graph_objects as go
 from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import aave_lend
 from utils import fetch_all_account_txs, fetch_all_token_txs
 
 load_dotenv()
@@ -2245,7 +2246,217 @@ if aave_borrower_filtered:
                          sublabel="USDT / USDC pagado de más"), unsafe_allow_html=True)
     b4.markdown(kpi_card("⚠️", "Deuda pendiente",  f"{deuda_viva:,.2f}",
                          value_color="#dc2626" if deuda_viva > 0.01 else "#16a34a",
-                         sublabel="USDT / USDC", badge=d_badge), unsafe_allow_html=True)
+                         sublabel="USDT / USDC (principal)", badge=d_badge), unsafe_allow_html=True)
+
+    # ── Posición de riesgo en vivo (Health Factor) ────────────────────────────
+    # Los KPIs de arriba se reconstruyen del histórico de eventos: son PRINCIPAL.
+    # Lo de aquí abajo se lee del contrato en vivo e incluye intereses devengados.
+    st.markdown("##### 🩺 Posición de riesgo en vivo")
+
+    # El Health Factor NO es agregable entre wallets (no se suma ni se promedia),
+    # así que se consulta el de UNA sola wallet: la del filtro si lo hay, y si no
+    # la única con actividad — o la que elija el usuario. Así el coste es de una
+    # única llamada on-chain independientemente de cuántas wallets se analicen.
+    _wb, _seen_wb = [], set()
+    for _m in aave_borrower_filtered:
+        _a = _m.get("wallet_addr")
+        if _a and _a not in _seen_wb:
+            _seen_wb.add(_a)
+            _wb.append((_a, _m.get("wallet_alias") or _a[:10]))
+
+    _target_wallet, _target_alias = (None, None)
+    if len(_wb) == 1:
+        _target_wallet, _target_alias = _wb[0]
+    elif len(_wb) > 1:
+        _sel = st.selectbox(
+            "Wallet a consultar", [al for _, al in _wb], key="hf_wallet_sel",
+            help="El Health Factor es propio de cada posición y no puede agregarse "
+                 "entre wallets, por eso se consulta de una en una.",
+        )
+        _target_wallet, _target_alias = next((a, al) for a, al in _wb if al == _sel)
+
+    # Los eventos de ESA wallet: el HF corresponde a una única posición, así que
+    # el principal y el desglose deben salir de la misma wallet, no del agregado.
+    _mov_target = [m for m in aave_borrower_filtered if m.get("wallet_addr") == _target_wallet]
+    _principal_target = max(0.0, (
+        sum(m["stable_amount"] for m in _mov_target if m["tipo"] == "Préstamo recibido")
+        - sum(m["stable_amount"] for m in _mov_target if m["tipo"] == "Pago de deuda")
+    ))
+
+    if _target_wallet:
+        _pos = aave_lend.get_user_account_data(_target_wallet, API_KEY)
+    else:
+        _pos = {}
+
+    if not _pos:
+        st.caption("No se pudo consultar la posición en el pool en este momento.")
+    elif not _pos.get("tiene_deuda"):
+        st.success(
+            f"✅ **{_target_alias}** no tiene deuda viva en el pool: no hay riesgo de liquidación."
+            + (f" Colateral depositado: ${_pos['colateral_usd']:,.2f}." if _pos["colateral_usd"] > 0 else "")
+        )
+    elif _pos.get("health_factor") is None:
+        st.caption("El contrato no devolvió un Health Factor válido para esta posición.")
+    else:
+        _hf      = _pos["health_factor"]
+        _col     = _pos["colateral_usd"]
+        _deu     = _pos["deuda_usd"]
+        _lt      = _pos["umbral_liquidacion"]
+        _ltv     = _pos["ltv"]
+        _emo, _lbl, _color = aave_lend.nivel_riesgo(_hf)
+        _margen  = aave_lend.margen_caida_colateral(_hf)
+        _interes = max(0.0, _deu - _principal_target)   # deuda real − principal por eventos
+
+        h1, h2, h3, h4 = st.columns(4)
+        h1.markdown(kpi_card(_emo, "Health Factor", f"{_hf:,.4f}", value_color=_color,
+                             sublabel=f"{_lbl} · liquidación si < 1"), unsafe_allow_html=True)
+        h2.markdown(kpi_card("🏠", "Colateral", f"${_col:,.2f}",
+                             sublabel="valor según oráculo del pool"), unsafe_allow_html=True)
+        h3.markdown(kpi_card("💳", "Deuda real", f"${_deu:,.2f}", value_color="#dc2626",
+                             sublabel=f"incluye ${_interes:,.2f} de intereses devengados"),
+                    unsafe_allow_html=True)
+        h4.markdown(kpi_card("📉", "Margen de caída", f"{_margen * 100:,.2f}%", value_color=_color,
+                             sublabel="puede bajar el colateral antes de liquidar"),
+                    unsafe_allow_html=True)
+
+        # LTV y umbral se leen del contrato (media ponderada de SU cesta), no se
+        # fijan a fuego: si Reental cambia los parámetros, esto sigue siendo cierto.
+        _hf_min = _lt / _ltv if _ltv > 0 else None
+        st.caption(
+            f"📐 Parámetros de riesgo de esta cartera, leídos del contrato: "
+            f"**LTV máximo {_ltv * 100:.0f}%** (tope para pedir prestado) · "
+            f"**umbral de liquidación {_lt * 100:.0f}%** (donde el HF llega a 1). "
+            f"La relación entre ambos fija el HF mínimo alcanzable pidiendo prestado: "
+            f"{_lt * 100:.0f}/{_ltv * 100:.0f} = **{_hf_min:.4f}**."
+        )
+
+        # ── Capacidad de maniobra ─────────────────────────────────────────────
+        _HF_RETIRADA = 1.05
+        _retirable = aave_lend.capacidad_retirada(_col, _deu, _lt, _HF_RETIRADA)
+        _prest     = aave_lend.capacidad_prestamo(_col, _deu, _lt, _ltv, _hf_min)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            if _retirable > 1:
+                st.markdown(
+                    f"**🏠 Puede retirar hasta ${_retirable:,.2f}** en tokens inmobiliarios "
+                    f"y su HF quedaría en {_HF_RETIRADA:.2f}."
+                )
+            else:
+                st.markdown(
+                    f"**🏠 No puede retirar colateral**: su HF ({_hf:.4f}) ya está por debajo "
+                    f"de {_HF_RETIRADA:.2f}. Para liberar garantía tendría que repagar deuda antes."
+                )
+        with c2:
+            if _prest["por_ltv"] > 1:
+                st.markdown(
+                    f"**💵 Puede pedir prestado hasta ${_prest['por_ltv']:,.2f}** más, "
+                    f"dejando el HF en {_prest['hf_resultante']:.4f}."
+                )
+            else:
+                st.markdown("**💵 No puede pedir más prestado**: ya está en el tope de LTV.")
+
+        st.caption(
+            f"ℹ️ Las dos cifras son alternativas, no acumulables. El préstamo lo limita el **LTV "
+            f"({_ltv * 100:.0f}%)**, no el umbral de liquidación: por eso pidiendo prestado el HF "
+            f"nunca puede bajar de {_hf_min:.4f}, mientras que retirando colateral sí se puede "
+            f"llegar a {_HF_RETIRADA:.2f} (la retirada se valida contra el HF, no contra el LTV)."
+        )
+
+        # ── Escenarios y desglose (diferido: solo si el usuario lo abre) ───────
+        with st.expander("📈 Escenarios de liquidación y desglose del colateral"):
+            st.markdown("**¿Cuánto tiempo queda hasta el HF = 1 solo por intereses?**")
+            st.caption(
+                "La deuda del pool capitaliza de forma continua, así que crece como D₀·e^(r·t). "
+                "Con el colateral estable, el HF llega a 1 en t = ln(HF)/APR. "
+                "Asume que no hay repagos ni nuevos depósitos y que el valor del colateral no varía."
+            )
+
+            _stable_sym = next((m["stable_symbol"] for m in _mov_target
+                                if m["tipo"] == "Préstamo recibido" and m.get("stable_symbol")), "USDT")
+            _reserva = next((a for a, s in aave_lend.STABLES.items() if s == _stable_sym), None)
+
+            _escenarios = [("APR máximo del modelo", aave_lend.APR_MAXIMO)]
+            with st.spinner(f"Calculando APR medio histórico de {_stable_sym}…"):
+                _apr_medio = aave_lend.apr_borrow_medio_historico(_reserva, API_KEY) if _reserva else None
+            if _apr_medio:
+                _escenarios.append((f"APR medio histórico {_stable_sym}", _apr_medio))
+
+            _filas_esc = []
+            for _nombre, _apr in _escenarios:
+                _dias = aave_lend.dias_hasta_liquidacion(_hf, _apr)
+                if _dias is None:
+                    continue
+                _fecha_liq = datetime.now() + timedelta(days=_dias)
+                _filas_esc.append({
+                    "Escenario":   _nombre,
+                    "APR":         f"{_apr * 100:.2f}%",
+                    "Días":        f"{_dias:,.0f}",
+                    "Meses":       f"{_dias / 30.44:,.1f}",
+                    "Fecha estimada": _fecha_liq.strftime("%d/%m/%Y"),
+                })
+            if _filas_esc:
+                st.dataframe(pd.DataFrame(_filas_esc), hide_index=True, use_container_width=True)
+                if _apr_medio is None:
+                    st.caption("No se pudo obtener el APR medio histórico; se muestra solo el escenario máximo.")
+            else:
+                st.info("No aplica: el Health Factor ya está en 1 o por debajo.")
+
+            _rep = aave_lend.repago_para_hf(_col, _deu, _lt, 1.5)
+            if _rep > 0:
+                st.markdown(f"↩️ Para volver a un HF de **1,50** (zona saludable) tendría que repagar **${_rep:,.2f}**.")
+
+            # Desglose por proyecto: cantidades del histórico de garantías (coste 0)
+            # y precios reales del oráculo (1 llamada por proyecto). El oráculo ya
+            # convierte a USD los proyectos denominados en EUR.
+            st.markdown("---")
+            st.markdown("**Colateral depositado, por proyecto**")
+            _neto = {}
+            for _m in _mov_target:
+                if _m["tipo"] not in ("Garantía depositada", "Garantía retirada"):
+                    continue
+                _sym = _m.get("detalle", "")
+                _q = float(_m.get("cantidad", 0))
+                _neto[_sym] = _neto.get(_sym, 0.0) + (_q if _m["tipo"] == "Garantía depositada" else -_q)
+            _neto = {k: v for k, v in _neto.items() if v > 0.0001}
+
+            if not _neto:
+                st.caption("No se identificaron depósitos de garantía en el histórico de esta wallet.")
+            else:
+                _kt = load_tokens()
+                _addr_por_sym = {}
+                for _sym in _neto:
+                    _info = match_aave_token(_sym, "", _kt)
+                    if _info:
+                        _addr_por_sym[_sym] = _info["address"]
+                with st.spinner("Consultando precios del oráculo…"):
+                    _precios = aave_lend.get_asset_prices(tuple(sorted(_addr_por_sym.values())), API_KEY)
+
+                _filas_col, _suma = [], 0.0
+                for _sym, _q in sorted(_neto.items(), key=lambda x: -x[1]):
+                    _a = _addr_por_sym.get(_sym)
+                    _p = _precios.get(_a.lower()) if _a else None
+                    _val = _q * _p if _p else None
+                    if _val:
+                        _suma += _val
+                    _filas_col.append({
+                        "Proyecto":  _sym.replace("aMatReental-", ""),
+                        "Tokens":    f"{_q:,.3f}",
+                        "Precio":    f"${_p:,.2f}" if _p else "—",
+                        "Valor":     f"${_val:,.2f}" if _val else "—",
+                        "Retirable": (f"{min(_q, _retirable / _p):,.3f} tok"
+                                      if _p and _retirable > 1 else "—"),
+                    })
+                st.dataframe(pd.DataFrame(_filas_col), hide_index=True, use_container_width=True)
+                _desv = abs(_suma - _col) / _col * 100 if _col else 0
+                st.caption(
+                    f"Suma del desglose ${_suma:,.2f} vs ${_col:,.2f} que reporta el contrato "
+                    f"(desviación {_desv:.2f}%). La diferencia es el interés que han devengado los "
+                    f"aTokens desde el último evento registrado. Precios del oráculo del pool, que ya "
+                    f"convierte a dólares los proyectos denominados en euros. "
+                    f"La columna «Retirable» es el máximo si se sacara todo de ese único proyecto "
+                    f"(son alternativas entre sí, no acumulables)."
+                )
 else:
     st.info("No se detectó actividad como prestatario en Aave" + (" con la wallet seleccionada." if selected_wallet_filter else " en esta wallet."))
 
