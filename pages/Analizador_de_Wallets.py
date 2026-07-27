@@ -2520,6 +2520,31 @@ st.caption(
     "Actividad relacionada con el token RNT: staking, pool de liquidez RNT/USDT (SLP) y farming (frmRNT)."
 )
 
+def _farming_composicion(slp_farm: float, slp_total: float,
+                         rnt_total: float, usdt_total: float):
+    """Traduce una posición de farming (denominada en SLP) a la cesta de RNT+USDT
+    que representa, usando la composición media de las aportaciones al pool.
+
+    Devuelve (rnt, usdt, determinable). `determinable` es False cuando el SLP
+    llegó por una vía que no revela su composición (p.ej. como recompensa de
+    staking): en ese caso no se inventa una cesta."""
+    if slp_farm <= 1e-12 or slp_total <= 0:
+        return 0.0, 0.0, slp_farm <= 1e-12
+    ratio = slp_farm / slp_total
+    return rnt_total * ratio, usdt_total * ratio, True
+
+
+def _farming_equivalente(slp_farm: float, slp_total: float,
+                         rnt_total: float, usdt_total: float) -> str:
+    """Celda de tabla con la posición de farming en RNT+USDT equivalentes."""
+    if slp_farm <= 1e-12:
+        return "—"
+    rnt, usdt, ok = _farming_composicion(slp_farm, slp_total, rnt_total, usdt_total)
+    if not ok:
+        return f"{slp_farm:,.6f} SLP"     # composición desconocida: no se estima
+    return f"{rnt:,.2f} RNT + {usdt:,.2f} USDT"
+
+
 rnt_events = []
 for _addr, _alias in wallets_analyzed:
     _xrnt_nft_transfers = fetch_nft_transfers(_addr, STAKING_RECEIVER)
@@ -2532,13 +2557,15 @@ rnt_events.sort(key=lambda e: e["fecha"])
 rnt_events_filtered = filtrar_por_wallet(rnt_events)
 if rnt_events_filtered:
     # Calcular balances acumulados
-    bal_rnt = bal_slp = bal_frmrnt = 0.0
+    bal_rnt = 0.0
+    bal_slp_farm = 0.0       # SLP realmente depositado en el contrato de farming
     bal_xrnt_staked = 0.0    # RNT total en posición de staking (xRNT NFT)
     bal_xrnt_count  = 0      # número de NFTs xRNT actualmente en wallet
     last_farming_deposit_date = None
-    # Acumulados para estimar valor de farming
-    total_rnt_farming = 0.0   # RNT aportado al pool
-    total_usdt_farming = 0.0  # USDT aportado al pool
+    # Composición media del LP: cuánto RNT y USDT costó cada SLP aportado al pool.
+    # Permite traducir la posición de farming —opaca, denominada en SLP/frmRNT— a
+    # los dos activos que el usuario sí reconoce.
+    pool_slp_total = pool_rnt_total = pool_usdt_total = 0.0
     rnt_rows = []
 
     OPERATION_COLORS = {
@@ -2560,14 +2587,18 @@ if rnt_events_filtered:
 
     for ev in rnt_events_filtered:
         bal_rnt    += ev["rnt_delta"]
-        bal_slp    += ev["slp_delta"]
-        bal_frmrnt += ev["frmrnt_delta"]
         if ev["frmrnt_delta"] > 0:
             last_farming_deposit_date = ev["fecha"]
-        # Acumular aportaciones al pool para estimar valor farming
+        # Composición del LP: qué cesta de RNT+USDT representa cada SLP
         if ev["tipo"] == "Añadir liquidez al pool RNT/USDT":
-            total_rnt_farming  += abs(ev["rnt_delta"])
-            total_usdt_farming += abs(ev["usdt_delta"])
+            pool_slp_total  += ev["slp_delta"]
+            pool_rnt_total  += abs(ev["rnt_delta"])
+            pool_usdt_total += abs(ev["usdt_delta"])
+        # SLP que entra o sale del farming (el frmRNT es solo el recibo del depósito).
+        # Al depositar slp_delta es negativo y al retirar positivo, así que en ambos
+        # casos el saldo bloqueado se mueve en sentido contrario.
+        if ev["tipo"] in ("Depositar LP en farming", "Retirar LP de farming"):
+            bal_slp_farm -= ev["slp_delta"]
         # xRNT: acumular RNT y contar NFTs en wallet
         bal_xrnt_staked += ev.get("xrnt_staked_delta", 0.0)
         bal_xrnt_count  += ev.get("xrnt_count_delta", 0)
@@ -2577,7 +2608,9 @@ if rnt_events_filtered:
             "Operación":   ev["tipo"],
             "Detalle":     ev["detalle"],
             "Saldo RNT":   round(bal_rnt, 4),
-            "Saldo frmRNT": round(bal_frmrnt, 6),
+            "RNT en staking": round(bal_xrnt_staked, 4),
+            "En farming":  _farming_equivalente(bal_slp_farm, pool_slp_total,
+                                                pool_rnt_total, pool_usdt_total),
             "TX": ev["tx_link"],
         }
         if es_multi_wallet:
@@ -2592,8 +2625,12 @@ if rnt_events_filtered:
     styled_rnt = df_rnt.style.applymap(style_operacion, subset=["Operación"])
     st.dataframe(styled_rnt, column_config={
         "TX": st.column_config.LinkColumn("Ver TX", width="small"),
-        "Saldo RNT":   st.column_config.NumberColumn(width="small"),
-        "Saldo frmRNT": st.column_config.NumberColumn(width="small"),
+        "Saldo RNT":      st.column_config.NumberColumn("Saldo RNT", width="small",
+                                                        help="RNT líquido en la wallet"),
+        "RNT en staking": st.column_config.NumberColumn("RNT en staking", width="small",
+                                                        help="RNT bloqueado en posiciones xRNT vivas"),
+        "En farming":     st.column_config.TextColumn("En farming", width="medium",
+                                                      help="Cesta de RNT+USDT que representa el LP depositado en farming"),
     }, hide_index=True, use_container_width=True)
 
     # Notas a pie de tabla (asteriscos de eventos especiales)
@@ -2601,20 +2638,37 @@ if rnt_events_filtered:
     for nota in dict.fromkeys(notas_pie):  # deduplicar preservando orden
         st.caption(nota)
 
-    # Precio RNT y valor estimado de farming
+    if bal_slp_farm > 1e-12 or any(r["En farming"] != "—" for r in rnt_rows):
+        st.caption(
+            "Las tres columnas de saldo cubren las tres formas del RNT: **líquido** en la wallet, "
+            "**bloqueado** en staking (xRNT) y **aportado** al pool y depositado en farming. "
+            "La columna «En farming» traduce el LP —denominado en SLP/frmRNT— a la cesta de "
+            "RNT+USDT que representa, según la composición media de tus aportaciones al pool; "
+            "es tu aportación equivalente, no el valor de mercado (el reparto real del pool "
+            "varía con el precio: *impermanent loss*)."
+        )
+
+    # Precio RNT y valoración de la posición de farming ACTUAL (no del histórico
+    # acumulado: lo que ya se retiró del farming no forma parte de la posición).
     rnt_price = get_rnt_price_usdt()
-    farming_value_usdt = total_usdt_farming + total_rnt_farming * rnt_price
+    farm_rnt, farm_usdt, farm_ok = _farming_composicion(
+        bal_slp_farm, pool_slp_total, pool_rnt_total, pool_usdt_total)
+    farming_value_usdt = farm_usdt + farm_rnt * rnt_price
 
     # Métricas resumen
-    farming_label = (
-        f"≈ {farming_value_usdt:,.2f}"
-        if rnt_price > 0 else
-        f"{total_usdt_farming:,.2f} USDT + {total_rnt_farming:,.4f} RNT"
-    )
-    farming_sublabel = (
-        f"USDT · RNT: {total_rnt_farming:,.4f} · precio: {rnt_price:.4f} $"
-        if rnt_price > 0 else "sin precio de mercado"
-    )
+    if bal_slp_farm <= 1e-12:
+        farming_label    = "—"
+        farming_sublabel = "sin posición en farming"
+    elif not farm_ok:
+        farming_label    = f"{bal_slp_farm:,.6f} SLP"
+        farming_sublabel = "composición del LP no determinable"
+    elif rnt_price > 0:
+        farming_label    = f"≈ {farming_value_usdt:,.2f}"
+        farming_sublabel = (f"USDT · aportado: {farm_rnt:,.4f} RNT + "
+                            f"{farm_usdt:,.2f} USDT · precio: {rnt_price:.4f} $")
+    else:
+        farming_label    = f"{farm_usdt:,.2f} USDT + {farm_rnt:,.4f} RNT"
+        farming_sublabel = "sin precio de mercado"
     if bal_xrnt_count > 0:
         xrnt_label    = f"{bal_xrnt_count} NFT{'s' if bal_xrnt_count > 1 else ''}"
         xrnt_sublabel = (f"{bal_xrnt_staked:,.4f} RNT en staking"
@@ -2627,7 +2681,7 @@ if rnt_events_filtered:
 
     c1, c2, c3, c4 = st.columns(4)
     c1.markdown(kpi_card("🪙", "Saldo RNT",              f"{bal_rnt:,.4f}",   sublabel="RNT en wallet"), unsafe_allow_html=True)
-    c2.markdown(kpi_card("🌾", "Posición farming",        f"{bal_frmrnt:,.6f}", sublabel="frmRNT depositados"), unsafe_allow_html=True)
+    c2.markdown(kpi_card("🌾", "Posición farming",        f"{bal_slp_farm:,.6f}", sublabel="SLP depositados en farming"), unsafe_allow_html=True)
     c3.markdown(kpi_card("💎", "Valor en farming",        farming_label,       sublabel=farming_sublabel), unsafe_allow_html=True)
     c4.markdown(kpi_card("🔒", "Staking xRNT",           xrnt_label,          value_color=xrnt_color, sublabel=xrnt_sublabel), unsafe_allow_html=True)
 
