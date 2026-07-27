@@ -1341,6 +1341,13 @@ def process_rnt_ecosystem(transfers: list, wallet: str, nft_transfers: list = No
             }
 
         if ev:
+            # El frmRNT es el recibo del LP en farming: su saldo ES la posición viva.
+            # Cada rama lo fijaba a mano y alguna lo daba por 0 aunque la TX quemara
+            # frmRNT (retirar del farming y deshacer la liquidez en la misma TX cae
+            # en "Retirar liquidez del pool"), dejando la posición inflada para
+            # siempre. Se impone aquí el movimiento real de la TX, que es la única
+            # fuente fiable y no depende de en qué rama haya caído la operación.
+            ev["frmrnt_delta"] = frmrnt_in - frmrnt_out
             ev.update({"fecha": dt, "fecha_str": dt.strftime("%Y-%m-%d %H:%M"), "tx_link": tx_link})
             events.append(ev)
 
@@ -2558,7 +2565,8 @@ rnt_events_filtered = filtrar_por_wallet(rnt_events)
 if rnt_events_filtered:
     # Calcular balances acumulados
     bal_rnt = 0.0
-    bal_slp_farm = 0.0       # SLP realmente depositado en el contrato de farming
+    bal_frmrnt = 0.0         # recibo del LP en farming: su saldo es la posición viva
+    dep_slp_total = dep_frmrnt_total = 0.0   # para convertir frmRNT → SLP
     bal_xrnt_staked = 0.0    # RNT total en posición de staking (xRNT NFT)
     bal_xrnt_count  = 0      # número de NFTs xRNT actualmente en wallet
     last_farming_deposit_date = None
@@ -2594,11 +2602,17 @@ if rnt_events_filtered:
             pool_slp_total  += ev["slp_delta"]
             pool_rnt_total  += abs(ev["rnt_delta"])
             pool_usdt_total += abs(ev["usdt_delta"])
-        # SLP que entra o sale del farming (el frmRNT es solo el recibo del depósito).
-        # Al depositar slp_delta es negativo y al retirar positivo, así que en ambos
-        # casos el saldo bloqueado se mueve en sentido contrario.
-        if ev["tipo"] in ("Depositar LP en farming", "Retirar LP de farming"):
-            bal_slp_farm -= ev["slp_delta"]
+        # Posición de farming: se sigue por el frmRNT, no por el tipo de operación.
+        # Así cualquier TX que queme el recibo la descuenta, caiga en la rama que
+        # caiga (p.ej. retirar del farming y del pool en una sola transacción).
+        bal_frmrnt += ev["frmrnt_delta"]
+        if ev["tipo"] == "Depositar LP en farming" and ev["frmrnt_delta"] > 0:
+            dep_slp_total    += abs(ev["slp_delta"])
+            dep_frmrnt_total += ev["frmrnt_delta"]
+        # El frmRNT suele emitirse 1:1 contra el SLP, pero se deriva la proporción
+        # real de los depósitos en lugar de darla por supuesta.
+        bal_slp_farm = (bal_frmrnt * dep_slp_total / dep_frmrnt_total
+                        if dep_frmrnt_total > 0 else bal_frmrnt)
         # xRNT: acumular RNT y contar NFTs en wallet
         bal_xrnt_staked += ev.get("xrnt_staked_delta", 0.0)
         bal_xrnt_count  += ev.get("xrnt_count_delta", 0)
@@ -2679,11 +2693,12 @@ if rnt_events_filtered:
         xrnt_sublabel = "sin posición activa"
         xrnt_color    = "#94a3b8"
 
-    c1, c2, c3, c4 = st.columns(4)
+    # El SLP depositado no se muestra como KPI propio: es una unidad opaca y su
+    # traducción a RNT+USDT ya la da "Valor en farming" y la columna de la tabla.
+    c1, c2, c3 = st.columns(3)
     c1.markdown(kpi_card("🪙", "Saldo RNT",              f"{bal_rnt:,.4f}",   sublabel="RNT en wallet"), unsafe_allow_html=True)
-    c2.markdown(kpi_card("🌾", "Posición farming",        f"{bal_slp_farm:,.6f}", sublabel="SLP depositados en farming"), unsafe_allow_html=True)
-    c3.markdown(kpi_card("💎", "Valor en farming",        farming_label,       sublabel=farming_sublabel), unsafe_allow_html=True)
-    c4.markdown(kpi_card("🔒", "Staking xRNT",           xrnt_label,          value_color=xrnt_color, sublabel=xrnt_sublabel), unsafe_allow_html=True)
+    c2.markdown(kpi_card("🌾", "Valor en farming",        farming_label,       sublabel=farming_sublabel), unsafe_allow_html=True)
+    c3.markdown(kpi_card("🔒", "Staking xRNT",           xrnt_label,          value_color=xrnt_color, sublabel=xrnt_sublabel), unsafe_allow_html=True)
 
     # Burning fee calculator
     if last_farming_deposit_date:
