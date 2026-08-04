@@ -41,6 +41,7 @@ SEL_ADDRESSES_PROVIDER   = "0x0542975c"   # ADDRESSES_PROVIDER()
 SEL_GET_PRICE_ORACLE     = "0xfca513a8"   # getPriceOracle()
 SEL_GET_ASSET_PRICE      = "0xb3596f07"   # getAssetPrice(address)
 SEL_UNDERLYING_ASSET     = "0xb16a19de"   # UNDERLYING_ASSET_ADDRESS()
+SEL_BALANCE_OF           = "0x70a08231"   # balanceOf(address)
 
 TRANSFER_TOPIC             = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 RESERVE_DATA_UPDATED_TOPIC = "0x804c9b842b2748a22bb64b345453a3de7ca54a6ca45ce00d415894979e22897a"
@@ -140,6 +141,26 @@ def get_user_account_data(wallet: str, api_key: str) -> dict:
         "health_factor":     hf,
         "tiene_deuda":       deuda > 0.01,
     }
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def balance_of(token_address: str, wallet: str, decimals: int, api_key: str) -> float:
+    """Saldo actual de un token para una wallet, leído del contrato.
+
+    Imprescindible para los aTokens: su saldo CRECE solo según se devenga el
+    interés, y ese crecimiento no emite ningún Transfer. Sumar los eventos de
+    mint y burn da el principal aportado, nunca el interés acumulado, así que
+    lo devengado y no retirado solo se ve preguntando al contrato.
+
+    TTL corto (5 min) porque el saldo cambia de forma continua.
+    """
+    res = eth_call(token_address, SEL_BALANCE_OF + _addr_arg(wallet), api_key)
+    if not res or res == "0x":
+        return 0.0
+    try:
+        return int(res, 16) / (10 ** decimals)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 @st.cache_data(show_spinner=False, ttl=86400)
