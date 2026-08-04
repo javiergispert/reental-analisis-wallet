@@ -1674,13 +1674,39 @@ if es_multi_wallet:
 all_dates = [m["fecha"] for d in token_data.values() for m in d["movements"]]
 primera_fecha = min(all_dates).strftime("%d/%m/%Y") if all_dates else "—"
 
+KPI_TOOLTIP_CSS = """
+<style>
+/* Streamlit recorta lo que sobresale de sus contenedores: sin esto el globo
+   del tooltip quedaría cortado por el borde de la columna. */
+div[data-testid="stVerticalBlock"], div[data-testid="stHorizontalBlock"],
+div[data-testid="column"], div[data-testid="stVerticalBlockBorderWrapper"] {
+    overflow: visible !important;
+}
+.kpi-card { position: relative; }
+.kpi-card[data-tip]:hover::after {
+    content: attr(data-tip);
+    position: absolute; left: 0; top: 100%; margin-top: 6px; z-index: 9999;
+    width: max-content; max-width: 330px;
+    background: #0f172a; color: #f8fafc;
+    font-size: 0.72rem; font-weight: 400; line-height: 1.4;
+    letter-spacing: 0; text-transform: none; text-align: left;
+    padding: 9px 11px; border-radius: 8px;
+    box-shadow: 0 6px 18px rgba(15,23,42,.22);
+    white-space: normal; pointer-events: none;
+}
+</style>
+"""
+
+
 def kpi_card(icon, label, value, value_color="#1e293b", sublabel="", badge="", help=""):
-    """`help` se muestra al pasar el ratón sobre la tarjeta (tooltip nativo), para
-    explicar la fórmula sin obligar a abrir las notas metodológicas."""
-    tip = f' title="{html.escape(help, quote=True)}"' if help else ""
+    """`help` se muestra en un globo al pasar el ratón por la tarjeta, para
+    explicar la fórmula sin obligar a abrir las notas metodológicas. Se usa un
+    tooltip CSS propio en vez del atributo `title` del navegador porque aquel
+    exige mantener el puntero quieto casi un segundo y no reacciona al clic."""
+    tip = f' data-tip="{html.escape(help, quote=True)}"' if help else ""
     cursor = "cursor:help;" if help else ""
     return f"""
-    <div{tip} style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;
+    <div class="kpi-card"{tip} style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;
                 padding:16px 18px;display:flex;flex-direction:column;gap:4px;{cursor}">
       <div style="font-size:0.72rem;font-weight:600;color:#64748b;
                   letter-spacing:0.05em;text-transform:uppercase;">{icon}&nbsp;{label}{"&nbsp;ⓘ" if help else ""}</div>
@@ -1688,6 +1714,8 @@ def kpi_card(icon, label, value, value_color="#1e293b", sublabel="", badge="", h
                   line-height:1.2;">{value}</div>
       <div style="font-size:0.72rem;color:#94a3b8;">{sublabel}&nbsp;{badge}</div>
     </div>"""
+
+st.markdown(KPI_TOOLTIP_CSS, unsafe_allow_html=True)
 
 c1, c2, c3, c4 = st.columns(4)
 c1.markdown(kpi_card("🏠", "Tokens con saldo",        str(len(activos)),   sublabel="posiciones activas"),   unsafe_allow_html=True)
@@ -2278,67 +2306,119 @@ if aave_lender_filtered:
         saldo, medido = _saldo_onchain(movs)
         if not medido:
             saldo = principal                    # sin lectura on-chain, no se inventa interés
-        devengado = max(0.0, saldo - principal) if medido else 0.0
-        total_int = ret + saldo - dep
-        realizado = total_int - devengado
-        flujos = [(m["fecha"], -m["stable_amount"] if m["tipo"] == "Depósito préstamo"
-                   else +m["stable_amount"]) for m in movs]
-        if saldo > 0.01:
-            flujos.append((datetime.utcnow(), +saldo))
+        # Reparto del interés total entre lo ya cobrado y lo que sigue dentro, de
+        # forma que las dos mitades sumen exactamente el resultado de la posición
+        # y ninguna se cuente dos veces. Se parte de lo retirado: la porción que
+        # devuelve capital y el resto, que son intereses.
+        #
+        # Los topes a cero no son cosméticos: el aToken se acuña con un desfase
+        # mínimo respecto al stablecoin movido (redondeo del índice de Aave), y sin
+        # ellos una posición SIN retiradas mostraba "intereses cobrados" de unos
+        # céntimos y un capital retirado negativo. Ese residuo pertenece a lo
+        # devengado, que es donde lo deja este reparto.
+        total_int    = ret + saldo - dep
+        cap_retirado = max(0.0, dep - principal)
+        cobrados     = max(0.0, ret - cap_retirado)
+        devengado    = (total_int - cobrados) if medido else 0.0
+
+        base_flujos = [(m["fecha"], -m["stable_amount"] if m["tipo"] == "Depósito préstamo"
+                        else +m["stable_amount"]) for m in movs]
+        # Devengada: cierra con el saldo real (principal + interés acumulado).
+        f_dev = list(base_flujos) + ([(datetime.utcnow(), +saldo)] if saldo > 0.01 else [])
+        # Realizada: cierra con el principal a coste, sin interés. Aísla lo cobrado.
+        f_real = list(base_flujos) + ([(datetime.utcnow(), +principal)] if principal > 0.01 else [])
         return {
             "dep": dep, "ret": ret, "saldo": saldo, "principal": principal,
-            "devengado": devengado, "realizado": realizado, "total_int": total_int,
+            "devengado": devengado, "cobrados": cobrados, "cap_retirado": cap_retirado,
+            "total_int": total_int,
             "abierta": saldo > 0.01, "medido": medido,
-            "rent": (total_int / dep * 100) if dep > 0 else 0.0,
-            "tir": calculate_irr(flujos),
+            "hay_retiradas": cap_retirado > 0.01,
+            "rent_dev":  (devengado / principal * 100) if principal > 0.01 else None,
+            "rent_real": (cobrados / cap_retirado * 100) if cap_retirado > 0.01 else None,
+            "tir_dev":   calculate_irr(f_dev)  if saldo > 0.01 else None,
+            "tir_real":  calculate_irr(f_real) if cap_retirado > 0.01 else None,
         }
 
-    H_DEP = ("Suma de stablecoins que salieron de la wallet al depositar en Aave. "
-             "Es el capital aportado bruto, sin descontar lo ya retirado.")
-    H_RET = ("Suma de stablecoins recibidas al retirar. Incluye tanto principal "
-             "como los intereses que se cobraron en esas retiradas.")
-    H_DEV = ("Intereses generados y AÚN NO retirados: saldo actual del aToken leído "
-             "del contrato menos el principal que sigue depositado. Los aTokens "
-             "crecen solos con el interés, sin emitir ninguna transacción.")
-    H_INT = ("Intereses totales = Retirado + Saldo actual − Depositado. Suma los ya "
-             "cobrados en retiradas y los devengados que siguen dentro. No es un "
-             "reparto proporcional: es el resultado global de la posición.")
-    H_RENT = "Intereses totales / Total depositado. Rendimiento acumulado, sin anualizar."
-    H_TIR = ("Tasa interna de retorno: anualiza el rendimiento ponderando importe y "
-             "fecha de cada flujo, y cierra con el saldo actual (con intereses "
-             "devengados) como cobro hipotético a hoy. Un 4 % equivale a un 4 % "
-             "anual compuesto. A diferencia de la Rentabilidad, sí depende del tiempo.")
+    H_DEP = ("Suma de stablecoins que salieron de la wallet al depositar en Aave, "
+             "de todo el histórico. Capital aportado bruto, sin descontar lo ya retirado.")
+    H_DEV = ("Intereses generados y AÚN NO cobrados: saldo actual del aToken, leído del "
+             "contrato, menos el principal que sigue depositado. Un aToken crece solo "
+             "según se devenga el interés, sin emitir ninguna transacción, así que este "
+             "dato no puede salir del histórico de movimientos.")
+    H_RDEV = ("Intereses devengados / capital que sigue depositado. Lo que rinde la "
+              "posición viva hasta hoy, acumulado y SIN anualizar: no distingue si se "
+              "ganó en un mes o en un año.")
+    H_TDEV = ("Anualiza el rendimiento de la posición viva ponderando importe y fecha de "
+              "cada aportación, y cierra con el saldo actual (principal + intereses "
+              "devengados) como cobro hipotético a hoy. Un 4 % equivale a un 4 % anual "
+              "compuesto. A diferencia de la Rentabilidad, sí depende del tiempo.")
+    H_RET = ("Suma de stablecoins recibidas al retirar. Engloba las dos cosas: la "
+             "devolución del capital y los intereses cobrados con ella.")
+    H_COB = ("La parte del Total retirado que son intereses, no devolución de capital. "
+             "Se obtiene como Retirado + principal vivo − Depositado, de modo que lo "
+             "cobrado y lo que sigue devengándose nunca se cuentan dos veces.")
+    H_RREAL = ("Intereses cobrados / capital retirado. Lo que rindió de verdad el dinero "
+               "que ya salió, acumulado y sin anualizar.")
+    H_TREAL = ("Misma TIR, pero cerrando con el principal vivo a coste, sin sumarle los "
+               "intereses devengados. Así aísla el rendimiento ya materializado y no lo "
+               "mezcla con la revalorización que aún está dentro.")
+
+    def _pct(v):
+        return f"{v:.2f} %" if v is not None else "—"
+
+    def _color(v):
+        return "#16a34a" if (v or 0) > 0 else ("#94a3b8" if v is None else "#dc2626")
 
     def _fila_kpis(mon, k):
         badge = ('<span style="font-size:0.7rem;background:#fef9c3;color:#854d0e;'
-                 'border-radius:4px;padding:2px 6px;font-weight:600;">posición abierta</span>'
+                 'border-radius:4px;padding:2px 6px;font-weight:600;">abierta</span>'
                  if k["abierta"] else "")
-        d1, d2, d3, d4, d5, d6 = st.columns(6)
-        d1.markdown(kpi_card("💵", "Total depositado", f"{k['dep']:,.2f}", sublabel=mon,
-                             help=H_DEP), unsafe_allow_html=True)
-        d2.markdown(kpi_card("🏦", "Total retirado", f"{k['ret']:,.2f}", sublabel=mon,
-                             help=H_RET), unsafe_allow_html=True)
-        d3.markdown(kpi_card("⏳", "Intereses devengados",
+        st.markdown(f"<div style='font-size:0.78rem;color:#64748b;font-weight:600;"
+                    f"margin:2px 0 6px;'>⏳ Devengado — posición viva</div>",
+                    unsafe_allow_html=True)
+        a1, a2, a3, a4 = st.columns(4)
+        _vivo = (f"{mon} · vivo: {k['principal']:,.2f}"
+                 if k["hay_retiradas"] else mon)
+        a1.markdown(kpi_card("💵", "Total depositado", f"{k['dep']:,.2f}",
+                             sublabel=_vivo, help=H_DEP), unsafe_allow_html=True)
+        a2.markdown(kpi_card("⏳", "Intereses devengados",
                              f"{k['devengado']:,.2f}" if k["medido"] else "—",
                              value_color="#16a34a" if k["devengado"] > 0 else "#94a3b8",
-                             sublabel=f"{mon} · sin retirar" if k["medido"] else "no disponible",
+                             sublabel=f"{mon} · pendientes de cobro" if k["medido"] else "no disponible",
                              badge=badge, help=H_DEV), unsafe_allow_html=True)
-        d4.markdown(kpi_card("✨", "Intereses totales", f"{k['total_int']:,.2f}",
-                             value_color="#16a34a" if k["total_int"] >= 0 else "#dc2626",
-                             sublabel=f"{mon} · cobrados + devengados",
-                             help=H_INT), unsafe_allow_html=True)
-        d5.markdown(kpi_card("📈", "Rentabilidad", f"{k['rent']:.2f} %",
-                             value_color="#16a34a" if k["rent"] >= 0 else "#dc2626",
-                             sublabel="sobre capital aportado", help=H_RENT), unsafe_allow_html=True)
-        d6.markdown(kpi_card("⚡", "TIR anual",
-                             f"{k['tir']*100:.2f} %" if k["tir"] is not None else "—",
-                             value_color="#16a34a" if (k["tir"] or 0) >= 0 else "#dc2626",
-                             sublabel="anualizada", help=H_TIR), unsafe_allow_html=True)
+        a3.markdown(kpi_card("📈", "Rentabilidad devengada", _pct(k["rent_dev"]),
+                             value_color=_color(k["rent_dev"]),
+                             sublabel="sobre capital vivo", help=H_RDEV), unsafe_allow_html=True)
+        a4.markdown(kpi_card("⚡", "TIR anual devengada",
+                             _pct(k["tir_dev"] * 100 if k["tir_dev"] is not None else None),
+                             value_color=_color(k["tir_dev"]),
+                             sublabel="anualizada", help=H_TDEV), unsafe_allow_html=True)
+
+        st.markdown(f"<div style='font-size:0.78rem;color:#64748b;font-weight:600;"
+                    f"margin:10px 0 6px;'>✅ Realizado — ya retirado</div>",
+                    unsafe_allow_html=True)
+        b1, b2, b3, b4 = st.columns(4)
+        b1.markdown(kpi_card("🏦", "Total retirado", f"{k['ret']:,.2f}",
+                             sublabel=(f"{mon} · capital: {k['cap_retirado']:,.2f}"
+                                       if k["hay_retiradas"] else f"{mon} · sin retiradas"),
+                             help=H_RET), unsafe_allow_html=True)
+        b2.markdown(kpi_card("💰", "Intereses cobrados", f"{k['cobrados']:,.2f}",
+                             value_color="#16a34a" if k["cobrados"] > 0.01 else "#94a3b8",
+                             sublabel=f"{mon} · ya materializados", help=H_COB), unsafe_allow_html=True)
+        b3.markdown(kpi_card("📊", "Rentabilidad realizada", _pct(k["rent_real"]),
+                             value_color=_color(k["rent_real"]),
+                             sublabel="sobre capital retirado", help=H_RREAL), unsafe_allow_html=True)
+        b4.markdown(kpi_card("🎯", "TIR anual realizada",
+                             _pct(k["tir_real"] * 100 if k["tir_real"] is not None else None),
+                             value_color=_color(k["tir_real"]),
+                             sublabel="anualizada", help=H_TREAL), unsafe_allow_html=True)
 
     metricas = {mon: _metricas(movs) for mon, movs in por_moneda.items()}
-    for mon in sorted(metricas):
+    for i, mon in enumerate(sorted(metricas)):
         if len(metricas) > 1:
-            st.markdown(f"**{mon}**")
+            if i:
+                st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+            st.markdown(f"##### {mon}")
         _fila_kpis(mon, metricas[mon])
 
     if len(metricas) > 1:
@@ -2360,25 +2440,41 @@ if aave_lender_filtered:
 
     with st.expander("📐 Notas metodológicas — Prestamista"):
         st.markdown("""
+Los KPIs se separan en dos mitades que **no se solapan**: lo que sigue dentro generando interés
+y lo que ya salió. Sumadas dan el resultado completo de la posición.
+
+##### ⏳ Devengado — posición viva
+
 **Intereses devengados** — Saldo actual del aToken (leído del contrato) − principal que sigue
 depositado. Un aToken de Aave *rebasa*: su saldo crece solo según se devenga el interés, sin
-emitir ninguna transacción. Por eso este dato no puede salir del histórico de movimientos y hay
-que preguntárselo al contrato.
+emitir ninguna transacción. Por eso este dato no puede salir del histórico de movimientos.
 
-**Intereses totales** — Total retirado + Saldo actual − Total depositado. Engloba tanto los
-intereses ya cobrados al retirar como los devengados que siguen dentro. No hay ningún reparto
-proporcional entre capital e intereses: es el resultado global de la posición.
+**Rentabilidad devengada** — Intereses devengados / capital vivo. Acumulada, **no** anualizada.
 
-**Rentabilidad** — Intereses totales / Total depositado. Acumulada, **no** anualizada: no
-distingue entre ganarla en un mes o en tres años.
+**TIR anual devengada** — Pondera importe y fecha de cada aportación y cierra con el saldo
+actual (principal + devengado) como cobro hipotético a hoy. Refleja el rendimiento aunque no se
+haya retirado nada.
 
-**TIR anual** — Tasa interna de retorno ponderando importe y fecha de cada flujo, cerrando con
-el saldo actual como cobro hipotético a hoy. Al incluir los intereses devengados, ya refleja el
-rendimiento aunque no se haya retirado nada.
+##### ✅ Realizado — ya retirado
+
+**Intereses cobrados** — Total retirado + principal vivo − Total depositado. Es la parte de lo
+retirado que son intereses y no devolución de capital. La resta con el principal vivo es lo que
+evita contar dos veces lo que aún sigue devengándose.
+
+**Rentabilidad realizada** — Intereses cobrados / capital retirado (= Depositado − principal
+vivo). Lo que rindió el dinero que ya salió.
+
+**TIR anual realizada** — Igual que la devengada pero cerrando con el principal **a coste**, sin
+sumarle intereses devengados, para aislar lo ya materializado.
+
+---
 
 **Por qué USDT y USDC van separados** — Ambas son dólar y fiscalmente se tratan igual, pero son
 reservas distintas del mercado con curvas de tipos propias, así que mezclarlas ocultaría cuál
 está rindiendo mejor.
+
+**Cuándo verás «—»** — Una rentabilidad o TIR sin base sobre la que calcularse: la realizada si
+nunca se ha retirado nada, la devengada si la posición está cerrada.
 
 > ⚠️ Los aTokens se valoran a la par con su subyacente. El saldo se lee en vivo, así que los
 > intereses devengados se mueven entre consultas.
