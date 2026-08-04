@@ -598,6 +598,26 @@ def build_stablecoin_movements(token_data: dict) -> list:
     return rows
 
 
+def _es_atoken_de_stablecoin(addr: str, sym: str, name: str) -> bool:
+    """¿`addr` es un aToken de Aave cuyo subyacente es una stablecoin conocida?
+
+    Se pregunta al contrato, pero solo cuando el token aparenta ser de Aave: los
+    aTokens siempre llevan prefijo 'a' o nombre 'Aave…'. Sin esa puerta habría
+    una llamada on-chain por cada token inmobiliario y cada stablecoin del
+    histórico. El resultado se cachea 24 h por contrato.
+    """
+    if not addr or not API_KEY:
+        return False
+    if addr in STABLECOIN_CONTRACTS:      # la stablecoin en sí, no su aToken
+        return False
+    if not (sym.startswith("a") or name.startswith("Aave")):
+        return False
+    try:
+        return aave_lend.underlying_asset(addr, API_KEY) in STABLECOIN_CONTRACTS
+    except Exception:
+        return False   # sin red, se conserva lo que dictara el filtro por nombre
+
+
 def process_aave_activity(transfers: list, wallet: str) -> dict:
     """
     Separa la actividad Aave en dos roles:
@@ -611,18 +631,27 @@ def process_aave_activity(transfers: list, wallet: str) -> dict:
         """Token de deuda variable/estable de Aave"""
         return sym.startswith("variableDebt") or sym.startswith("stableDebt")
 
-    def _is_lender_atoken(sym, name):
-        """aToken de stablecoin (no Reental, no deuda): aMat/aPolUSDT, aMat/aPolUSDC…
+    def _is_lender_atoken(sym, name, addr=""):
+        """aToken de stablecoin (no Reental, no deuda): aMat/aPolUSDT, aUSDCn…
         IMPORTANTE: se comprueba DESPUÉS de _is_debt_token porque los debt tokens
         tienen nombre 'Aave Matic Variable Debt USDT' que empieza con 'Aave' y
         pasarían este filtro erróneamente si no se excluyen primero.
         """
         if _is_debt_token(sym, name):
             return False
+        if "Reental" in name or "Reental" in sym:
+            return False
         prefixed = sym.startswith("aMat") or sym.startswith("aPol") or name.startswith("Aave")
         is_stable = any(s in sym.upper() for s in ("USDT", "USDC", "DAI"))
-        is_reental = "Reental" in name or "Reental" in sym
-        return prefixed and is_stable and not is_reental
+        if prefixed and is_stable:
+            return True
+        # Aave nombra sus aTokens de forma inconsistente entre mercados: en el de
+        # colateral inmobiliario conviven aMatUSDT ("Aave Matic USDT") y aUSDCn
+        # ("USDCn"), y este último no casa con ningún prefijo, así que su depósito
+        # se descartaba. Cuando el nombre no basta se pregunta al contrato por su
+        # subyacente: identifica el aToken por lo que representa, no por cómo se
+        # llame, y así un mercado nuevo entra solo en vez de fallar en silencio.
+        return _es_atoken_de_stablecoin(addr, sym, name)
 
     def _is_collateral_atoken(sym, name):
         """aToken de colateral Reental: aMatReental-…"""
@@ -660,7 +689,7 @@ def process_aave_activity(transfers: list, wallet: str) -> dict:
             from_ = tx["from"].lower()
             direction = "in" if to_ == wallet else "out"
 
-            if _is_lender_atoken(sym, name):
+            if _is_lender_atoken(sym, name, addr):
                 lender_atokens.append({"sym": sym, "value": value, "dir": direction})
             elif _is_collateral_atoken(sym, name):
                 collateral_tokens.append({"sym": sym, "value": value, "dir": direction})

@@ -40,6 +40,7 @@ SEL_GET_USER_ACCOUNT     = "0xbf92857c"   # getUserAccountData(address)
 SEL_ADDRESSES_PROVIDER   = "0x0542975c"   # ADDRESSES_PROVIDER()
 SEL_GET_PRICE_ORACLE     = "0xfca513a8"   # getPriceOracle()
 SEL_GET_ASSET_PRICE      = "0xb3596f07"   # getAssetPrice(address)
+SEL_UNDERLYING_ASSET     = "0xb16a19de"   # UNDERLYING_ASSET_ADDRESS()
 
 TRANSFER_TOPIC             = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 RESERVE_DATA_UPDATED_TOPIC = "0x804c9b842b2748a22bb64b345453a3de7ca54a6ca45ce00d415894979e22897a"
@@ -139,6 +140,22 @@ def get_user_account_data(wallet: str, api_key: str) -> dict:
         "health_factor":     hf,
         "tiene_deuda":       deuda > 0.01,
     }
+
+
+@st.cache_data(show_spinner=False, ttl=86400)
+def underlying_asset(token_address: str, api_key: str) -> str:
+    """Activo subyacente de un aToken o debtToken de Aave, preguntado al propio
+    contrato. Permite identificar un aToken por lo que representa en vez de por
+    cómo se llame: Aave nombra los suyos de forma inconsistente entre mercados
+    (aMatUSDT / "Aave Matic USDT" frente a aUSDCn / "USDCn"), así que cualquier
+    filtro por prefijo se rompe en silencio al aparecer un mercado nuevo.
+
+    Devuelve "" si el contrato no expone la función (no es un token de Aave).
+    """
+    res = eth_call(token_address, SEL_UNDERLYING_ASSET, api_key)
+    if not res or len(res) < 42:
+        return ""
+    return "0x" + res[-40:].lower()
 
 
 @st.cache_data(show_spinner=False, ttl=86400)
