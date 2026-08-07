@@ -140,6 +140,52 @@ def load_closing_dates() -> dict:
         return {}
 
 
+# Etiquetas cortas para la tipología de dividendo: los valores del maestro son
+# frases largas que no caben en una columna de tabla ni en la leyenda de un gráfico.
+DIVIDENDO_CORTO = {
+    "rendimientos mensuales + final":     "Mensual + final",
+    "rendimientos mensuales":             "Mensual",
+    "rendimientos trimestrales + final":  "Trimestral + final",
+    "rendimientos a final del proyecto":  "A final de proyecto",
+}
+SIN_DATO = "Sin dato"
+
+# Paleta cualitativa anclada en los acentos de marca (dorado y azul Reental),
+# con contraste suficiente sobre el fondo claro de la herramienta.
+PALETA_QUESITOS = ["#f5a623", "#3b82f6", "#10b981", "#8b5cf6",
+                   "#ef4444", "#06b6d4", "#ec4899", "#84cc16"]
+
+
+def dividendo_corto(valor: str) -> str:
+    """Etiqueta corta de la tipología de dividendo, tolerante a mayúsculas y
+    espacios. Si el maestro añade un valor nuevo se muestra tal cual en vez de
+    perderlo bajo 'Sin dato'."""
+    v = (valor or "").strip()
+    if not v:
+        return SIN_DATO
+    return DIVIDENDO_CORTO.get(v.lower(), v.capitalize())
+
+
+def _col_maestro(row, nombre: str, pos: int) -> str:
+    """Lee una columna del maestro por nombre y cae a su posición si la cabecera
+    cambia. El resto del fichero ya lee por posición, así que esto solo añade
+    tolerancia, nunca la quita."""
+    val = None
+    try:
+        v = row.get(nombre)
+        if isinstance(v, str) or (v is not None and not hasattr(v, "__len__")):
+            val = v
+    except Exception:
+        val = None
+    if val is None:
+        try:
+            val = row.iloc[pos]
+        except Exception:
+            return ""
+    s = str(val).strip()
+    return "" if s.lower() in ("nan", "none", "-") else s
+
+
 @st.cache_data(show_spinner=False, ttl=3600)
 def load_tokens() -> dict:
     tokens = {}
@@ -183,6 +229,11 @@ def load_tokens() -> dict:
                         tokens[addr] = {
                             "name": name, "symbol": project_id, "label": label, "address": addr,
                             "divisa": divisa, "precio_emision": precio_emision,
+                            "tipologia_dividendo":   _col_maestro(row, "Tipología de Dividendo", 16),
+                            "ubicacion":             _col_maestro(row, "Ubicación", 14),
+                            "tipologia_explotacion": _col_maestro(row, "Tipología de explotación", 15),
+                            "estado":                _col_maestro(row, "ESTADO", 2),
+                            "fecha_fin_estimada":    _col_maestro(row, "Estimación fecha fin desde Financiación", 8),
                         }
         except Exception:
             pass
@@ -520,6 +571,14 @@ def process_transfers(transfers: list, wallet: str, known_tokens: dict, reental_
                 "underlying_address": original_info.get("address", "") if is_aave else "",
                 "divisa": original_info.get("divisa", "USD"),
                 "precio_emision": original_info.get("precio_emision"),
+                # Atributos del proyecto en el maestro. Se arrastran aquí porque
+                # este dict —no el de load_tokens— es el que consumen las tablas
+                # y los gráficos de composición.
+                "tipologia_dividendo":   original_info.get("tipologia_dividendo", ""),
+                "ubicacion":             original_info.get("ubicacion", ""),
+                "tipologia_explotacion": original_info.get("tipologia_explotacion", ""),
+                "estado":                original_info.get("estado", ""),
+                "fecha_fin_estimada":    original_info.get("fecha_fin_estimada", ""),
             }
             token_data[contract]["movements"].append({
                 "fecha": datetime.utcfromtimestamp(int(tx["timeStamp"])),
@@ -1787,6 +1846,83 @@ Tipo de cambio usado: **1 EUR = {_eurusd_label} USD** (fuente: CoinGecko / Frank
     else:
         st.warning(_nota_valor)
 
+# ── Composición de la cartera ────────────────────────────────────────────────
+if activos:
+    def _peso_usd(d):
+        """Valor a precio de emisión en USD. Es la unidad correcta para repartir
+        la cartera: ponderar por número de tokens mezclaría proyectos con precios
+        de emisión distintos y daría una foto falsa."""
+        v = d["balance_display"] * (d["info"].get("precio_emision") or 0.0)
+        if d["info"].get("divisa") == "EUR":
+            return v * _eurusd if _eurusd else 0.0
+        return v
+
+    # Sin tipo de cambio no se puede sumar EUR con USD: antes que dejar los
+    # proyectos en euros a cero (que los borraría del gráfico), se pondera por
+    # número de tokens y se advierte.
+    _hay_eur = any(d["info"].get("divisa") == "EUR" for d in activos.values())
+    _por_valor = bool(_eurusd) or not _hay_eur
+    _peso = _peso_usd if _por_valor else (lambda d: d["balance_display"])
+
+    def _reparto(campo, formateador=None):
+        acc = defaultdict(lambda: [0.0, 0])
+        for d in activos.values():
+            etiqueta = (d["info"].get(campo) or "").strip()
+            etiqueta = formateador(etiqueta) if formateador else (etiqueta or SIN_DATO)
+            acc[etiqueta][0] += _peso(d)
+            acc[etiqueta][1] += 1
+        # Fuera las categorías sin peso (p.ej. tokens sin precio de emisión):
+        # un sector de tamaño cero solo ensucia la leyenda.
+        items = [(k, v[0], v[1]) for k, v in acc.items() if v[0] > 0]
+        return sorted(items, key=lambda x: -x[1])
+
+    def _quesito(titulo, datos, unidad):
+        if not datos:
+            return None
+        fig = go.Figure(go.Pie(
+            labels=[d[0] for d in datos],
+            values=[d[1] for d in datos],
+            customdata=[[d[2]] for d in datos],
+            hole=0.45,
+            sort=False,
+            marker=dict(colors=PALETA_QUESITOS[:len(datos)],
+                        line=dict(color="#ffffff", width=2)),
+            textinfo="percent",
+            texttemplate="%{percent:.1%}",
+            insidetextfont=dict(size=12, color="#ffffff"),
+            hovertemplate=("<b>%{label}</b><br>%{percent:.1%} de la cartera<br>"
+                           + unidad + ": %{value:,.2f}<br>"
+                           "proyectos: %{customdata[0]}<extra></extra>"),
+        ))
+        fig.update_layout(
+            title=dict(text=titulo, font=dict(size=13, color="#334155"), x=0, xanchor="left"),
+            showlegend=True,
+            legend=dict(orientation="h", yanchor="top", y=-0.06, x=0, font=dict(size=11)),
+            margin=dict(t=34, b=64, l=4, r=4), height=310,
+            paper_bgcolor="rgba(0,0,0,0)",
+        )
+        return fig
+
+    _unidad = "valor USD" if _por_valor else "tokens"
+    _figs = [
+        _quesito("Tipología de dividendo", _reparto("tipologia_dividendo", dividendo_corto), _unidad),
+        _quesito("Ubicación",              _reparto("ubicacion"),                            _unidad),
+        _quesito("Divisa del proyecto",    _reparto("divisa"),                               _unidad),
+    ]
+    if any(_figs):
+        st.markdown("<div style='margin-top:6px'></div>", unsafe_allow_html=True)
+        st.markdown("##### 🥧 Composición de la cartera")
+        for _col, _fig in zip(st.columns(3), _figs):
+            if _fig is not None:
+                _col.plotly_chart(_fig, use_container_width=True)
+        st.caption(
+            f"Reparto por **{'valor a precio de emisión (USD)' if _por_valor else 'número de tokens'}** "
+            "de las posiciones vivas" + (date_label or "") + ". "
+            + ("" if _por_valor else
+               "⚠️ Sin tipo de cambio EUR/USD no se pueden sumar ambas divisas, así que se pondera "
+               "por número de tokens; ten en cuenta que los proyectos tienen precios de emisión distintos.")
+        )
+
 # ── Tokens con saldo ─────────────────────────────────────────────────────────
 st.markdown("---")
 st.subheader("✅ Tokens con saldo" + date_label)
@@ -1812,12 +1948,16 @@ if activos:
     rows = []
     for d in sorted(activos.values(), key=lambda x: x["info"]["label"]):
         fecha_fin = get_fecha_fin_display(d["info"], closing_dates)
+        # Etiquetas breves: con la columna de dividendo añadida, los textos largos
+        # ("🏦 Token Inmobiliario Colateralizado", "Fecha real de fin de proyecto")
+        # empujaban la tabla fuera de la vista y obligaban a desplazarse.
         base_row = {
             "Token": d["info"]["label"],
             "Nombre": d["info"]["name"],
-            "Tipo": "🏦 Token Inmobiliario Colateralizado" if d["info"].get("is_aave") else "🏠 Token Inmobiliario",
-            "Fecha real de fin de proyecto": fecha_fin,
-            "Ver en Polygonscan": polygonscan_token_link(d["info"]["address"]),
+            "Tipo": "🏦 En Aave" if d["info"].get("is_aave") else "🏠 En wallet",
+            "Dividendo": dividendo_corto(d["info"].get("tipologia_dividendo")),
+            "Fin proyecto": fecha_fin,
+            "Ver": polygonscan_token_link(d["info"]["address"]),
         }
         if es_multi_wallet:
             # Un token puede estar repartido entre varias wallets: una fila por wallet con saldo.
@@ -1848,14 +1988,22 @@ if activos:
             return "background-color: #ffd6d6; color: #a00000; font-weight: 500"
         return ""
 
-    styled_activos = df_activos.style.applymap(style_fecha_fin, subset=["Fecha real de fin de proyecto"])
+    styled_activos = df_activos.style.applymap(style_fecha_fin, subset=["Fin proyecto"])
     st.dataframe(styled_activos, column_config={
-        "Ver en Polygonscan": st.column_config.LinkColumn(width="small"),
-        "Nº mov.": st.column_config.NumberColumn(width="small"),
-        "Tipo": st.column_config.TextColumn(width="small"),
-        "Saldo": st.column_config.NumberColumn(width="small"),
-        "Wallet": st.column_config.TextColumn(width="small"),
-        "Fecha real de fin de proyecto": st.column_config.TextColumn(width="medium"),
+        "Token":        st.column_config.TextColumn(width="small"),
+        "Nombre":       st.column_config.TextColumn(width="small"),
+        "Tipo":         st.column_config.TextColumn(width="small",
+                            help="🏠 En wallet: el token está en la wallet · "
+                                 "🏦 En Aave: depositado como garantía (colateralizado)"),
+        "Dividendo":    st.column_config.TextColumn(width="medium",
+                            help="Cómo reparte el proyecto sus rendimientos"),
+        "Fin proyecto": st.column_config.TextColumn(width="small",
+                            help="Fecha real de fin de proyecto, o el estado del "
+                                 "proyecto mientras no la tenga"),
+        "Saldo":        st.column_config.NumberColumn(width="small"),
+        "Nº mov.":      st.column_config.NumberColumn(width="small"),
+        "Wallet":       st.column_config.TextColumn(width="small"),
+        "Ver":          st.column_config.LinkColumn(width="small", display_text="Polygonscan"),
     }, hide_index=True, use_container_width=True)
     if es_multi_wallet:
         st.caption("Un mismo token puede aparecer en varias filas si está repartido entre distintas wallets.")
