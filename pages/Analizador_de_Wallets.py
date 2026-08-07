@@ -234,6 +234,7 @@ def load_tokens() -> dict:
                             "tipologia_explotacion": _col_maestro(row, "Tipología de explotación", 15),
                             "estado":                _col_maestro(row, "ESTADO", 2),
                             "fecha_fin_estimada":    _col_maestro(row, "Estimación fecha fin desde Financiación", 8),
+                            "fecha_lanzamiento":     _col_maestro(row, "LANZAMIENTO", 3),
                         }
         except Exception:
             pass
@@ -579,6 +580,7 @@ def process_transfers(transfers: list, wallet: str, known_tokens: dict, reental_
                 "tipologia_explotacion": original_info.get("tipologia_explotacion", ""),
                 "estado":                original_info.get("estado", ""),
                 "fecha_fin_estimada":    original_info.get("fecha_fin_estimada", ""),
+                "fecha_lanzamiento":     original_info.get("fecha_lanzamiento", ""),
             }
             token_data[contract]["movements"].append({
                 "fecha": datetime.utcfromtimestamp(int(tx["timeStamp"])),
@@ -1903,6 +1905,11 @@ if activos:
         )
         return fig
 
+    BANDERAS = {"españa": "🇪🇸", "usa": "🇺🇸", "méxico": "🇲🇽", "mexico": "🇲🇽",
+                "república dominicana": "🇩🇴", "republica dominicana": "🇩🇴",
+                "argentina": "🇦🇷", "emiratos árabes": "🇦🇪", "emiratos arabes": "🇦🇪",
+                "global": "🌍"}
+
     _unidad = "valor USD" if _por_valor else "tokens"
     _figs = [
         _quesito("Tipología de dividendo", _reparto("tipologia_dividendo", dividendo_corto), _unidad),
@@ -1921,6 +1928,137 @@ if activos:
             + ("" if _por_valor else
                "⚠️ Sin tipo de cambio EUR/USD no se pueden sumar ambas divisas, así que se pondera "
                "por número de tokens; ten en cuenta que los proyectos tienen precios de emisión distintos.")
+        )
+
+    # ── Línea de tiempo: vencimientos esperados ──────────────────────────────
+    _cierres_tl = load_closing_dates()
+
+    def _fecha_maestro(s):
+        """Las fechas del maestro vienen sin cero a la izquierda (4/5/2027)."""
+        s = (s or "").strip()
+        for fmt in ("%d/%m/%Y", "%d/%m/%y"):
+            try:
+                return datetime.strptime(s, fmt).date()
+            except Exception:
+                pass
+        return None
+
+    _hoy = date.today()
+    _tl = []
+    for _d in activos.values():
+        _info = _d["info"]
+        _movs = [m for m in _d["movements"]
+                 if not use_date_filter or m["fecha"].date() <= cutoff]
+        if not _movs:
+            continue
+        _addr = _info.get("address", "").lower()
+        _und  = (_info.get("underlying_address") or "").lower()
+        _ent  = _cierres_tl.get(_addr) or _cierres_tl.get(_und) or {}
+        # La fecha real manda sobre la estimada, pero se distingue cuál es cada
+        # una: dar una estimación por hecho consumado seria engañoso.
+        _fin_real = _fecha_maestro(_ent.get("fecha", ""))
+        _fin = _fin_real or _fecha_maestro(_info.get("fecha_fin_estimada"))
+        if not _fin:
+            continue
+        _entrada = _movs[0]["fecha"].date()
+        if _fin <= _entrada:
+            continue
+        # El avance se mide sobre la vida del PROYECTO (lanzamiento → fin), no
+        # sobre la tenencia: quien compró en P2P a mitad de camino no está al 0 %.
+        _lanz = _fecha_maestro(_info.get("fecha_lanzamiento"))
+        _ini_avance = _lanz if (_lanz and _lanz < _fin) else _entrada
+        _pct = (_hoy - _ini_avance).days / max(1, (_fin - _ini_avance).days) * 100
+        _pct = min(100.0, max(0.0, _pct))
+        _cerrado = (_ent.get("estado", "") or "").upper() == "CERRADO"
+        _vencido = _fin < _hoy and not _cerrado
+        _tl.append({
+            "label": _info["label"], "nombre": _info.get("name", ""),
+            "entrada": _entrada, "fin": _fin, "pct": _pct,
+            "estimada": _fin_real is None, "vencido": _vencido, "cerrado": _cerrado,
+            "bandera": BANDERAS.get((_info.get("ubicacion") or "").strip().lower(), "🏠"),
+            "ubicacion": _info.get("ubicacion") or "—",
+            "saldo": _d["balance_display"],
+            "base_avance": "lanzamiento del proyecto" if _ini_avance is _lanz else "tu entrada",
+        })
+
+    if _tl:
+        _tl.sort(key=lambda r: r["entrada"])
+        _ejes  = [f"{i+1}. {r['bandera']} {r['label']}" for i, r in enumerate(_tl)]
+        _x0    = min(r["entrada"] for r in _tl)
+        _x1    = max(r["fin"] for r in _tl)
+        _margen = timedelta(days=max(30, (_x1 - _x0).days * 0.03))
+        _ini, _fin_eje = _x0 - _margen, _x1 + _margen
+        _MS = 86400000   # un día en milisegundos: el eje de fechas mide en ms
+
+        def _color(r):
+            if r["cerrado"]:  return "#94a3b8"
+            if r["vencido"]:  return "#ef4444"
+            if r["pct"] >= 85: return "#f97316"
+            if r["pct"] >= 60: return "#f5a623"
+            return "#10b981"
+
+        def _texto(r):
+            # Etiqueta breve a propósito: en un proyecto corto la barra es
+            # estrecha y una frase larga se saldría fuera, donde además pierde
+            # el contraste del relleno de color.
+            estado = ("cerrado" if r["cerrado"] else
+                      "sobrepasado" if r["vencido"] else f"{r['pct']:.0f}%")
+            return (f"{r['entrada'].strftime('%d/%m/%Y')} → "
+                    f"{r['fin'].strftime('%d/%m/%Y')} · {estado}")
+
+        fig_tl = go.Figure()
+        # Carril de fondo: da referencia visual de dónde cae cada barra en el eje.
+        fig_tl.add_trace(go.Bar(
+            y=_ejes, x=[(_fin_eje - _ini).days * _MS] * len(_tl), base=_ini,
+            orientation="h", marker=dict(color="#eef2f7"),
+            hoverinfo="skip", showlegend=False,
+        ))
+        fig_tl.add_trace(go.Bar(
+            y=_ejes, x=[(r["fin"] - r["entrada"]).days * _MS for r in _tl],
+            base=[r["entrada"] for r in _tl], orientation="h",
+            marker=dict(color=[_color(r) for r in _tl],
+                        line=dict(color="rgba(255,255,255,.85)", width=1)),
+            text=[_texto(r) for r in _tl], textposition="auto",
+            insidetextanchor="start",
+            insidetextfont=dict(size=10, color="#ffffff"),
+            # Si aun así no cabe, Plotly la saca fuera de la barra: allí el fondo
+            # es claro y el blanco desaparecería, así que se pinta oscura.
+            outsidetextfont=dict(size=10, color="#334155"),
+            cliponaxis=False,
+            customdata=[[r["nombre"], r["ubicacion"], r["saldo"],
+                         "estimada" if r["estimada"] else "real", r["base_avance"]] for r in _tl],
+            hovertemplate=("<b>%{customdata[0]}</b><br>%{customdata[1]} · "
+                           "saldo %{customdata[2]:,.4f} tokens<br>"
+                           "fecha de fin %{customdata[3]}<br>"
+                           "avance medido desde %{customdata[4]}<extra></extra>"),
+            showlegend=False,
+        ))
+        fig_tl.add_vline(x=_hoy.strftime("%Y-%m-%d"), line=dict(color="#0f172a", width=1.5, dash="dash"),
+                         annotation_text=f"Hoy · {_hoy.strftime('%d/%m/%Y')}",
+                         annotation_position="top", annotation_font=dict(size=10))
+        fig_tl.update_layout(
+            barmode="overlay", bargap=0.34,
+            # Sin esto Plotly encoge el texto hasta hacerlo ilegible en las
+            # barras estrechas en vez de reubicarlo.
+            uniformtext=dict(minsize=9, mode="show"),
+            xaxis=dict(type="date", range=[str(_ini), str(_fin_eje)], side="top",
+                       showgrid=True, gridcolor="#e2e8f0", tickformat="%b %Y"),
+            yaxis=dict(autorange="reversed", tickfont=dict(size=11)),
+            height=max(260, 40 * len(_tl) + 110),
+            margin=dict(t=54, b=20, l=8, r=16),
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        )
+        st.markdown("<div style='margin-top:6px'></div>", unsafe_allow_html=True)
+        st.markdown("##### 📅 Línea de tiempo — vencimientos esperados")
+        st.plotly_chart(fig_tl, use_container_width=True)
+        _n_est = sum(1 for r in _tl if r["estimada"])
+        st.caption(
+            f"De tu entrada en cada proyecto hasta su fecha de fin, ordenado por fecha de entrada. "
+            f"El color indica cercanía al vencimiento: 🟢 holgado · 🟡 >60 % · 🟠 >85 % · "
+            f"🔴 fecha estimada sobrepasada · ⚪ cerrado. "
+            + (f"**{_n_est} de {len(_tl)}** usan fecha **estimada** (el resto ya tiene fecha real); "
+               "pásalo por encima para ver cuál es cada una. " if _n_est else "")
+            + "El porcentaje mide el avance del **proyecto** (desde su lanzamiento), no el de tu tenencia."
         )
 
 # ── Tokens con saldo ─────────────────────────────────────────────────────────
