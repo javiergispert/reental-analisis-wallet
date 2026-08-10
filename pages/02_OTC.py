@@ -24,6 +24,7 @@ from utils import fetch_all_account_txs, fetch_all_token_txs, load_master_projec
 # respuesta sea hexadecimal. Reimplementarlas aquí fue lo que hizo que un error
 # de la API se convirtiera en "saldo desconocido".
 import aave_lend as _al
+import otc_saldos as _saldos
 
 # ── Constantes ────────────────────────────────────────────────────────────────
 
@@ -35,8 +36,6 @@ CACHE_TTL_SECS   = 3600
 POLYSCAN_TX_URL  = "https://polygonscan.com/tx/"
 EXCHANGE_API_URL = "https://open.er-api.com/v6/latest/EUR"
 OTC_ADMIN_PIN    = os.getenv("OTC_ADMIN_PIN", "1234")
-# Pool de Aave del mercado de colateral inmobiliario de Reental.
-AAVE_POOL        = "0x67dc8037db6309dd5571d82c65f5f593f7da1505"
 SPREADSHEET_ID   = "13Q0n7egbAIJSU9UvwwDucd3MUQ48Q44eoMwsPT-PmGs"
 TAB_RESERVAS     = "Reservas"
 TAB_OFERTAS      = "Ofertas"
@@ -246,90 +245,10 @@ def fetch_token_balance(wallet: str, token_address: str, api_key: str) -> float:
     return round(bal, 6)
 
 
-@st.cache_data(show_spinner=False, ttl=86400)
-def fetch_atoken_de(token_address: str, api_key: str) -> str:
-    """Dirección del aToken con el que Aave representa el colateral de este token.
-
-    Se pregunta al pool (`getReserveData`) en vez de fijar una tabla: los
-    proyectos nuevos entran solos. La respuesta se valida comprobando que ese
-    aToken declara como subyacente el token que le pasamos, así que un cambio en
-    el orden de los campos del struct se detecta en vez de devolver basura.
-
-    Se usa `aave_lend.eth_call`, que limita el ritmo, reintenta y —clave— exige
-    que la respuesta empiece por '0x'. Al construir esto a mano, un mensaje de
-    error de la API ("Max rate limit reached") llegaba hasta un int(x, 16) que
-    reventaba, y el fallo se traducía en "saldo desconocido".
-    """
-    if not api_key or not token_address:
-        return ""
-    res = _al.eth_call(AAVE_POOL, _al.SEL_GET_RESERVE_DATA + _al._addr_arg(token_address), api_key)
-    if len(res) < 66:
-        return ""
-    palabras = [res[2:][i:i + 64] for i in range(0, len(res[2:]), 64)]
-    if len(palabras) < 9:
-        return ""
-    atoken = "0x" + palabras[8][-40:]
-    if int(atoken, 16) == 0:
-        return ""      # el proyecto no está listado en el pool: no hay colateral posible
-    und = _al.underlying_asset(atoken, api_key)
-    return atoken if und and und[-40:] == token_address.lower()[2:] else ""
-
-
-@st.cache_data(show_spinner=False, ttl=CACHE_TTL_SECS)
-def fetch_token_colateralizado(wallet: str, token_address: str, api_key: str) -> float:
-    """Tokens del proyecto que el inversor tiene depositados como garantía en Aave.
-
-    Siguen siendo suyos y puede recuperarlos, así que a efectos de una venta OTC
-    cuentan igual que los que tiene sueltos en la wallet.
-
-    Devuelve -1.0 solo si la consulta falla. Que el proyecto no esté listado en
-    Aave NO es un fallo: son 0 tokens colateralizados.
-    """
-    if not api_key:
-        return -1.0
-    atoken = fetch_atoken_de(token_address, api_key)
-    if not atoken:
-        return 0.0
-    res = _al.eth_call(atoken, "0x70a08231" + _al._addr_arg(wallet), api_key)
-    if not res:
-        return -1.0
-    if res == "0x":
-        return 0.0
-    try:
-        return round(int(res, 16) / 1e18, 6)
-    except (TypeError, ValueError):
-        return -1.0
-
-
 def saldo_efectivo(wallet: str, token_address: str, api_key: str) -> dict:
-    """Tokens que el inversor puede vender realmente: los de su wallet MÁS los
-    que tiene colateralizados en Aave. Sin esto una posición íntegramente
-    colateralizada se veía como saldo cero y marcaba en rojo una oferta válida.
-
-    `ok=False` significa que la cadena no se pudo consultar; el llamante debe
-    tratarlo como «desconocido», nunca como cero. `motivo` dice QUÉ falló: sin
-    eso, un saldo en blanco es indistinguible de un error y no hay por dónde
-    empezar a mirar.
-    """
-    w = (wallet or "").strip().lower()
-    if not (w.startswith("0x") and len(w) == 42):
-        return {"ok": False, "en_wallet": 0.0, "colateral": 0.0, "total": 0.0,
-                "motivo": f"La wallet registrada en la oferta no es una dirección válida: «{wallet}»."}
-    if not api_key:
-        return {"ok": False, "en_wallet": 0.0, "colateral": 0.0, "total": 0.0,
-                "motivo": "Falta ETHERSCAN_API_KEY en la configuración del servidor."}
-    en_wallet = fetch_token_balance(w, token_address, api_key)
-    colateral = fetch_token_colateralizado(w, token_address, api_key)
-    fallos = []
-    if en_wallet < 0:
-        fallos.append("el saldo en la wallet")
-    if colateral < 0:
-        fallos.append("el colateral en Aave")
-    if fallos:
-        return {"ok": False, "en_wallet": 0.0, "colateral": 0.0, "total": 0.0,
-                "motivo": f"No se pudo leer {' ni '.join(fallos)} en la cadena."}
-    return {"ok": True, "en_wallet": max(0.0, en_wallet), "colateral": colateral,
-            "total": round(max(0.0, en_wallet) + colateral, 6), "motivo": ""}
+    """Delegado al módulo común: la disponibilidad de una oferta la consultan
+    también Análisis P2P, y dos implementaciones acabarían discrepando."""
+    return _saldos.saldo_efectivo(wallet, token_address, api_key, fetch_token_balance)
 
 
 # ── Botón de refresco manual ──────────────────────────────────────────────────
@@ -451,52 +370,9 @@ def calcular_disponibles(balances: dict, reservas: list) -> dict:
         }
     return result
 
-def reservado_de_oferta(oferta_id: str, reservas_: list) -> float:
-    """Tokens ya comprometidos contra una oferta concreta de tercero."""
-    return sum(float(r.get("n_tokens", 0)) for r in reservas_
-               if r.get("estado") not in ("completada", "cancelada")
-               and r.get("tipo_origen") == "tercero"
-               and r.get("oferta_id") == oferta_id)
-
-
 def estado_oferta(o: dict) -> dict:
-    """Estado real de una oferta de tercero cruzando lo publicado con la cadena.
-
-    Manda la cifra MENOR entre lo que el inversor tiene de verdad y lo que se
-    ofertó: antes prevalecía siempre lo ofertado, así que una oferta seguía
-    apareciendo entera aunque el inversor ya hubiera vendido sus tokens por otra
-    vía, y el equipo la trabajaba sin saberlo.
-    """
-    addr     = o["token_address"].lower()
-    n_oferta = float(o["n_tokens"])
-    sal      = saldo_efectivo(o["wallet_inversor"].lower(), addr, API_KEY)
-    reservado = reservado_de_oferta(o.get("id"), reservas)
-
-    if not sal["ok"]:
-        # Sin lectura fiable de la cadena no se afirma nada: ni verde ni rojo.
-        return {"ok": False, "alerta": "⚠️", "en_wallet": 0.0, "colateral": 0.0,
-                "saldo_real": 0.0, "reservado": reservado, "disponible": 0.0,
-                "respaldo": 0.0, "motivo": sal.get("motivo", "No se pudo consultar la cadena.")}
-
-    respaldo   = min(n_oferta, sal["total"])          # la cifra menor manda
-    disponible = max(0.0, respaldo - reservado)
-    falta      = n_oferta - sal["total"]
-
-    if falta > 0.001:
-        alerta = "🔴"
-        motivo = (f"El inversor tiene {sal['total']:,.3f} tokens y la oferta es de "
-                  f"{n_oferta:,.3f}: faltan {falta:,.3f}.")
-    elif disponible <= 0.001:
-        alerta = "🟡"
-        motivo = "La oferta está íntegramente reservada."
-    else:
-        alerta = "🟢"
-        motivo = ""
-    return {"ok": True, "alerta": alerta, "en_wallet": sal["en_wallet"],
-            "colateral": sal["colateral"], "saldo_real": sal["total"],
-            "reservado": reservado, "disponible": disponible,
-            "respaldo": respaldo, "motivo": motivo}
-
+    """Estado real de una oferta de tercero. La lógica vive en `otc_saldos`."""
+    return _saldos.estado_oferta(o, reservas, API_KEY, fetch_token_balance)
 
 saldos       = calcular_disponibles(otc_balances, reservas)
 precios_otc  = load_precios_otc()

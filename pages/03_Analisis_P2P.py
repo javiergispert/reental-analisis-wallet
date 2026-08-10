@@ -29,7 +29,11 @@ from reportlab.platypus import (
     HRFlowable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
 )
 
-from utils import fetch_all_token_txs, load_master_projects, parse_pct, parse_float_val, strip_accents
+from utils import (fetch_all_account_txs, fetch_all_token_txs, load_master_projects,
+                   parse_pct, parse_float_val, strip_accents)
+# Disponibilidad de las ofertas de terceros: misma fuente que la página OTC, para
+# que las dos respondan lo mismo a "cuántos tokens se pueden vender de verdad".
+import otc_saldos as _saldos
 
 # ── Constantes ────────────────────────────────────────────────────────────────
 OTC_WALLET     = os.getenv("OTC_WALLET", "0xce0719ec1bda336ba069c6961ad167767829301a").lower()
@@ -157,6 +161,12 @@ def construir_disponibilidad(master_df: pd.DataFrame) -> list:
     for r in reservas:
         if r.get("estado") in ("completada", "cancelada"):
             continue
+        # Las reservas contra ofertas de TERCEROS salen de la wallet del
+        # inversor, no de la custodia de Reental: contarlas aquí hacía que el
+        # stock propio apareciera mermado por tokens que nunca fueron suyos.
+        # Las reservas antiguas no llevan `tipo_origen` y son todas de Reental.
+        if r.get("tipo_origen") == "tercero":
+            continue
         addr = r.get("token_address", "").lower()
         reservado[addr] = reservado.get(addr, 0.0) + float(r.get("n_tokens", 0))
 
@@ -189,7 +199,6 @@ def construir_disponibilidad(master_df: pd.DataFrame) -> list:
     for o in load_ofertas_otc():
         if o.get("estado") != "activa":
             continue
-        n_tokens = float(o.get("n_tokens", 0))
         precio   = float(o.get("precio_acordado") or o.get("precio_venta") or 0)
         addr     = o.get("token_address", "").lower()
         pid      = o.get("proyecto_id", "")
@@ -199,17 +208,52 @@ def construir_disponibilidad(master_df: pd.DataFrame) -> list:
             proj = project_by_addr.get(addr, {})
             pid  = proj.get("id", "")
 
-        if n_tokens < 0.001 or precio <= 0 or not pid:
+        if precio <= 0 or not pid:
             continue
+
+        # Lo vendible NO es la cifra que publicó el comercial, sino la MENOR
+        # entre esa y el saldo real del inversor (wallet + colateral en Aave),
+        # descontando lo ya reservado. Tomar `n_tokens` sin comprobar metía en
+        # el ranking oportunidades que no se podían ejecutar.
+        est = _saldos.estado_oferta(o, reservas, API_KEY, _saldo_en_wallet)
+        if not est["ok"]:
+            continue                    # sin saldo verificable no se ofrece
+        if est["disponible"] < 0.001:
+            continue                    # agotada o sin respaldo en la cadena
+
         disponibles.append({
             "project_id":        pid,
             "token_address":     addr,
-            "tokens_disponibles": n_tokens,
+            "tokens_disponibles": est["disponible"],
             "precio_p2p":        precio,
             "fuente":            "Tercero",
         })
 
     return disponibles
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _saldo_en_wallet(wallet: str, token_address: str, api_key: str) -> float:
+    """Tokens del proyecto sueltos en la wallet del inversor. -1.0 si falla.
+    Pagina, porque la consulta directa se corta a 10.000 resultados."""
+    w = wallet.lower()
+    try:
+        txs = fetch_all_account_txs(w, api_key, action="tokentx",
+                                    contractaddress=token_address.lower())
+    except Exception:
+        return -1.0
+    if txs is None:
+        return -1.0
+    bal = 0.0
+    for tx in txs:
+        dec   = int(tx.get("tokenDecimal") or 18)
+        value = int(tx["value"]) / (10 ** dec)
+        to_, from_ = tx["to"].lower(), tx["from"].lower()
+        if to_ == w and from_ != w:
+            bal += value
+        elif from_ == w and to_ != w:
+            bal -= value
+    return round(bal, 6)
 
 
 def _load_precios_otc_cached() -> dict:
