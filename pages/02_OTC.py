@@ -20,6 +20,10 @@ import io
 from datetime import datetime, timezone
 
 from utils import fetch_all_account_txs, fetch_all_token_txs, load_master_projects, strip_accents
+# Primitivas on-chain compartidas: limitan el ritmo, reintentan y validan que la
+# respuesta sea hexadecimal. Reimplementarlas aquí fue lo que hizo que un error
+# de la API se convirtiera en "saldo desconocido".
+import aave_lend as _al
 
 # ── Constantes ────────────────────────────────────────────────────────────────
 
@@ -250,32 +254,25 @@ def fetch_atoken_de(token_address: str, api_key: str) -> str:
     proyectos nuevos entran solos. La respuesta se valida comprobando que ese
     aToken declara como subyacente el token que le pasamos, así que un cambio en
     el orden de los campos del struct se detecta en vez de devolver basura.
+
+    Se usa `aave_lend.eth_call`, que limita el ritmo, reintenta y —clave— exige
+    que la respuesta empiece por '0x'. Al construir esto a mano, un mensaje de
+    error de la API ("Max rate limit reached") llegaba hasta un int(x, 16) que
+    reventaba, y el fallo se traducía en "saldo desconocido".
     """
     if not api_key or not token_address:
         return ""
-    try:
-        r = requests.get(ETHERSCAN_BASE, params={
-            "chainid": POLYGON_CHAIN, "module": "proxy", "action": "eth_call",
-            "to": AAVE_POOL, "data": "0x35ea6a75" + "0" * 24 + token_address.lower()[2:],
-            "tag": "latest", "apikey": api_key}, timeout=20)
-        res = r.json().get("result") or ""
-        if len(res) < 66:
-            return ""
-        palabras = [res[2:][i:i + 64] for i in range(0, len(res[2:]), 64)]
-        if len(palabras) < 9:
-            return ""
-        atoken = "0x" + palabras[8][-40:]
-        if int(atoken, 16) == 0:
-            return ""
-        r2 = requests.get(ETHERSCAN_BASE, params={
-            "chainid": POLYGON_CHAIN, "module": "proxy", "action": "eth_call",
-            "to": atoken, "data": "0xb16a19de", "tag": "latest", "apikey": api_key}, timeout=20)
-        und = r2.json().get("result") or ""
-        if len(und) >= 42 and und[-40:].lower() == token_address.lower()[2:]:
-            return atoken
-    except Exception:
-        pass
-    return ""
+    res = _al.eth_call(AAVE_POOL, _al.SEL_GET_RESERVE_DATA + _al._addr_arg(token_address), api_key)
+    if len(res) < 66:
+        return ""
+    palabras = [res[2:][i:i + 64] for i in range(0, len(res[2:]), 64)]
+    if len(palabras) < 9:
+        return ""
+    atoken = "0x" + palabras[8][-40:]
+    if int(atoken, 16) == 0:
+        return ""      # el proyecto no está listado en el pool: no hay colateral posible
+    und = _al.underlying_asset(atoken, api_key)
+    return atoken if und and und[-40:] == token_address.lower()[2:] else ""
 
 
 @st.cache_data(show_spinner=False, ttl=CACHE_TTL_SECS)
@@ -284,20 +281,23 @@ def fetch_token_colateralizado(wallet: str, token_address: str, api_key: str) ->
 
     Siguen siendo suyos y puede recuperarlos, así que a efectos de una venta OTC
     cuentan igual que los que tiene sueltos en la wallet.
+
+    Devuelve -1.0 solo si la consulta falla. Que el proyecto no esté listado en
+    Aave NO es un fallo: son 0 tokens colateralizados.
     """
+    if not api_key:
+        return -1.0
     atoken = fetch_atoken_de(token_address, api_key)
     if not atoken:
         return 0.0
+    res = _al.eth_call(atoken, "0x70a08231" + _al._addr_arg(wallet), api_key)
+    if not res:
+        return -1.0
+    if res == "0x":
+        return 0.0
     try:
-        r = requests.get(ETHERSCAN_BASE, params={
-            "chainid": POLYGON_CHAIN, "module": "proxy", "action": "eth_call",
-            "to": atoken, "data": "0x70a08231" + "0" * 24 + wallet.lower()[2:],
-            "tag": "latest", "apikey": api_key}, timeout=20)
-        res = r.json().get("result") or ""
-        if not res or res == "0x":
-            return 0.0
         return round(int(res, 16) / 1e18, 6)
-    except Exception:
+    except (TypeError, ValueError):
         return -1.0
 
 
@@ -307,14 +307,29 @@ def saldo_efectivo(wallet: str, token_address: str, api_key: str) -> dict:
     colateralizada se veía como saldo cero y marcaba en rojo una oferta válida.
 
     `ok=False` significa que la cadena no se pudo consultar; el llamante debe
-    tratarlo como «desconocido», nunca como cero.
+    tratarlo como «desconocido», nunca como cero. `motivo` dice QUÉ falló: sin
+    eso, un saldo en blanco es indistinguible de un error y no hay por dónde
+    empezar a mirar.
     """
-    en_wallet = fetch_token_balance(wallet, token_address, api_key)
-    colateral = fetch_token_colateralizado(wallet, token_address, api_key)
-    if en_wallet < 0 or colateral < 0:
-        return {"ok": False, "en_wallet": 0.0, "colateral": 0.0, "total": 0.0}
+    w = (wallet or "").strip().lower()
+    if not (w.startswith("0x") and len(w) == 42):
+        return {"ok": False, "en_wallet": 0.0, "colateral": 0.0, "total": 0.0,
+                "motivo": f"La wallet registrada en la oferta no es una dirección válida: «{wallet}»."}
+    if not api_key:
+        return {"ok": False, "en_wallet": 0.0, "colateral": 0.0, "total": 0.0,
+                "motivo": "Falta ETHERSCAN_API_KEY en la configuración del servidor."}
+    en_wallet = fetch_token_balance(w, token_address, api_key)
+    colateral = fetch_token_colateralizado(w, token_address, api_key)
+    fallos = []
+    if en_wallet < 0:
+        fallos.append("el saldo en la wallet")
+    if colateral < 0:
+        fallos.append("el colateral en Aave")
+    if fallos:
+        return {"ok": False, "en_wallet": 0.0, "colateral": 0.0, "total": 0.0,
+                "motivo": f"No se pudo leer {' ni '.join(fallos)} en la cadena."}
     return {"ok": True, "en_wallet": max(0.0, en_wallet), "colateral": colateral,
-            "total": round(max(0.0, en_wallet) + colateral, 6)}
+            "total": round(max(0.0, en_wallet) + colateral, 6), "motivo": ""}
 
 
 # ── Botón de refresco manual ──────────────────────────────────────────────────
@@ -461,7 +476,7 @@ def estado_oferta(o: dict) -> dict:
         # Sin lectura fiable de la cadena no se afirma nada: ni verde ni rojo.
         return {"ok": False, "alerta": "⚠️", "en_wallet": 0.0, "colateral": 0.0,
                 "saldo_real": 0.0, "reservado": reservado, "disponible": 0.0,
-                "respaldo": 0.0, "motivo": "No se pudo consultar la cadena."}
+                "respaldo": 0.0, "motivo": sal.get("motivo", "No se pudo consultar la cadena.")}
 
     respaldo   = min(n_oferta, sal["total"])          # la cifra menor manda
     disponible = max(0.0, respaldo - reservado)
@@ -583,7 +598,7 @@ if ofertas_activas:
     st.markdown("#### 👤 Tokens de terceros publicados para venta")
     st.caption("Estas ofertas son de inversores particulares y NO se suman al inventario de Reental.")
 
-    filas_of = []
+    filas_of, avisos_of = [], []
     for o in ofertas_activas:
         addr       = o["token_address"].lower()
         proj       = project_by_addr.get(addr, {})
@@ -591,26 +606,32 @@ if ofertas_activas:
         n_oferta   = float(o["n_tokens"])
         fecha_fin  = proj.get("fecha_fin")
 
+        # Orden pensado para leer de izquierda a derecha: primero QUIÉN y QUÉ,
+        # luego lo accionable (reservado/disponible) y al final el respaldo del
+        # dato (de dónde sale ese disponible) y la ficha del proyecto.
         filas_of.append({
             "":              est["alerta"],
             "Proyecto":      o["proyecto_nombre"],
             "ID":            o["proyecto_id"],
             "Inversor":      o["inversor"],
             "Comercial":     o["comercial"],
-            "Ubicación":     proj.get("ubicacion", "—"),
-            "Estado":        proj.get("estado", "—"),
             "Fin estimado":  fecha_fin.strftime("%Y/%m") if fecha_fin else "—",
             "Tipo renta":    proj.get("tipo_renta", "—"),
             "Divisa":        o["divisa"],
             "P. emisión":    proj.get("precio_emision") or 0,
             "P. OTC mín.":   o["precio_venta"],
-            "En oferta":     n_oferta,
-            "En wallet":     est["en_wallet"] if est["ok"] else None,
-            "Colateral":     est["colateral"] if est["ok"] else None,
-            "Saldo real":    est["saldo_real"] if est["ok"] else None,
             "Reservados":    est["reservado"],
             "Disponibles":   est["disponible"] if est["ok"] else None,
+            "En wallet":     est["en_wallet"] if est["ok"] else None,
+            "En colateral":  est["colateral"] if est["ok"] else None,
+            "Saldo":         est["saldo_real"] if est["ok"] else None,
+            "En oferta":     n_oferta,
+            "Estado":        proj.get("estado", "—"),
+            "Ubicación":     proj.get("ubicacion", "—"),
         })
+
+        if not est["ok"]:
+            avisos_of.append(f"**{o['proyecto_nombre']}** ({o['inversor']}): {est['motivo']}")
 
     def color_saldo_real(val):
         if val is None: return "color:#94a3b8"
@@ -619,7 +640,7 @@ if ofertas_activas:
     df_of = pd.DataFrame(filas_of)
     st.dataframe(
         df_of.style
-        .applymap(color_saldo_real,  subset=["Saldo real"])
+        .applymap(color_saldo_real,  subset=["Saldo"])
         .applymap(color_precio_otc,  subset=["P. OTC mín."])
         .applymap(color_reservado,   subset=["Reservados"])
         .applymap(color_disponible,  subset=["Disponibles"])
@@ -630,14 +651,32 @@ if ofertas_activas:
             # Estas cuatro son None cuando la cadena no se pudo consultar: se
             # muestran como «—» en vez de fingir un cero que se leería como
             # «el inversor no tiene nada».
-            "En wallet":   lambda v: f"{v:,.3f}" if v is not None else "—",
-            "Colateral":   lambda v: f"{v:,.3f}" if v is not None else "—",
-            "Saldo real":  lambda v: f"{v:,.3f}" if v is not None else "—",
-            "Disponibles": lambda v: f"{v:,.3f}" if v is not None else "—",
+            "En wallet":    lambda v: f"{v:,.3f}" if v is not None else "—",
+            "En colateral": lambda v: f"{v:,.3f}" if v is not None else "—",
+            "Saldo":        lambda v: f"{v:,.3f}" if v is not None else "—",
+            "Disponibles":  lambda v: f"{v:,.3f}" if v is not None else "—",
             "Reservados":  "{:,.3f}",
         }),
         hide_index=True, use_container_width=True,
     )
+
+    st.caption(
+        "🟢 con tokens libres · 🟡 íntegramente reservada · 🔴 el inversor ya no tiene los tokens "
+        "ofertados · ⚠️ no se ha podido comprobar. **Disponibles** = la cifra menor entre lo ofertado "
+        "y su saldo real, menos lo reservado. **Saldo** = lo que tiene en la wallet más lo que tiene "
+        "colateralizado en Aave, que también puede vender porque sigue siendo suyo."
+    )
+
+    if avisos_of:
+        # Un «—» sin explicación es indistinguible de «no tiene nada»: aquí se
+        # dice qué lectura falló y en qué oferta, para poder actuar.
+        with st.expander(f"⚠️ {len(avisos_of)} oferta(s) sin saldo verificable — ver motivo", expanded=True):
+            for a in avisos_of:
+                st.markdown(f"- {a}")
+            st.caption(
+                "Mientras no se pueda leer la cadena, estas ofertas no se ofrecen para reservar. "
+                "Si el motivo es una wallet inválida, corrígela editando la oferta."
+            )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
