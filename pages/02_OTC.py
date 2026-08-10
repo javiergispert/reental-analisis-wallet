@@ -19,7 +19,7 @@ import requests
 import io
 from datetime import datetime, timezone
 
-from utils import fetch_all_token_txs, load_master_projects, strip_accents
+from utils import fetch_all_account_txs, fetch_all_token_txs, load_master_projects, strip_accents
 
 # ── Constantes ────────────────────────────────────────────────────────────────
 
@@ -31,6 +31,8 @@ CACHE_TTL_SECS   = 3600
 POLYSCAN_TX_URL  = "https://polygonscan.com/tx/"
 EXCHANGE_API_URL = "https://open.er-api.com/v6/latest/EUR"
 OTC_ADMIN_PIN    = os.getenv("OTC_ADMIN_PIN", "1234")
+# Pool de Aave del mercado de colateral inmobiliario de Reental.
+AAVE_POOL        = "0x67dc8037db6309dd5571d82c65f5f593f7da1505"
 SPREADSHEET_ID   = "13Q0n7egbAIJSU9UvwwDucd3MUQ48Q44eoMwsPT-PmGs"
 TAB_RESERVAS     = "Reservas"
 TAB_OFERTAS      = "Ofertas"
@@ -212,22 +214,21 @@ def fetch_otc_balances(wallet: str, api_key: str) -> tuple:
 
 @st.cache_data(show_spinner=False, ttl=CACHE_TTL_SECS)
 def fetch_token_balance(wallet: str, token_address: str, api_key: str) -> float:
-    """Saldo neto de un token específico en una wallet de tercero (sin aTokens)."""
+    """Tokens del proyecto que el inversor tiene sueltos en su wallet.
+
+    Se apoya en `fetch_all_account_txs`, que pagina: la consulta directa a
+    Etherscan se corta a 10.000 resultados y en una wallet con mucho histórico
+    devolvía un saldo incompleto.
+    """
     wallet = wallet.lower()
     token  = token_address.lower()
-    params = {
-        "chainid": POLYGON_CHAIN, "module": "account", "action": "tokentx",
-        "contractaddress": token, "address": wallet,
-        "startblock": 0, "endblock": 99999999, "sort": "asc", "apikey": api_key,
-    }
     try:
-        data   = requests.get(ETHERSCAN_BASE, params=params, timeout=15).json()
-        result = data.get("result")
-        if not isinstance(result, list):
-            return -1.0  # API devuelve error (rate limit, dirección inválida, etc.)
-        txs = result
+        txs = fetch_all_account_txs(wallet, api_key, action="tokentx",
+                                    contractaddress=token)
     except Exception:
-        return -1.0   # -1 indica error de consulta
+        return -1.0   # -1 indica error de consulta, NO saldo cero
+    if txs is None:
+        return -1.0
     bal = 0.0
     for tx in txs:
         dec   = int(tx.get("tokenDecimal") or 18)
@@ -239,6 +240,81 @@ def fetch_token_balance(wallet: str, token_address: str, api_key: str) -> float:
         elif from_ == wallet and to_ != wallet:
             bal -= value
     return round(bal, 6)
+
+
+@st.cache_data(show_spinner=False, ttl=86400)
+def fetch_atoken_de(token_address: str, api_key: str) -> str:
+    """Dirección del aToken con el que Aave representa el colateral de este token.
+
+    Se pregunta al pool (`getReserveData`) en vez de fijar una tabla: los
+    proyectos nuevos entran solos. La respuesta se valida comprobando que ese
+    aToken declara como subyacente el token que le pasamos, así que un cambio en
+    el orden de los campos del struct se detecta en vez de devolver basura.
+    """
+    if not api_key or not token_address:
+        return ""
+    try:
+        r = requests.get(ETHERSCAN_BASE, params={
+            "chainid": POLYGON_CHAIN, "module": "proxy", "action": "eth_call",
+            "to": AAVE_POOL, "data": "0x35ea6a75" + "0" * 24 + token_address.lower()[2:],
+            "tag": "latest", "apikey": api_key}, timeout=20)
+        res = r.json().get("result") or ""
+        if len(res) < 66:
+            return ""
+        palabras = [res[2:][i:i + 64] for i in range(0, len(res[2:]), 64)]
+        if len(palabras) < 9:
+            return ""
+        atoken = "0x" + palabras[8][-40:]
+        if int(atoken, 16) == 0:
+            return ""
+        r2 = requests.get(ETHERSCAN_BASE, params={
+            "chainid": POLYGON_CHAIN, "module": "proxy", "action": "eth_call",
+            "to": atoken, "data": "0xb16a19de", "tag": "latest", "apikey": api_key}, timeout=20)
+        und = r2.json().get("result") or ""
+        if len(und) >= 42 and und[-40:].lower() == token_address.lower()[2:]:
+            return atoken
+    except Exception:
+        pass
+    return ""
+
+
+@st.cache_data(show_spinner=False, ttl=CACHE_TTL_SECS)
+def fetch_token_colateralizado(wallet: str, token_address: str, api_key: str) -> float:
+    """Tokens del proyecto que el inversor tiene depositados como garantía en Aave.
+
+    Siguen siendo suyos y puede recuperarlos, así que a efectos de una venta OTC
+    cuentan igual que los que tiene sueltos en la wallet.
+    """
+    atoken = fetch_atoken_de(token_address, api_key)
+    if not atoken:
+        return 0.0
+    try:
+        r = requests.get(ETHERSCAN_BASE, params={
+            "chainid": POLYGON_CHAIN, "module": "proxy", "action": "eth_call",
+            "to": atoken, "data": "0x70a08231" + "0" * 24 + wallet.lower()[2:],
+            "tag": "latest", "apikey": api_key}, timeout=20)
+        res = r.json().get("result") or ""
+        if not res or res == "0x":
+            return 0.0
+        return round(int(res, 16) / 1e18, 6)
+    except Exception:
+        return -1.0
+
+
+def saldo_efectivo(wallet: str, token_address: str, api_key: str) -> dict:
+    """Tokens que el inversor puede vender realmente: los de su wallet MÁS los
+    que tiene colateralizados en Aave. Sin esto una posición íntegramente
+    colateralizada se veía como saldo cero y marcaba en rojo una oferta válida.
+
+    `ok=False` significa que la cadena no se pudo consultar; el llamante debe
+    tratarlo como «desconocido», nunca como cero.
+    """
+    en_wallet = fetch_token_balance(wallet, token_address, api_key)
+    colateral = fetch_token_colateralizado(wallet, token_address, api_key)
+    if en_wallet < 0 or colateral < 0:
+        return {"ok": False, "en_wallet": 0.0, "colateral": 0.0, "total": 0.0}
+    return {"ok": True, "en_wallet": max(0.0, en_wallet), "colateral": colateral,
+            "total": round(max(0.0, en_wallet) + colateral, 6)}
 
 
 # ── Botón de refresco manual ──────────────────────────────────────────────────
@@ -342,6 +418,12 @@ def calcular_disponibles(balances: dict, reservas: list) -> dict:
     for r in reservas:
         if r.get("estado") in ("completada", "cancelada"):
             continue
+        # Las reservas contra ofertas de TERCEROS salen de la wallet del
+        # inversor, no del inventario de Reental. Contarlas aquí hacía que el
+        # stock propio apareciera mermado por tokens que nunca fueron suyos.
+        # Las reservas antiguas no llevan `tipo_origen` y son todas de Reental.
+        if r.get("tipo_origen") == "tercero":
+            continue
         addr = r.get("token_address", "").lower()
         reservado[addr] = reservado.get(addr, 0.0) + float(r.get("n_tokens", 0))
     result = {}
@@ -353,6 +435,53 @@ def calcular_disponibles(balances: dict, reservas: list) -> dict:
             "disponible":  max(0.0, data["saldo"] - res),
         }
     return result
+
+def reservado_de_oferta(oferta_id: str, reservas_: list) -> float:
+    """Tokens ya comprometidos contra una oferta concreta de tercero."""
+    return sum(float(r.get("n_tokens", 0)) for r in reservas_
+               if r.get("estado") not in ("completada", "cancelada")
+               and r.get("tipo_origen") == "tercero"
+               and r.get("oferta_id") == oferta_id)
+
+
+def estado_oferta(o: dict) -> dict:
+    """Estado real de una oferta de tercero cruzando lo publicado con la cadena.
+
+    Manda la cifra MENOR entre lo que el inversor tiene de verdad y lo que se
+    ofertó: antes prevalecía siempre lo ofertado, así que una oferta seguía
+    apareciendo entera aunque el inversor ya hubiera vendido sus tokens por otra
+    vía, y el equipo la trabajaba sin saberlo.
+    """
+    addr     = o["token_address"].lower()
+    n_oferta = float(o["n_tokens"])
+    sal      = saldo_efectivo(o["wallet_inversor"].lower(), addr, API_KEY)
+    reservado = reservado_de_oferta(o.get("id"), reservas)
+
+    if not sal["ok"]:
+        # Sin lectura fiable de la cadena no se afirma nada: ni verde ni rojo.
+        return {"ok": False, "alerta": "⚠️", "en_wallet": 0.0, "colateral": 0.0,
+                "saldo_real": 0.0, "reservado": reservado, "disponible": 0.0,
+                "respaldo": 0.0, "motivo": "No se pudo consultar la cadena."}
+
+    respaldo   = min(n_oferta, sal["total"])          # la cifra menor manda
+    disponible = max(0.0, respaldo - reservado)
+    falta      = n_oferta - sal["total"]
+
+    if falta > 0.001:
+        alerta = "🔴"
+        motivo = (f"El inversor tiene {sal['total']:,.3f} tokens y la oferta es de "
+                  f"{n_oferta:,.3f}: faltan {falta:,.3f}.")
+    elif disponible <= 0.001:
+        alerta = "🟡"
+        motivo = "La oferta está íntegramente reservada."
+    else:
+        alerta = "🟢"
+        motivo = ""
+    return {"ok": True, "alerta": alerta, "en_wallet": sal["en_wallet"],
+            "colateral": sal["colateral"], "saldo_real": sal["total"],
+            "reservado": reservado, "disponible": disponible,
+            "respaldo": respaldo, "motivo": motivo}
+
 
 saldos       = calcular_disponibles(otc_balances, reservas)
 precios_otc  = load_precios_otc()
@@ -458,19 +587,12 @@ if ofertas_activas:
     for o in ofertas_activas:
         addr       = o["token_address"].lower()
         proj       = project_by_addr.get(addr, {})
-        saldo_real = fetch_token_balance(o["wallet_inversor"].lower(), addr, API_KEY)
+        est        = estado_oferta(o)
         n_oferta   = float(o["n_tokens"])
         fecha_fin  = proj.get("fecha_fin")
 
-        if saldo_real < 0:
-            alerta = "⚠️ Error"
-        elif saldo_real < n_oferta - 0.001:
-            alerta = "🔴"
-        else:
-            alerta = "🟢"
-
         filas_of.append({
-            "":              alerta,
+            "":              est["alerta"],
             "Proyecto":      o["proyecto_nombre"],
             "ID":            o["proyecto_id"],
             "Inversor":      o["inversor"],
@@ -483,9 +605,11 @@ if ofertas_activas:
             "P. emisión":    proj.get("precio_emision") or 0,
             "P. OTC mín.":   o["precio_venta"],
             "En oferta":     n_oferta,
-            "Saldo real":    max(0.0, saldo_real) if saldo_real >= 0 else None,
-            "Reservados":    0.0,
-            "Disponibles":   n_oferta,
+            "En wallet":     est["en_wallet"] if est["ok"] else None,
+            "Colateral":     est["colateral"] if est["ok"] else None,
+            "Saldo real":    est["saldo_real"] if est["ok"] else None,
+            "Reservados":    est["reservado"],
+            "Disponibles":   est["disponible"] if est["ok"] else None,
         })
 
     def color_saldo_real(val):
@@ -503,9 +627,14 @@ if ofertas_activas:
             "P. emisión":  "{:,.2f}",
             "P. OTC mín.": "{:,.2f}",
             "En oferta":   "{:,.3f}",
+            # Estas cuatro son None cuando la cadena no se pudo consultar: se
+            # muestran como «—» en vez de fingir un cero que se leería como
+            # «el inversor no tiene nada».
+            "En wallet":   lambda v: f"{v:,.3f}" if v is not None else "—",
+            "Colateral":   lambda v: f"{v:,.3f}" if v is not None else "—",
             "Saldo real":  lambda v: f"{v:,.3f}" if v is not None else "—",
+            "Disponibles": lambda v: f"{v:,.3f}" if v is not None else "—",
             "Reservados":  "{:,.3f}",
-            "Disponibles": "{:,.3f}",
         }),
         hide_index=True, use_container_width=True,
     )
@@ -611,17 +740,23 @@ with st.expander("📢 Publicar oferta de token de tercero", expanded=False):
         of_wallet_clean = of_wallet.strip().lower()
         saldo_real_of   = None
         if of_wallet_clean.startswith("0x") and len(of_wallet_clean) == 42:
-            saldo_real_of = fetch_token_balance(of_wallet_clean, of_addr, API_KEY)
-            if saldo_real_of < 0:
-                st.warning("⚠️ No se pudo verificar el saldo en blockchain. Se publicará la oferta igualmente.")
+            _sal_of = saldo_efectivo(of_wallet_clean, of_addr, API_KEY)
+            saldo_real_of = _sal_of["total"] if _sal_of["ok"] else -1.0
+            _col_of = (f" ({_sal_of['en_wallet']:,.3f} en wallet + "
+                       f"{_sal_of['colateral']:,.3f} colateralizados en Aave)"
+                       if _sal_of["ok"] and _sal_of["colateral"] > 0.001 else "")
+            if not _sal_of["ok"]:
+                st.warning("⚠️ No se pudo verificar el saldo en blockchain. Se publicará la oferta "
+                           "igualmente, pero aparecerá sin verificar hasta que la consulta funcione.")
             elif saldo_real_of < of_ntokens - 0.001:
                 st.error(
-                    f"⚠️ El inversor solo tiene **{saldo_real_of:.3f} tokens** de {of_proj.get('nombre','')} "
-                    f"en esa wallet, pero intenta ofrecer **{of_ntokens:.3f}**. "
-                    f"Confirma con el inversor antes de publicar."
+                    f"⚠️ El inversor solo tiene **{saldo_real_of:,.3f} tokens** de "
+                    f"{of_proj.get('nombre','')}{_col_of}, pero intenta ofrecer "
+                    f"**{of_ntokens:,.3f}**. Confirma con el inversor antes de publicar: la oferta "
+                    f"quedará limitada a {saldo_real_of:,.3f} aunque publiques la cifra mayor."
                 )
             else:
-                st.success(f"✅ Saldo verificado: {saldo_real_of:.3f} tokens en wallet.")
+                st.success(f"✅ Saldo verificado: {saldo_real_of:,.3f} tokens disponibles{_col_of}.")
 
         if st.button("📢 Publicar oferta", type="primary", use_container_width=True, key="of_guardar"):
             errores_of = []
@@ -695,7 +830,16 @@ with _exp_reserva:
         }
 
     for o in sorted(ofertas_activas, key=lambda x: x["proyecto_nombre"]):
-        label = f"{PREFIJO_TERCERO} — {o['proyecto_nombre']} ({o['proyecto_id']}) · {o['n_tokens']:,.3f} disp. · {o['inversor']}"
+        # Lo reservable es lo MENOR entre lo ofertado y lo que el inversor tiene
+        # de verdad, ya descontado lo comprometido. Ofrecer la cifra publicada
+        # dejaba reservar tokens que no existían.
+        _est = estado_oferta(o)
+        if not _est["ok"]:
+            continue          # sin saldo verificable no se ofrece para reservar
+        if _est["disponible"] <= 0.001:
+            continue          # agotada o sin respaldo: fuera del selector
+        label = (f"{PREFIJO_TERCERO} — {o['proyecto_nombre']} ({o['proyecto_id']}) · "
+                 f"{_est['disponible']:,.3f} disp. · {o['inversor']}")
         opciones_combinadas[label] = {
             "tipo":           "tercero",
             "oferta_id":      o["id"],
@@ -703,7 +847,10 @@ with _exp_reserva:
             "nombre":         o["proyecto_nombre"],
             "id":             o["proyecto_id"],
             "divisa":         o["divisa"],
-            "disponible":     float(o["n_tokens"]),
+            "disponible":     _est["disponible"],
+            "saldo_real":     _est["saldo_real"],
+            "colateral":      _est["colateral"],
+            "n_ofertado":     float(o["n_tokens"]),
             "precio_ref":     float(o["precio_venta"]),
             "precio_min":     0.0,
             "wallet_origen":  o["wallet_inversor"],
@@ -738,9 +885,15 @@ with _exp_reserva:
         precio_otc_min = sel["precio_min"]
 
         if sel["tipo"] == "tercero":
+            _col_txt = (f" · de ellos **{sel.get('colateral', 0):,.3f} colateralizados** en Aave"
+                        if sel.get("colateral", 0) > 0.001 else "")
+            _tope = ("lo ofertado" if sel.get("n_ofertado", 0) <= sel.get("saldo_real", 0)
+                     else "su saldo real")
             st.info(
                 f"👤 **Oferta de tercero** — Token del inversor **{sel.get('inversor_origen','')}** "
-                f"({sel.get('email_origen','')}) · Wallet origen: `{sel.get('wallet_origen','')}`"
+                f"({sel.get('email_origen','')}) · Wallet origen: `{sel.get('wallet_origen','')}`\n\n"
+                f"Ofertó **{sel.get('n_ofertado', 0):,.3f}** y tiene **{sel.get('saldo_real', 0):,.3f}**"
+                f"{_col_txt}. Reservable: **{sel['disponible']:,.3f}** (manda {_tope}, menos lo ya reservado)."
             )
 
         precio_min_efectivo = sel["precio_ref"] if sel["tipo"] == "tercero" else precio_otc_min
@@ -818,12 +971,30 @@ with _exp_reserva:
                         f"**{disp_actual:,.3f} disponibles**."
                     )
             else:
-                saldo_tercero = fetch_token_balance(sel["wallet_origen"], addr_sel, API_KEY)
-                if saldo_tercero >= 0 and float(n_tokens) > saldo_tercero:
-                    errores.append(
-                        f"El inversor solo tiene **{saldo_tercero:.3f} tokens** disponibles en su wallet. "
-                        f"No puedes reservar {n_tokens:.3f}."
-                    )
+                # Se revalida contra la cadena en el momento de guardar, no solo
+                # al pintar el selector: entre una cosa y otra el inversor pudo
+                # mover los tokens. Un fallo de consulta BLOQUEA en vez de dejar
+                # pasar la reserva, que es lo que hacía antes.
+                _oferta_actual = next((x for x in _fresh_list(TAB_OFERTAS)
+                                       if x.get("id") == sel.get("oferta_id")), None)
+                if _oferta_actual is None:
+                    errores.append("La oferta ya no existe: recarga la página.")
+                else:
+                    _e = estado_oferta(_oferta_actual)
+                    if not _e["ok"]:
+                        errores.append(
+                            "No se ha podido verificar el saldo del inversor en la cadena. "
+                            "No se registra la reserva para no comprometer tokens sin confirmar."
+                        )
+                    elif float(n_tokens) > _e["disponible"] + 0.001:
+                        _det = (f"tiene {_e['saldo_real']:,.3f} tokens "
+                                f"({_e['en_wallet']:,.3f} en wallet + {_e['colateral']:,.3f} "
+                                f"colateralizados), la oferta es de {_oferta_actual['n_tokens']:,.3f} "
+                                f"y ya hay {_e['reservado']:,.3f} reservados")
+                        errores.append(
+                            f"Solo quedan **{_e['disponible']:,.3f} tokens** reservables de esta "
+                            f"oferta: el inversor {_det}. No puedes reservar {float(n_tokens):,.3f}."
+                        )
 
             if precio_min_efectivo > 0 and float(precio_acordado) < precio_min_efectivo:
                 origen_precio = "ofertado por el tercero" if sel["tipo"] == "tercero" else "mínimo OTC"
@@ -1247,13 +1418,34 @@ elif _active_tab == "ofertas":
 
             # Saldo real en vivo (solo para activas, para no consumir llamadas API innecesarias)
             if not eliminada_o:
-                saldo_v = fetch_token_balance(o["wallet_inversor"].lower(), o["token_address"].lower(), API_KEY)
-                if saldo_v < 0:
+                _eo = estado_oferta(o)
+                if not _eo["ok"]:
                     oc6.warning("Sin datos")
-                elif saldo_v < float(o["n_tokens"]) - 0.001:
-                    oc6.error(f"⚠️ Solo {saldo_v:.3f} en wallet")
+                elif _eo["alerta"] == "🔴":
+                    oc6.error(f"🔴 Solo {_eo['saldo_real']:,.3f}")
+                elif _eo["alerta"] == "🟡":
+                    oc6.info(f"🟡 {_eo['reservado']:,.3f} reservados")
                 else:
-                    oc6.success(f"✅ {saldo_v:.3f} en wallet")
+                    oc6.success(f"✅ {_eo['disponible']:,.3f} libres")
+                if _eo["ok"] and _eo["motivo"]:
+                    # El aviso va desplegado y con la acción concreta: es la
+                    # pantalla desde la que se decide eliminar o llamar al inversor.
+                    _accion = ("Habla con el inversor para que reponga o ajusta la oferta a la baja."
+                               if _eo["alerta"] == "🔴" else
+                               "Cuando se completen las reservas, elimina la oferta.")
+                    _desglose = (f" Desglose: {_eo['en_wallet']:,.3f} en wallet + "
+                                 f"{_eo['colateral']:,.3f} colateralizados en Aave.")
+                    st.markdown(
+                        f'<div style="background:#fff1f2;border-left:3px solid #dc2626;'
+                        f'padding:6px 10px;border-radius:4px;font-size:0.8rem;margin:2px 0 6px;">'
+                        f'{_eo["motivo"]}{_desglose if _eo["alerta"] == "🔴" else ""} '
+                        f'<em>{_accion}</em></div>'
+                        if _eo["alerta"] == "🔴" else
+                        f'<div style="background:#fefce8;border-left:3px solid #d97706;'
+                        f'padding:6px 10px;border-radius:4px;font-size:0.8rem;margin:2px 0 6px;">'
+                        f'{_eo["motivo"]} <em>{_accion}</em></div>',
+                        unsafe_allow_html=True,
+                    )
             else:
                 oc6.markdown("<span style='color:#94a3b8;font-size:0.8rem;'>—</span>", unsafe_allow_html=True)
 
