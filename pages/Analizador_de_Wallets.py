@@ -18,7 +18,8 @@ from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import aave_lend
-from utils import fetch_all_account_txs, fetch_all_token_txs
+from utils import (fetch_all_account_txs, fetch_all_token_txs,
+                   codigo_proyecto_atoken, es_atoken_reental, es_token_reental)
 
 load_dotenv()
 
@@ -368,16 +369,19 @@ def get_vault_payment(tx_hash: str, wallet: str):
 
 
 def match_aave_token(tx_symbol: str, tx_name: str, known_tokens: dict):
-    code = None
-    if tx_symbol.startswith("aMatReental-"):
-        code = tx_symbol[len("aMatReental-"):]
-    elif tx_name.startswith("Aave Matic Reental-"):
-        code = tx_name[len("Aave Matic Reental-"):]
+    """Proyecto del maestro al que corresponde un aToken de colateral.
+
+    Tanto el prefijo como el código se comparan sin distinguir mayúsculas: la
+    cadena mezcla `Reental-CME-1` y `REENTAL-CAR-2`, y exigir una grafía concreta
+    dejaba fuera a los proyectos nuevos.
+    """
+    code = codigo_proyecto_atoken(tx_symbol, tx_name)
     if not code:
         return None
+    code_l = code.lower()
     for info in known_tokens.values():
-        sym = info.get("symbol", "")
-        if sym == f"Reental-{code}" or sym == code:
+        sym = (info.get("symbol") or "").lower()
+        if sym == f"reental-{code_l}" or sym == code_l:
             return info
     return None
 
@@ -410,7 +414,7 @@ def process_transfers(transfers: list, wallet: str, known_tokens: dict, reental_
     for tx in transfers:
         sym = tx.get("tokenSymbol", "")
         name = tx.get("tokenName", "")
-        if sym.startswith("aMatReental-") or name.startswith("Aave Matic Reental-"):
+        if es_atoken_reental(sym, name):
             match = match_aave_token(sym, name, known_tokens)
             if match:
                 atoken_contracts[tx["contractAddress"].lower()] = match.get("label", sym)
@@ -441,14 +445,12 @@ def process_transfers(transfers: list, wallet: str, known_tokens: dict, reental_
 
         # ¿Hay aTokens entrando o saliendo?
         atoken_in = any(
-            (tx.get("tokenSymbol", "").startswith("aMatReental-") or
-             tx.get("tokenName", "").startswith("Aave Matic Reental-"))
+            es_atoken_reental(tx.get("tokenSymbol", ""), tx.get("tokenName", ""))
             and tx["to"].lower() == wallet
             for tx in group
         )
         atoken_out = any(
-            (tx.get("tokenSymbol", "").startswith("aMatReental-") or
-             tx.get("tokenName", "").startswith("Aave Matic Reental-"))
+            es_atoken_reental(tx.get("tokenSymbol", ""), tx.get("tokenName", ""))
             and tx["from"].lower() == wallet
             for tx in group
         )
@@ -703,7 +705,7 @@ def process_aave_activity(transfers: list, wallet: str) -> dict:
         """
         if _is_debt_token(sym, name):
             return False
-        if "Reental" in name or "Reental" in sym:
+        if es_token_reental(sym, name):
             return False
         prefixed = sym.startswith("aMat") or sym.startswith("aPol") or name.startswith("Aave")
         is_stable = any(s in sym.upper() for s in ("USDT", "USDC", "DAI"))
@@ -718,10 +720,10 @@ def process_aave_activity(transfers: list, wallet: str) -> dict:
         return _es_atoken_de_stablecoin(addr, sym, name)
 
     def _is_collateral_atoken(sym, name):
-        """aToken de colateral Reental: aMatReental-…"""
-        prefixed = sym.startswith("aMat") or sym.startswith("aPol")
-        is_reental = "Reental" in name or "Reental" in sym
-        return prefixed and is_reental
+        """aToken de colateral Reental: aMatReental-… / aMatREENTAL-… (los
+        proyectos nuevos usan la grafía en mayúsculas)."""
+        bajo = (sym or "").lower()
+        return bajo.startswith(("amat", "apol")) and es_token_reental(sym, name)
 
     from collections import defaultdict as _dd
     tx_groups = _dd(list)
@@ -3072,7 +3074,7 @@ if aave_borrower_filtered:
                     if _val:
                         _suma += _val
                     _filas_col.append({
-                        "Proyecto":  _sym.replace("aMatReental-", ""),
+                        "Proyecto":  codigo_proyecto_atoken(_sym, "") or _sym,
                         "Tokens":    f"{_q:,.3f}",
                         "Precio":    f"${_p:,.2f}" if _p else "—",
                         "Valor":     f"${_val:,.2f}" if _val else "—",

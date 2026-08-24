@@ -279,6 +279,41 @@ def load_p2p_listings(_master_df: pd.DataFrame) -> pd.DataFrame:
 
 # ── Blockchain ────────────────────────────────────────────────────────────────
 
+_PREFIJOS_ATOKEN_SYM  = ("amatreental-", "apolreental-")
+_PREFIJOS_ATOKEN_NAME = ("aave matic reental-", "aave polygon reental-")
+
+
+def codigo_proyecto_atoken(tx_symbol: str, tx_name: str) -> str:
+    """Código de proyecto de un aToken de colateral Reental: 'CME-1', 'CAR-2'…
+
+    La comparación va en MINÚSCULAS porque la cadena no es consistente: los
+    proyectos antiguos se emitieron como `Reental-CME-1` → `aMatReental-CME-1`,
+    y los nuevos como `REENTAL-CAR-2` → `aMatREENTAL-CAR-2`. Con la comprobación
+    sensible a mayúsculas que había, cada proyecto con la nomenclatura nueva
+    desaparecía en silencio de las tres páginas a la vez: sin colateral en el
+    analizador, sin inventario en OTC y sin oferta en P2P.
+
+    Devuelve "" si no es un aToken de Reental.
+    """
+    for texto, prefijos in ((tx_symbol or "", _PREFIJOS_ATOKEN_SYM),
+                            (tx_name or "", _PREFIJOS_ATOKEN_NAME)):
+        bajo = texto.lower()
+        for p in prefijos:
+            if bajo.startswith(p):
+                return texto[len(p):].strip()
+    return ""
+
+
+def es_atoken_reental(tx_symbol: str, tx_name: str) -> bool:
+    """¿Es el aToken con el que Aave representa el colateral de un token Reental?"""
+    return bool(codigo_proyecto_atoken(tx_symbol, tx_name))
+
+
+def es_token_reental(tx_symbol: str, tx_name: str) -> bool:
+    """¿El símbolo o nombre delatan un token de Reental, en cualquier grafía?"""
+    return "reental" in f"{tx_symbol or ''} {tx_name or ''}".lower()
+
+
 def fetch_all_account_txs(wallet: str, api_key: str, action: str = "tokentx",
                            contractaddress: str = None, max_rounds: int = 40) -> list:
     """

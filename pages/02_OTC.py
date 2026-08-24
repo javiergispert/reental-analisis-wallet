@@ -19,7 +19,8 @@ import requests
 import io
 from datetime import datetime, timezone
 
-from utils import fetch_all_account_txs, fetch_all_token_txs, load_master_projects, strip_accents
+from utils import (fetch_all_account_txs, fetch_all_token_txs, load_master_projects,
+                   strip_accents, codigo_proyecto_atoken)
 # Primitivas on-chain compartidas: limitan el ritmo, reintentan y validan que la
 # respuesta sea hexadecimal. Reimplementarlas aquí fue lo que hizo que un error
 # de la API se convirtiera en "saldo desconocido".
@@ -150,17 +151,12 @@ def fetch_otc_balances(wallet: str, api_key: str) -> tuple:
         to_addr   = tx["to"].lower()
         from_addr = tx["from"].lower()
 
-        # Detectar si es aToken de Reental en Aave
-        is_atoken = (
-            sym.startswith("aMatReental-") or
-            name.startswith("Aave Matic Reental-")
-        )
+        # Detectar si es aToken de Reental en Aave. La grafía varía entre
+        # proyectos (aMatReental-CME-1 vs aMatREENTAL-CAR-2), así que el
+        # reconocimiento no distingue mayúsculas.
+        suffix = codigo_proyecto_atoken(sym, name)
+        is_atoken = bool(suffix)
         if is_atoken and contract not in atoken_map:
-            # Extraer sufijo: "aMatReental-CME-1" → "CME-1"
-            if name.startswith("Aave Matic Reental-"):
-                suffix = name[len("Aave Matic Reental-"):].strip()
-            else:
-                suffix = sym[len("aMatReental-"):].strip()
             suffix_lower = suffix.lower()
 
             underlying = None

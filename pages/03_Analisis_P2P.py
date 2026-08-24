@@ -30,7 +30,7 @@ from reportlab.platypus import (
 )
 
 from utils import (fetch_all_account_txs, fetch_all_token_txs, load_master_projects,
-                   parse_pct, parse_float_val, strip_accents)
+                   parse_pct, parse_float_val, strip_accents, codigo_proyecto_atoken)
 # Disponibilidad de las ofertas de terceros: misma fuente que la página OTC, para
 # que las dos respondan lo mismo a "cuántos tokens se pueden vender de verdad".
 import otc_saldos as _saldos
@@ -137,10 +137,11 @@ def construir_disponibilidad(master_df: pd.DataFrame) -> list:
     for contract, data in raw_balances.items():
         sym  = data["sym"]
         name = data["name"]
-        is_atoken = sym.startswith("aMatReental-") or name.startswith("Aave Matic Reental-")
-        if is_atoken:
-            suffix = (name[len("Aave Matic Reental-"):] if name.startswith("Aave Matic Reental-")
-                      else sym[len("aMatReental-"):]).strip().lower()
+        # La grafía del aToken varía entre proyectos (aMatReental-CME-1 vs
+        # aMatREENTAL-CAR-2): el reconocimiento no distingue mayúsculas.
+        _codigo = codigo_proyecto_atoken(sym, name)
+        if _codigo:
+            suffix = _codigo.lower()
             underlying = project_by_id.get(suffix, {}).get("token_address")
             if not underlying:
                 for n, a in nombre_to_addr.items():
