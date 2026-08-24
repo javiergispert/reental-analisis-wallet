@@ -30,7 +30,8 @@ from reportlab.platypus import (
 )
 
 from utils import (fetch_all_account_txs, fetch_all_token_txs, load_master_projects,
-                   parse_pct, parse_float_val, strip_accents, codigo_proyecto_atoken)
+                   parse_pct, parse_float_val, strip_accents)
+from reental_tokens import codigo_proyecto_atoken
 # Disponibilidad de las ofertas de terceros: misma fuente que la página OTC, para
 # que las dos respondan lo mismo a "cuántos tokens se pueden vender de verdad".
 import otc_saldos as _saldos

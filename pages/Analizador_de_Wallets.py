@@ -18,8 +18,8 @@ from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import aave_lend
-from utils import (fetch_all_account_txs, fetch_all_token_txs,
-                   codigo_proyecto_atoken, es_atoken_reental, es_token_reental)
+from utils import fetch_all_account_txs, fetch_all_token_txs
+from reental_tokens import codigo_proyecto_atoken, es_atoken_reental, es_token_reental
 
 load_dotenv()
 

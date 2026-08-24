@@ -19,8 +19,8 @@ import requests
 import io
 from datetime import datetime, timezone
 
-from utils import (fetch_all_account_txs, fetch_all_token_txs, load_master_projects,
-                   strip_accents, codigo_proyecto_atoken)
+from utils import fetch_all_account_txs, fetch_all_token_txs, load_master_projects, strip_accents
+from reental_tokens import codigo_proyecto_atoken
 # Primitivas on-chain compartidas: limitan el ritmo, reintentan y validan que la
 # respuesta sea hexadecimal. Reimplementarlas aquí fue lo que hizo que un error
 # de la API se convirtiera en "saldo desconocido".
