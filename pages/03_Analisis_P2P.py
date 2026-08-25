@@ -38,6 +38,11 @@ from reental_tokens import codigo_proyecto_atoken
 # que las dos respondan lo mismo a "cuántos tokens se pueden vender de verdad".
 import otc_saldos as _saldos
 import mercado_secundario as _mkt
+import recarga as _recarga
+# Streamlit no reimporta lo que ya está en sys.modules: tras un despliegue esta
+# página puede convivir con una versión anterior de sus módulos. Se refrescan en
+# orden de dependencia (p2p_mercado lo usa mercado_secundario).
+_recarga.refrescar("p2p_mercado", "otc_saldos", "otc_storage", "mercado_secundario")
 import ui_kpi
 from ui_kpi import kpi_card
 import plotly.graph_objects as go
