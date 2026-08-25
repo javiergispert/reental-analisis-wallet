@@ -3,6 +3,8 @@ Análisis de Oportunidades P2P — Reental Wealth
 Fuente de datos: wallet OTC de Reental (tokens disponibles - reservas activas)
                 + ofertas activas de terceros publicadas en esta herramienta.
 """
+from __future__ import annotations   # permite `dict | None` en Python 3.9
+
 
 import io
 import json
@@ -26,7 +28,7 @@ from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
 from reportlab.platypus import (
-    HRFlowable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
+    HRFlowable, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
 )
 
 from utils import (fetch_all_account_txs, fetch_all_token_txs, load_master_projects,
@@ -334,6 +336,7 @@ def calcular_ranking(master_df: pd.DataFrame, disponibles: list,
         rows.append({
             "_id":              m["id"],
             "_nombre":          m["nombre"],
+            "_token_address":   (d.get("token_address") or "").lower(),
             "_precio_p2p":      precio_p2p,
             "_divisa":          m["divisa"],
             "_meses":           meses,
@@ -376,7 +379,12 @@ def tip_dividendo_label(raw: str) -> str:
 
 # ── Generación del PDF ────────────────────────────────────────────────────────
 
-def generar_pdf(df: pd.DataFrame, categoria: str) -> bytes:
+def generar_pdf(df: pd.DataFrame, categoria: str,
+                mercado: dict | None = None,
+                mercado_global: dict | None = None) -> bytes:
+    """`mercado` y `mercado_global` se reciben como parámetros en vez de leerse
+    aquí: así el informe se puede generar (y probar) sin depender del estado de
+    la página, y la hoja 2 simplemente no se añade si no se pasan."""
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=landscape(A4),
                             leftMargin=1.5*cm, rightMargin=1.5*cm,
@@ -474,6 +482,102 @@ def generar_pdf(df: pd.DataFrame, categoria: str) -> bytes:
     ]
     for nota in notas:
         story.append(Paragraph(nota, nota_s))
+
+    # ── Hoja 2 — Liquidez del mercado secundario ──────────────────────────────
+    # Responde a la pregunta que el inversor sí se hace ante un activo
+    # inmobiliario tokenizado: «¿y si necesito salirme?». Se informa de la
+    # liquidez OBSERVADA, sin convertirla en promesa: nada de proyectar, nada
+    # de presentar la diferencia con el precio de emisión como rentabilidad.
+    if mercado:
+        story.append(PageBreak())
+        story += [ht, Spacer(1, 0.3*cm),
+                  HRFlowable(width="100%", thickness=3, color=DORADO), Spacer(1, 0.4*cm)]
+
+        st2 = Table([[Paragraph("Liquidez del mercado secundario · últimos 12 meses", sub_s)]],
+                    colWidths=["100%"])
+        st2.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0),(-1,-1), NAVY_OSC),
+            ("TOPPADDING",    (0,0),(-1,-1), 8),
+            ("BOTTOMPADDING", (0,0),(-1,-1), 8),
+        ]))
+        story += [st2, Spacer(1, 0.4*cm)]
+
+        intro = ("Los tokens de Reental se pueden vender antes del cierre del proyecto por dos vías: "
+                 "el <b>mercado OTC</b>, intermediado por Reental, y <b>RNTP2P</b>, donde los inversores "
+                 "negocian directamente entre ellos. Toda operación queda registrada en la cadena de "
+                 "bloques y es verificable. A continuación, la actividad real observada en cada uno de "
+                 "los proyectos de este informe.")
+        story += [Paragraph(intro, nota_s), Spacer(1, 0.4*cm)]
+
+        if mercado_global:
+            gk = mercado_global
+            resumen = [[
+                Paragraph("Operaciones", cell_lbl), Paragraph(f"{gk['ops']:,}", cell_b),
+                Paragraph("Volumen", cell_lbl), Paragraph(f"${gk['volumen']:,.0f}", cell_b),
+                Paragraph("Vendedores distintos", cell_lbl), Paragraph(f"{gk['vendedores']:,}", cell_b),
+                Paragraph("Compradores distintos", cell_lbl), Paragraph(f"{gk['compradores']:,}", cell_b),
+            ]]
+            tr = Table(resumen, colWidths=["12.5%"]*8)
+            tr.setStyle(TableStyle([
+                ("GRID",       (0,0),(-1,-1), 0.4, colors.HexColor("#CBD5E1")),
+                ("BACKGROUND", (0,0),(0,-1),  NAVY_MED), ("BACKGROUND", (2,0),(2,-1), NAVY_MED),
+                ("BACKGROUND", (4,0),(4,-1),  NAVY_MED), ("BACKGROUND", (6,0),(6,-1), NAVY_MED),
+                ("TOPPADDING", (0,0),(-1,-1), 6), ("BOTTOMPADDING", (0,0),(-1,-1), 6),
+                ("VALIGN",     (0,0),(-1,-1), "MIDDLE"),
+            ]))
+            story += [Paragraph("<b>Conjunto del mercado secundario</b>", nota_s), Spacer(1, 0.15*cm),
+                      tr, Spacer(1, 0.5*cm)]
+
+        cab = ["Inmueble", "Operaciones", "Tokens", "Compradores\ndistintos",
+               "Precio medio\ncruzado", "Precio de\nemisión"]
+        filas = [[Paragraph(c.replace("\n", "<br/>"), head_val) for c in cab]]
+        for _, r in df.iterrows():
+            m = mercado.get((r.get("_token_address") or "").lower())
+            if m and m["ops"]:
+                # Un proyecto con dos operaciones dice "2": esconder los que
+                # tienen poca profundidad convertiría el informe en argumentario
+                # y dejaría al inversor sin saber a qué se expone.
+                vals = [f"{m['ops']:,}", f"{m['tokens']:,.1f}", f"{m['compradores']:,}",
+                        fmt_precio(m["precio_medio"], "USD") if m["precio_medio"] else "—"]
+            else:
+                vals = ["Sin operaciones", "—", "—", "—"]
+            filas.append([Paragraph(f"{r['_nombre']} ({r['_id']})", cell_lbl)]
+                         + [Paragraph(v, cell_s) for v in vals]
+                         + [Paragraph(fmt_precio(r["_precio_p2p"], r["_divisa"]), cell_s)])
+
+        pw2 = landscape(A4)[0] - 3*cm
+        t2 = Table(filas, colWidths=[pw2*0.30] + [pw2*0.14]*5)
+        ts2 = [
+            ("GRID",          (0,0),(-1,-1), 0.4, colors.HexColor("#CBD5E1")),
+            ("BACKGROUND",    (0,0),(-1,0),  DORADO),
+            ("BACKGROUND",    (0,1),(0,-1),  NAVY_OSC),
+            ("TOPPADDING",    (0,0),(-1,-1), 5), ("BOTTOMPADDING", (0,0),(-1,-1), 5),
+            ("LEFTPADDING",   (0,0),(-1,-1), 5), ("RIGHTPADDING",  (0,0),(-1,-1), 5),
+            ("VALIGN",        (0,0),(-1,-1), "MIDDLE"),
+        ]
+        for i in range(1, len(filas)):
+            ts2.append(("BACKGROUND", (1,i),(-1,i), GRIS_CLAR if i % 2 == 0 else BLANCO))
+        t2.setStyle(TableStyle(ts2))
+        story += [t2, Spacer(1, 0.45*cm)]
+
+        notas2 = [
+            "<b>Cómo leer esta hoja.</b> Las cifras son la actividad registrada en los últimos 12 meses "
+            "en el mercado secundario, contando las dos vías (OTC y RNTP2P).",
+            "— <b>Operaciones</b> y <b>compradores distintos</b> indican con qué frecuencia ha cambiado de "
+            "manos cada inmueble y cuántas contrapartes diferentes han intervenido.",
+            "— <b>Precio medio cruzado</b>: precio por token al que se han cerrado esas operaciones, "
+            "ponderado por importe. Se muestra junto al precio de emisión únicamente como referencia "
+            "de contexto.",
+            "— Los importes se expresan en USD. Las operaciones en proyectos denominados en euros se "
+            "liquidan igualmente en stablecoin (USDT/USDC).",
+            f"— Datos a {date.today().strftime('%d/%m/%Y')}. <b>La actividad pasada no garantiza que en el "
+            "futuro exista contrapartida ni a qué precio.</b> La liquidez de estos activos es limitada y "
+            "puede variar: un inmueble con operaciones recientes puede no tener comprador cuando usted "
+            "desee vender.",
+            "— Este documento es informativo y no constituye asesoramiento ni recomendación de inversión.",
+        ]
+        for nota in notas2:
+            story.append(Paragraph(nota, nota_s))
 
     doc.build(story)
     return buf.getvalue()
@@ -777,7 +881,13 @@ col_pdf, col_wa = st.columns([1, 1])
 with col_pdf:
     if st.button("📥 Generar PDF", type="primary", use_container_width=True):
         with st.spinner("Generando PDF…"):
-            pdf_bytes = generar_pdf(df_ops, categoria)
+            # La hoja 2 se alimenta del mismo cálculo que la sección web: una
+            # sola fuente, para que informe y pantalla nunca discrepen.
+            _mkt_pdf = _mkt.resumen_por_token(_ops_todas) if not _ops_todas.empty else {}
+            _mkt_glob = _mkt.kpis(_mkt.filtrar(
+                _ops_todas, pd.Timestamp.today() - pd.Timedelta(days=365), None
+            )) if not _ops_todas.empty else None
+            pdf_bytes = generar_pdf(df_ops, categoria, _mkt_pdf, _mkt_glob)
         st.download_button(
             label="⬇️ Descargar PDF",
             data=pdf_bytes,

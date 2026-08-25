@@ -161,3 +161,37 @@ def serie_mensual(df: pd.DataFrame) -> pd.DataFrame:
            .agg(volumen=("importe_usd", "sum"), ops=("importe_usd", "size"))
            .reset_index())
     return g
+
+
+def resumen_por_token(df: pd.DataFrame, meses: int = 12) -> dict:
+    """Liquidez del secundario por proyecto en los últimos `meses`.
+
+    Alimenta la segunda hoja del informe comercial. Devuelve un dict indexado
+    por dirección de token para poder cruzarlo con el ranking sin depender del
+    nombre, que varía entre el maestro y la plataforma.
+
+    Se devuelve SIEMPRE lo que hay, aunque sea poco: un proyecto con dos
+    operaciones debe poder decir "2", no desaparecer. Ocultar los proyectos sin
+    profundidad convertiría el informe en argumentario.
+    """
+    if df.empty:
+        return {}
+    corte = df["fecha"].max() - pd.Timedelta(days=30 * meses)
+    reciente = df[df["fecha"] >= corte]
+    out = {}
+    for addr, g in reciente.groupby(reciente["token_address"].fillna("").str.lower()):
+        if not addr:
+            continue
+        ok = g["detalle_ok"].fillna(False).astype(bool)
+        con = g[ok & g["precio_unitario"].notna()]
+        out[addr] = {
+            "ops": len(g),
+            "tokens": float(con["tokens"].sum()) if len(con) else 0.0,
+            "volumen": float(g["importe_usd"].sum()),
+            "compradores": int(g["comprador"].dropna().nunique()),
+            "vendedores": int(g["vendedor"].dropna().nunique()),
+            # Precio medio ponderado por importe, no por operación.
+            "precio_medio": (con["importe_usd"].sum() / con["tokens"].sum())
+                            if len(con) and con["tokens"].sum() > 0 else None,
+        }
+    return out
