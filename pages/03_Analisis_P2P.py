@@ -712,15 +712,32 @@ else:
                                        marker_color=color,
                                        hovertemplate="<b>%{x|%b %Y}</b><br>"
                                                      f"{canal}: $%{{y:,.0f}}<extra></extra>"))
+            # Acumulado de AMBOS canales sobre el eje derecho: las barras dicen
+            # cómo va cada mes y la línea cuánto mercado se lleva construido.
+            _acum = (_serie.groupby("mes")["volumen"].sum().sort_index().cumsum().reset_index())
+            fig_m.add_trace(go.Scatter(
+                x=_acum["mes"], y=_acum["volumen"], name="Acumulado",
+                yaxis="y2", mode="lines+markers",
+                line=dict(color="#0f172a", width=2), marker=dict(size=4),
+                hovertemplate="<b>%{x|%b %Y}</b><br>Acumulado: $%{y:,.0f}<extra></extra>",
+            ))
             fig_m.update_layout(
-                barmode="stack", height=300,
+                barmode="stack", height=340,
                 margin=dict(t=30, b=10, l=8, r=8),
-                yaxis=dict(title="Volumen (USD)", gridcolor="#e2e8f0"),
                 xaxis=dict(title=None),
+                yaxis=dict(title="Volumen del mes (USD)", gridcolor="#e2e8f0"),
+                # El acumulado va en su propio eje: en la misma escala que las
+                # barras las aplastaría hasta hacerlas ilegibles.
+                yaxis2=dict(title="Acumulado (USD)", overlaying="y", side="right",
+                            showgrid=False, rangemode="tozero"),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+                hovermode="x unified",
                 plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
             )
             st.plotly_chart(fig_m, use_container_width=True)
+            st.caption("Las barras son el volumen de cada mes por canal (eje izquierdo); "
+                       "la línea, el acumulado de ambos (eje derecho). El acumulado se "
+                       "calcula sobre el período y proyecto filtrados, no sobre todo el histórico.")
 
         if _k_tot["sin_detalle"]:
             st.caption(
