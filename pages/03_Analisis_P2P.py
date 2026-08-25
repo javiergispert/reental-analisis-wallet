@@ -35,6 +35,10 @@ from reental_tokens import codigo_proyecto_atoken
 # Disponibilidad de las ofertas de terceros: misma fuente que la página OTC, para
 # que las dos respondan lo mismo a "cuántos tokens se pueden vender de verdad".
 import otc_saldos as _saldos
+import mercado_secundario as _mkt
+import ui_kpi
+from ui_kpi import kpi_card
+import plotly.graph_objects as go
 
 # ── Constantes ────────────────────────────────────────────────────────────────
 OTC_WALLET     = os.getenv("OTC_WALLET", "0xce0719ec1bda336ba069c6961ad167767829301a").lower()
@@ -485,6 +489,8 @@ st.caption(
     "(wallet custodia + ofertas de inversores) ordenados por rentabilidad anualizada pendiente."
 )
 
+ui_kpi.inyectar_css()   # estilos de las tarjetas KPI (una vez por página)
+
 # Cargar datos
 with st.spinner("Cargando catálogo de proyectos…"):
     master_df = load_master_projects()
@@ -560,6 +566,171 @@ st.dataframe(pd.DataFrame(display_rows), hide_index=True, use_container_width=Tr
 
 st.caption(f"\\* Rentabilidades calculadas sobre precio P2P, proyectando la tasa real acumulada hasta vencimiento · Categoría: {categoria}")
 st.caption(f"\\*\\* La rent. al final es la ganancia patrimonial esperada al cierre · Mínimo {MIN_TOKENS} tokens disponibles para entrar en el análisis")
+
+# Índice de proyectos por dirección de token, para resolver nombre, ubicación y
+# precio de emisión en la sección de mercado secundario.
+project_by_addr_global = {}
+for _, _row in master_df.iterrows():
+    if _row.get("token_address"):
+        project_by_addr_global[str(_row["token_address"]).lower()] = _row.to_dict()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PROFUNDIDAD DEL MERCADO SECUNDARIO — OTC + RNTP2P
+# ══════════════════════════════════════════════════════════════════════════════
+st.markdown("---")
+st.subheader("📈 Profundidad del mercado secundario")
+st.caption(
+    "Operaciones **cerradas** en los dos canales por los que un inversor puede vender: "
+    "el OTC que intermedia Reental y RNTP2P, donde los inversores negocian entre ellos. "
+    + _mkt.ADVERTENCIA_COBERTURA
+)
+
+_ops_todas = _mkt.operaciones(load_reservas_otc(), project_by_addr_global)
+
+if _ops_todas.empty:
+    st.info("Todavía no hay operaciones registradas en ninguno de los dos canales.")
+else:
+    _cob = _ops_todas["detalle_ok"].mean() * 100
+    _fmin, _fmax = _ops_todas["fecha"].min().date(), _ops_todas["fecha"].max().date()
+
+    mf1, mf2, mf3 = st.columns([2, 1, 1])
+    # El desplegable se construye con los proyectos que REALMENTE tienen
+    # operaciones: ofrecer los 125 del maestro obligaría a probar uno a uno para
+    # descubrir cuáles tienen datos.
+    _con_proy = _ops_todas.dropna(subset=["proyecto"])
+    _proyectos = sorted(_con_proy["proyecto"].unique())
+    _opciones = {"— Todos los proyectos —": None}
+    for _p in _proyectos:
+        _addr = _con_proy[_con_proy["proyecto"] == _p]["token_address"].dropna()
+        _opciones[_p] = _addr.iloc[0] if len(_addr) else None
+    _sel_proy = mf1.selectbox("Proyecto", list(_opciones.keys()), key="mkt_proy")
+    _desde = mf2.date_input("Desde", value=_fmin, min_value=_fmin, max_value=_fmax, key="mkt_desde")
+    _hasta = mf3.date_input("Hasta", value=_fmax, min_value=_fmin, max_value=_fmax, key="mkt_hasta")
+
+    _addr_sel = _opciones.get(_sel_proy)
+    _ops = _mkt.filtrar(_ops_todas, _desde, _hasta, _addr_sel)
+
+    # Precio de emisión del proyecto elegido, para poder decir si el secundario
+    # cotiza con prima o con descuento.
+    _pe = None
+    if _addr_sel:
+        _pe = (project_by_addr_global.get(_addr_sel) or {}).get("precio_emision")
+        try:
+            _pe = float(_pe) if _pe else None
+        except (TypeError, ValueError):
+            _pe = None
+
+    if _ops.empty:
+        st.warning("No hay operaciones con esos filtros. Prueba a ampliar el período.")
+    else:
+        _k_tot = _mkt.kpis(_ops, _pe)
+        _k_p2p = _mkt.kpis(_ops[_ops["canal"] == _mkt.CANAL_P2P], _pe)
+        _k_otc = _mkt.kpis(_ops[_ops["canal"] == _mkt.CANAL_OTC], _pe)
+
+        _eur = lambda v: f"${v:,.0f}" if v is not None else "—"
+        _pu  = lambda v: f"${v:,.2f}" if v is not None else "—"
+
+        st.markdown("<div style='font-size:0.78rem;color:#64748b;font-weight:600;"
+                    "margin:6px 0;'>🌐 Conjunto del mercado secundario</div>",
+                    unsafe_allow_html=True)
+        t1, t2, t3, t4 = st.columns(4)
+        t1.markdown(kpi_card("💰", "Volumen", _eur(_k_tot["volumen"]),
+                             sublabel=f"{_k_tot['ops']:,} operaciones",
+                             help="Suma de los importes cerrados en ambos canales en el período."),
+                    unsafe_allow_html=True)
+        t2.markdown(kpi_card("🎟️", "Ticket medio", _eur(_k_tot["ticket_medio"]),
+                             sublabel="por operación",
+                             help="Volumen dividido entre el número de operaciones."),
+                    unsafe_allow_html=True)
+        t3.markdown(kpi_card("🏷️", "Precio medio", _pu(_k_tot["precio_medio"]),
+                             sublabel="por token, ponderado",
+                             help="Ponderado por IMPORTE, no por operación: una venta de 100 "
+                                  "tokens y otra de 0,3 no deben pesar igual."),
+                    unsafe_allow_html=True)
+        _prima = _k_tot["prima_pct"]
+        t4.markdown(kpi_card("📊", "Prima sobre emisión",
+                             f"{_prima:+.1f} %" if _prima is not None else "—",
+                             value_color="#16a34a" if (_prima or 0) >= 0 else "#dc2626",
+                             sublabel="vs precio de emisión" if _prima is not None
+                                      else "elige un proyecto",
+                             help="Cuánto por encima o por debajo del precio de emisión se está "
+                                  "pagando en el secundario. Solo se calcula al elegir un proyecto, "
+                                  "porque cada uno tiene su propio precio de emisión."),
+                    unsafe_allow_html=True)
+
+        st.markdown("<div style='font-size:0.78rem;color:#64748b;font-weight:600;"
+                    "margin:12px 0 6px;'>⚖️ Por canal</div>", unsafe_allow_html=True)
+        c1, c2, c3, c4 = st.columns(4)
+        _cuota = (_k_p2p["volumen"] / _k_tot["volumen"] * 100) if _k_tot["volumen"] else 0
+        c1.markdown(kpi_card("🤝", "RNTP2P", _eur(_k_p2p["volumen"]),
+                             sublabel=f"{_k_p2p['ops']:,} ops · {_cuota:.0f}% del volumen",
+                             help="Operaciones directas entre inversores en p2p.rnt.finance."),
+                    unsafe_allow_html=True)
+        c2.markdown(kpi_card("🏢", "OTC Reental", _eur(_k_otc["volumen"]),
+                             sublabel=f"{_k_otc['ops']:,} ops · {100-_cuota:.0f}% del volumen",
+                             help="Reservas OTC completadas. Las activas no cuentan: son "
+                                  "compromiso, no operación cerrada."),
+                    unsafe_allow_html=True)
+        c3.markdown(kpi_card("🏷️", "Precio P2P", _pu(_k_p2p["precio_medio"]),
+                             sublabel="por token", help="Precio medio ponderado en RNTP2P."),
+                    unsafe_allow_html=True)
+        _dif = (_k_otc["precio_medio"] - _k_p2p["precio_medio"]
+                if _k_otc["precio_medio"] and _k_p2p["precio_medio"] else None)
+        c4.markdown(kpi_card("↔️", "Precio OTC", _pu(_k_otc["precio_medio"]),
+                             sublabel=(f"{_dif:+,.2f} $ vs P2P" if _dif is not None else "por token"),
+                             help="Precio medio ponderado en OTC. El diferencial con P2P es la "
+                                  "señal de si el precio OTC está bien calibrado: si es muy "
+                                  "superior, el inversor tiene incentivo para irse a P2P."),
+                    unsafe_allow_html=True)
+
+        st.markdown("<div style='font-size:0.78rem;color:#64748b;font-weight:600;"
+                    "margin:12px 0 6px;'>👥 Amplitud</div>", unsafe_allow_html=True)
+        a1, a2, a3 = st.columns(3)
+        a1.markdown(kpi_card("🧍", "Vendedores únicos", f"{_k_tot['vendedores']:,}",
+                             sublabel="wallets distintas",
+                             help="Cuántos inversores distintos han vendido. Mide si el mercado "
+                                  "está repartido o concentrado en unos pocos."),
+                    unsafe_allow_html=True)
+        a2.markdown(kpi_card("🛒", "Compradores únicos", f"{_k_tot['compradores']:,}",
+                             sublabel="wallets distintas",
+                             help="Solo se conoce en RNTP2P: en OTC el comprador se registra "
+                                  "por nombre, no por wallet."),
+                    unsafe_allow_html=True)
+        a3.markdown(kpi_card("🪙", "Tokens transaccionados", f"{_k_tot['tokens']:,.2f}",
+                             sublabel="con detalle disponible",
+                             help="Solo cuenta las operaciones cuya cantidad se conoce."),
+                    unsafe_allow_html=True)
+
+        _serie = _mkt.serie_mensual(_ops)
+        if len(_serie) > 1:
+            fig_m = go.Figure()
+            for canal, color in ((_mkt.CANAL_P2P, "#3b82f6"), (_mkt.CANAL_OTC, "#f5a623")):
+                s = _serie[_serie["canal"] == canal]
+                if s.empty:
+                    continue
+                fig_m.add_trace(go.Bar(x=s["mes"], y=s["volumen"], name=canal,
+                                       marker_color=color,
+                                       hovertemplate="<b>%{x|%b %Y}</b><br>"
+                                                     f"{canal}: $%{{y:,.0f}}<extra></extra>"))
+            fig_m.update_layout(
+                barmode="stack", height=300,
+                margin=dict(t=30, b=10, l=8, r=8),
+                yaxis=dict(title="Volumen (USD)", gridcolor="#e2e8f0"),
+                xaxis=dict(title=None),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+                plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            )
+            st.plotly_chart(fig_m, use_container_width=True)
+
+        if _k_tot["sin_detalle"]:
+            st.caption(
+                f"⚠️ **{_k_tot['sin_detalle']:,} de {_k_tot['ops']:,}** operaciones del período no "
+                "traen cantidad de tokens, así que cuentan para el volumen pero no para el precio "
+                "medio ni para el desglose por proyecto. Se recuperan ejecutando "
+                "`scripts/enriquecer_p2p.py` (ver `data/rnt_p2p/README.md`)."
+            )
+        st.caption(f"Cobertura de detalle en todo el histórico: **{_cob:.1f} %** de las operaciones. "
+                   f"Datos desde {_fmin:%d/%m/%Y} hasta {_fmax:%d/%m/%Y}.")
 
 # ── Exportar ─────────────────────────────────────────────────────────────────
 st.markdown("---")
