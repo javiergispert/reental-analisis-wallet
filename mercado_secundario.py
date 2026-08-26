@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+import otc_historico
 import p2p_mercado
 
 CANAL_P2P = "RNTP2P"
@@ -62,6 +63,23 @@ def operaciones_p2p(project_by_addr: dict | None = None) -> pd.DataFrame:
     return out[COLUMNAS]
 
 
+def operaciones_otc_historico() -> pd.DataFrame:
+    """OTC de 2025, anterior al sistema de reservas (creado en junio de 2026).
+    Periodos disjuntos, así que se suma sin riesgo de contar dos veces."""
+    df = otc_historico.cargar()
+    if df.empty:
+        return _vacio()
+    out = pd.DataFrame({
+        "fecha": df["fecha"], "canal": CANAL_OTC,
+        "proyecto": df["proyecto_id"], "token_address": df["token_address"],
+        "tokens": df["tokens"], "importe_usd": df["importe_usd"],
+        "precio_unitario": df["precio_unitario"],
+        "vendedor": df["vendedor"], "comprador": df["comprador"],
+    })
+    out["detalle_ok"] = out["tokens"].fillna(0) > 0
+    return out[COLUMNAS]
+
+
 def operaciones_otc(reservas: list) -> pd.DataFrame:
     """Reservas OTC ya cerradas. Las activas son compromiso, no operación: si se
     contaran, el volumen incluiría ventas que aún pueden caerse."""
@@ -96,7 +114,9 @@ def operaciones_otc(reservas: list) -> pd.DataFrame:
 
 def operaciones(reservas: list, project_by_addr: dict | None = None) -> pd.DataFrame:
     """Los dos canales en una sola tabla, ordenada por fecha."""
-    partes = [d for d in (operaciones_p2p(project_by_addr), operaciones_otc(reservas))
+    partes = [d for d in (operaciones_p2p(project_by_addr),
+                          operaciones_otc(reservas),
+                          operaciones_otc_historico())
               if not d.empty]        # concatenar vacíos altera los dtypes
     if not partes:
         return _vacio()
