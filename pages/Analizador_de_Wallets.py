@@ -2622,7 +2622,21 @@ if aave_lender_filtered:
         total_int    = ret + saldo - dep
         cap_retirado = max(0.0, dep - principal)
         cobrados     = max(0.0, ret - cap_retirado)
-        devengado    = (total_int - cobrados) if medido else 0.0
+        # max(0) evita el "-0.00" que sale cuando el reparto cuadra al céntimo y
+        # el residuo en coma flotante cae del lado negativo.
+        devengado    = max(0.0, total_int - cobrados) if medido else 0.0
+
+        # Pico de exposición: el máximo que el inversor llegó a tener dentro a la
+        # vez. `dep` suma TODOS los depósitos, así que quien aporta 100k, los
+        # retira y los vuelve a meter figura con 200k «depositados» siendo el
+        # mismo dinero. Para medir rentabilidad importa cuánto capital se puso en
+        # riesgo, no cuántas veces se movió: usar el bruto dividía por dos la
+        # rentabilidad de una wallet que recicló su capital.
+        saldo_run = pico = 0.0
+        for _m in sorted(movs, key=lambda x: x["fecha"]):
+            saldo_run += (_m["stable_amount"] if _m["tipo"] == "Depósito préstamo"
+                          else -_m["stable_amount"])
+            pico = max(pico, saldo_run)
 
         base_flujos = [(m["fecha"], -m["stable_amount"] if m["tipo"] == "Depósito préstamo"
                         else +m["stable_amount"]) for m in movs]
@@ -2637,13 +2651,16 @@ if aave_lender_filtered:
             "abierta": saldo > 0.01, "medido": medido,
             "hay_retiradas": cap_retirado > 0.01,
             "rent_dev":  (devengado / principal * 100) if principal > 0.01 else None,
-            "rent_real": (cobrados / cap_retirado * 100) if cap_retirado > 0.01 else None,
+            "pico": pico,
+            "reciclado": dep - pico > 0.01,     # ¿se reingresó el mismo dinero?
+            "rent_real": (cobrados / pico * 100) if pico > 0.01 else None,
             "tir_dev":   calculate_irr(f_dev)  if saldo > 0.01 else None,
             "tir_real":  calculate_irr(f_real) if cap_retirado > 0.01 else None,
         }
 
-    H_DEP = ("Suma de stablecoins que salieron de la wallet al depositar en Aave, "
-             "de todo el histórico. Capital aportado bruto, sin descontar lo ya retirado.")
+    H_DEP = ("Suma de TODOS los depósitos del histórico. Si se retiró capital y se volvió a "
+             "aportar, ese dinero cuenta varias veces: por eso se indica al lado el máximo "
+             "expuesto a la vez, que es el capital realmente puesto en riesgo.")
     H_DEV = ("Intereses generados y AÚN NO cobrados: saldo actual del aToken, leído del "
              "contrato, menos el principal que sigue depositado. Un aToken crece solo "
              "según se devenga el interés, sin emitir ninguna transacción, así que este "
@@ -2660,8 +2677,9 @@ if aave_lender_filtered:
     H_COB = ("La parte del Total retirado que son intereses, no devolución de capital. "
              "Se obtiene como Retirado + principal vivo − Depositado, de modo que lo "
              "cobrado y lo que sigue devengándose nunca se cuentan dos veces.")
-    H_RREAL = ("Intereses cobrados / capital retirado. Lo que rindió de verdad el dinero "
-               "que ya salió, acumulado y sin anualizar.")
+    H_RREAL = ("Intereses cobrados / capital MÁXIMO EXPUESTO a la vez. Se divide por el capital "
+               "real puesto en riesgo, no por la suma de aportaciones: si el mismo dinero se "
+               "reingresó varias veces, dividir por el bruto hundiría la rentabilidad a la mitad.")
     H_TREAL = ("Misma TIR, pero cerrando con el principal vivo a coste, sin sumarle los "
                "intereses devengados. Así aísla el rendimiento ya materializado y no lo "
                "mezcla con la revalorización que aún está dentro.")
@@ -2680,9 +2698,10 @@ if aave_lender_filtered:
                     f"margin:2px 0 6px;'>⏳ Devengado — posición viva</div>",
                     unsafe_allow_html=True)
         a1, a2, a3, a4 = st.columns(4)
-        _vivo = (f"{mon} · vivo: {k['principal']:,.2f}"
-                 if k["hay_retiradas"] else mon)
-        a1.markdown(kpi_card("💵", "Total depositado", f"{k['dep']:,.2f}",
+        _vivo = (f"{mon} · máx. expuesto: {k['pico']:,.2f}"
+                 if k["reciclado"] else
+                 (f"{mon} · vivo: {k['principal']:,.2f}" if k["hay_retiradas"] else mon))
+        a1.markdown(kpi_card("💵", "Total aportado (bruto)", f"{k['dep']:,.2f}",
                              sublabel=_vivo, help=H_DEP), unsafe_allow_html=True)
         a2.markdown(kpi_card("⏳", "Intereses devengados",
                              f"{k['devengado']:,.2f}" if k["medido"] else "—",
@@ -2710,7 +2729,7 @@ if aave_lender_filtered:
                              sublabel=f"{mon} · ya materializados", help=H_COB), unsafe_allow_html=True)
         b3.markdown(kpi_card("📊", "Rentabilidad realizada", _pct(k["rent_real"]),
                              value_color=_color(k["rent_real"]),
-                             sublabel="sobre capital retirado", help=H_RREAL), unsafe_allow_html=True)
+                             sublabel="sobre capital máx. expuesto", help=H_RREAL), unsafe_allow_html=True)
         b4.markdown(kpi_card("🎯", "TIR anual realizada",
                              _pct(k["tir_real"] * 100 if k["tir_real"] is not None else None),
                              value_color=_color(k["tir_real"]),
@@ -2816,6 +2835,18 @@ if aave_borrower_filtered:
 
     total_prestado  = sum(m["stable_amount"] for m in aave_borrower_filtered if m["tipo"] == "Préstamo recibido")
     total_devuelto  = sum(m["stable_amount"] for m in aave_borrower_filtered if m["tipo"] == "Pago de deuda")
+    # Mismo criterio que en prestamista: `total_prestado` suma TODOS los
+    # préstamos, así que pedir 100k, devolverlos y volver a pedirlos figura como
+    # 200k. Lo que mide el apalancamiento real es cuánta deuda se llegó a tener
+    # a la vez, no cuántas veces se pidió.
+    _saldo_deuda = pico_deuda = 0.0
+    for _m in sorted(aave_borrower_filtered, key=lambda x: x["fecha"]):
+        if _m["tipo"] == "Préstamo recibido":
+            _saldo_deuda += _m["stable_amount"]
+        elif _m["tipo"] == "Pago de deuda":
+            _saldo_deuda -= _m["stable_amount"]
+        pico_deuda = max(pico_deuda, _saldo_deuda)
+    _deuda_reciclada = total_prestado - pico_deuda > 0.01
     coste_neto      = max(0.0, total_devuelto - total_prestado)
     deuda_viva      = max(0.0, total_prestado - total_devuelto)
     n_garantias_dep = sum(1 for m in aave_borrower_filtered if m["tipo"] == "Garantía depositada")
@@ -2834,8 +2865,16 @@ if aave_borrower_filtered:
     )
 
     b1, b2, b3, b4 = st.columns(4)
-    b1.markdown(kpi_card("💸", "Total prestado",   f"{total_prestado:,.2f}", sublabel="USDT / USDC"), unsafe_allow_html=True)
-    b2.markdown(kpi_card("↩️", "Total devuelto",   f"{total_devuelto:,.2f}", sublabel="USDT / USDC"), unsafe_allow_html=True)
+    b1.markdown(kpi_card("💸", "Total prestado (bruto)", f"{total_prestado:,.2f}",
+                         sublabel=(f"USDT / USDC · máx. a la vez: {pico_deuda:,.2f}"
+                                   if _deuda_reciclada else "USDT / USDC"),
+                         help="Suma de TODOS los préstamos del histórico. Si se devolvió deuda y "
+                              "se volvió a pedir, ese importe cuenta varias veces; al lado va el "
+                              "máximo que se llegó a deber a la vez, que es el apalancamiento real."),
+                unsafe_allow_html=True)
+    b2.markdown(kpi_card("↩️", "Total devuelto",   f"{total_devuelto:,.2f}", sublabel="USDT / USDC",
+                         help="Suma de los pagos de deuda, principal e intereses incluidos."),
+                unsafe_allow_html=True)
     b3.markdown(kpi_card("💰", "Coste (intereses)", f"{coste_neto:,.2f}",
                          value_color="#dc2626" if coste_neto > 0 else "#94a3b8",
                          sublabel="USDT / USDC pagado de más"), unsafe_allow_html=True)
