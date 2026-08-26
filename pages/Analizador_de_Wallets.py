@@ -2540,34 +2540,6 @@ aave_lending  = aave_lender   # alias para el exportador CSV
 st.markdown("#### 🏦 Como prestamista")
 aave_lender_filtered = filtrar_por_wallet(aave_lender)
 if aave_lender_filtered:
-    saldo_at = 0.0
-    lender_rows = []
-    for m in aave_lender_filtered:
-        if m["tipo"] == "Depósito préstamo":
-            saldo_at += m["cantidad_atoken"]
-            importe_str = f"-{m['stable_amount']:,.2f} {m['stable_symbol']}" if m["stable_amount"] else "—"
-        else:
-            saldo_at -= m["cantidad_atoken"]
-            importe_str = f"+{m['stable_amount']:,.2f} {m['stable_symbol']}" if m["stable_amount"] else "—"
-        row = {
-            "Fecha":        m["fecha_str"],
-            "Operación":    m["tipo"],
-            "aToken":       m["atoken"],
-            "Cant. aToken": f"{m['cantidad_atoken']:,.4f}",
-            "USDT/USDC":    importe_str,
-            "Saldo aToken": f"{saldo_at:,.4f}",
-            "TX":           m["tx_link"],
-        }
-        if m["interest_note"]:
-            row["Intereses"] = m["interest_note"]
-        if es_multi_wallet:
-            row["Wallet"] = m.get("wallet_alias", "—")
-        lender_rows.append(row)
-
-    st.dataframe(pd.DataFrame(lender_rows), column_config={
-        "TX": st.column_config.LinkColumn("Ver TX", width="small"),
-    }, hide_index=True, use_container_width=True)
-
     # Moneda de cada evento según el subyacente real del aToken. USDT y USDC son
     # ambos dólar, pero son mercados distintos con tipos distintos, así que los
     # KPIs se calculan por separado (el tratamiento fiscal sí va en conjunto).
@@ -2581,6 +2553,49 @@ if aave_lender_filtered:
         if und in STABLECOIN_CONTRACTS:
             return STABLECOIN_CONTRACTS[und][0]
         return m.get("stable_symbol") or "USDT"
+
+    saldo_at = 0.0
+    lender_rows = []
+    for m in aave_lender_filtered:
+        if m["tipo"] == "Depósito préstamo":
+            saldo_at += m["cantidad_atoken"]
+            importe_str = f"-{m['stable_amount']:,.2f} {m['stable_symbol']}" if m["stable_amount"] else "—"
+        else:
+            saldo_at -= m["cantidad_atoken"]
+            importe_str = f"+{m['stable_amount']:,.2f} {m['stable_symbol']}" if m["stable_amount"] else "—"
+        # Se muestra la divisa real (USDT/USDC) en vez del símbolo del aToken
+        # (aMatUSDT, aUSDCn): al lector le dice lo mismo y no le obliga a saber
+        # qué es un aToken. La columna sigue siendo necesaria porque en esta
+        # tabla conviven las dos divisas.
+        row = {
+            "Fecha":              m["fecha_str"],
+            "Operación":          m["tipo"],
+            "Divisa":             _moneda_lender(m),
+            "Importe operación":  importe_str,
+            "Saldo prestado en Aave": f"{saldo_at:,.4f}",
+            "TX":                 m["tx_link"],
+        }
+        # La clave se pone SIEMPRE: si solo se añadiera cuando hay intereses,
+        # pandas rellenaría las demás filas con "None" a la vista del lector.
+        row["Intereses de esta retirada"] = m["interest_note"] or "—"
+        if es_multi_wallet:
+            row["Wallet"] = m.get("wallet_alias", "—")
+        lender_rows.append(row)
+
+    st.dataframe(pd.DataFrame(lender_rows), column_config={
+        "TX": st.column_config.LinkColumn("Ver TX", width="small"),
+        "Divisa": st.column_config.TextColumn(width="small",
+            help="Divisa realmente depositada o retirada. Aave la representa internamente "
+                 "con un «aToken» (aMatUSDT, aUSDCn), pero aquí se muestra la divisa."),
+        "Importe operación": st.column_config.TextColumn(width="small",
+            help="Stablecoin movida EN ESTA operación, no un saldo. Negativo al depositar "
+                 "(el dinero sale de la wallet) y positivo al retirar (vuelve a ella)."),
+        "Saldo prestado en Aave": st.column_config.TextColumn(width="small",
+            help="Acumulado que queda prestado en Aave tras esta operación."),
+        "Intereses de esta retirada": st.column_config.TextColumn(width="small",
+            help="Intereses cobrados EN ESTA retirada concreta: la diferencia entre lo "
+                 "recibido y el principal que se retiró. No es el total acumulado."),
+    }, hide_index=True, use_container_width=True)
 
     por_moneda = defaultdict(list)
     for m in aave_lender_filtered:
@@ -2698,9 +2713,10 @@ if aave_lender_filtered:
                     f"margin:2px 0 6px;'>⏳ Devengado — posición viva</div>",
                     unsafe_allow_html=True)
         a1, a2, a3, a4 = st.columns(4)
-        _vivo = (f"{mon} · máx. expuesto: {k['pico']:,.2f}"
-                 if k["reciclado"] else
-                 (f"{mon} · vivo: {k['principal']:,.2f}" if k["hay_retiradas"] else mon))
+        # El máximo expuesto se muestra siempre, aunque coincida con el bruto:
+        # su ausencia dejaba al lector sin saber si el dato faltaba o es que no
+        # hubo reciclaje de capital.
+        _vivo = f"{mon} · máx. expuesto: {k['pico']:,.2f}"
         a1.markdown(kpi_card("💵", "Total aportado (bruto)", f"{k['dep']:,.2f}",
                              sublabel=_vivo, help=H_DEP), unsafe_allow_html=True)
         a2.markdown(kpi_card("⏳", "Intereses devengados",
@@ -2817,13 +2833,22 @@ if aave_borrower_filtered:
             ) if m["stable_amount"] else "—"
         else:
             importe_str = "—"
+        # "Detalle" traía el símbolo interno (variableDebtMatUSDT, aMatReental-…).
+        # Se traduce a lo que el lector entiende: la divisa en préstamos y pagos,
+        # y el proyecto en los movimientos de garantía.
+        _det = m["detalle"]
+        if m["tipo"] in ("Préstamo recibido", "Pago de deuda"):
+            _det = m.get("stable_symbol") or "USDT"
+        else:
+            _cod = codigo_proyecto_atoken(_det, "")
+            _det = _cod or _det
         row = {
-            "Fecha":      m["fecha_str"],
-            "Operación":  m["tipo"],
-            "Detalle":    m["detalle"],
-            "Cantidad":   f"{m['cantidad']:,.4f}",
-            "USDT/USDC":  importe_str,
-            "TX":         m["tx_link"],
+            "Fecha":             m["fecha_str"],
+            "Operación":         m["tipo"],
+            "Divisa / Proyecto": _det,
+            "Cantidad":          f"{m['cantidad']:,.4f}",
+            "Importe operación": importe_str,
+            "TX":                m["tx_link"],
         }
         if es_multi_wallet:
             row["Wallet"] = m.get("wallet_alias", "—")
@@ -2831,6 +2856,15 @@ if aave_borrower_filtered:
 
     st.dataframe(pd.DataFrame(borrower_rows), column_config={
         "TX": st.column_config.LinkColumn("Ver TX", width="small"),
+        "Divisa / Proyecto": st.column_config.TextColumn(width="small",
+            help="En préstamos y pagos, la divisa. En garantías, el proyecto cuyos tokens "
+                 "se depositaron o retiraron como colateral."),
+        "Cantidad": st.column_config.TextColumn(width="small",
+            help="Unidades movidas: stablecoin en préstamos y pagos, tokens del proyecto "
+                 "en los movimientos de garantía."),
+        "Importe operación": st.column_config.TextColumn(width="small",
+            help="Stablecoin movida EN ESTA operación, no un saldo. Positivo al recibir el "
+                 "préstamo y negativo al devolverlo. Las garantías no mueven dinero."),
     }, hide_index=True, use_container_width=True)
 
     total_prestado  = sum(m["stable_amount"] for m in aave_borrower_filtered if m["tipo"] == "Préstamo recibido")
@@ -2866,8 +2900,7 @@ if aave_borrower_filtered:
 
     b1, b2, b3, b4 = st.columns(4)
     b1.markdown(kpi_card("💸", "Total prestado (bruto)", f"{total_prestado:,.2f}",
-                         sublabel=(f"USDT / USDC · máx. a la vez: {pico_deuda:,.2f}"
-                                   if _deuda_reciclada else "USDT / USDC"),
+                         sublabel=f"USDT / USDC · máx. a la vez: {pico_deuda:,.2f}",
                          help="Suma de TODOS los préstamos del histórico. Si se devolvió deuda y "
                               "se volvió a pedir, ese importe cuenta varias veces; al lado va el "
                               "máximo que se llegó a deber a la vez, que es el apalancamiento real."),
