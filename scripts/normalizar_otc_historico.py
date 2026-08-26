@@ -58,13 +58,24 @@ BASE    = "https://api.etherscan.io/v2/api"
 TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 FX_URL  = "https://api.frankfurter.dev/v1/{fecha}?base=EUR&symbols=USD"
 
+# Wallet de custodia de Reental: es el comprador en las recompras, que el
+# registro no anota porque siempre es la misma.
+WALLET_OTC = os.getenv("OTC_WALLET", "0xce0719ec1bda336ba069c6961ad167767829301a").lower()
+
+STABLES_ADDR = {
+    "0xc2132d05d31c914a87c6611c10748aeb04b58e8f", "0xe84baaebd135cde0d03b974d3224a742570834af",
+    "0x2791bca1f2de4661ed88a30c99a7a9449aa84174", "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+    "0x8f3cf7ad23cd3cadbd9735aff958023239c6a063",
+}
+
 
 # Erratas de tecleo del registro manual. Cada una se confirmó leyendo qué token
 # se movió realmente en la transacción de esa fila: son transposiciones de
 # letras (DBX→DXB, SAL→SLA, MBL→MRB, CLMV/CVLM→CLVM).
 ALIAS_ID = {
     "CLMV-1": "CLVM-1", "CVLM-1": "CLVM-1",
-    "DBX-1":  "DXB-1",  "MBL-1":  "MRB-1", "SAL-2": "SLA-2",
+    "DBX-1":  "DXB-1",  "DBX-2":  "DXB-2",
+    "MBL-1":  "MRB-1",  "SAL-2":  "SLA-2", "RENTAS 1": "RET-1",
 }
 
 
@@ -100,6 +111,130 @@ def tokens_desde_texto(bruto, pago_eur, precio_emision):
         if mejor_err is None or err < mejor_err:
             mejor, mejor_err = cand, err
     return (round(mejor, 8), "texto (escala por precio)") if mejor else (None, "no disponible")
+
+
+# ── Adaptadores de esquema ───────────────────────────────────────────────────
+# Los registros manuales no comparten formato: el de 2025 anota comprador y
+# vendedor de una venta entre inversores; el de 2025-26 son RECOMPRAS de Reental
+# y solo traen la wallet del inversor, con la divisa del proyecto y la del pago
+# separadas. Cada uno se traduce a un mismo diccionario intermedio para que el
+# resto del proceso —cadena, lotes, tipo de cambio— sea idéntico.
+
+def _num_simple(v):
+    try:
+        return float(str(v).replace(",", ".").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _candidatos_importe(num: str):
+    """Todas las lecturas plausibles de un número con separadores ambiguos.
+
+    Este registro mezcla convenciones dentro de la MISMA columna: «€413.00»
+    (punto decimal), «10.044 usdt» (punto de miles) y hasta «8,820,00 EURO»
+    (coma repetida con decimales al final). No hay regla que acierte a ciegas,
+    así que se generan las lecturas posibles y decide quien tenga con qué
+    contrastarlas.
+    """
+    vistos, salida = set(), []
+
+    def añadir(v):
+        if v is not None and v not in vistos:
+            vistos.add(v)
+            salida.append(v)
+
+    solo_digitos = re.sub(r"[^0-9]", "", num)
+    for sep in (",", "."):
+        if num.count(sep) >= 1:
+            izq, _, der = num.rpartition(sep)
+            try:
+                añadir(float(re.sub(r"[^0-9]", "", izq) + "." + der))
+            except ValueError:
+                pass
+    try:
+        añadir(float(solo_digitos))          # todos los separadores son de miles
+    except ValueError:
+        pass
+    return salida
+
+
+def _importe_y_divisa(txt, esperado=None):
+    """'€413.00' → (413.00, 'EUR') · 'USDT 10,300.00' → (10300.0, 'USD')
+
+    Convive el formato español del fichero de 2025 (punto de miles, coma
+    decimal) con el inglés de este (coma de miles, punto decimal), así que se
+    decide por cuál de los dos separadores aparece más a la derecha.
+    """
+    if not isinstance(txt, str) or not txt.strip():
+        return None, None
+    t = txt.strip()
+    divisa = "USD" if ("USDT" in t.upper() or "$" in t) else "EUR"
+    num = re.sub(r"[^0-9.,]", "", t)
+    if "," in num and "." in num:
+        # Con ambos separadores, el de más a la derecha es el decimal.
+        decimal = "," if num.rfind(",") > num.rfind(".") else "."
+    else:
+        sep = "," if "," in num else ("." if "." in num else "")
+        # Un separador repetido solo puede ser de miles (1.234.567). Si aparece
+        # una vez es decimal: el número de decimales varía mucho en estos
+        # registros —hay importes con 7— y exigir uno o dos convertía
+        # «655.2808907» en 6.552.808.907.
+        decimal = "" if (sep and num.count(sep) > 1) else sep
+    if decimal == ",":
+        base = num.replace(".", "").replace(",", ".")
+    elif decimal == ".":
+        base = num.replace(",", "")
+    else:
+        base = num.replace(".", "").replace(",", "")
+    try:
+        valor = float(base)
+    except ValueError:
+        valor = None
+
+    # Con un importe esperado (tokens x valor del token) se elige la lectura más
+    # cercana en vez de fiarse de la heurística: es lo que distingue «10.044
+    # usdt» = 10.044 de 10,044, un factor de mil.
+    if esperado and esperado > 0:
+        cands = _candidatos_importe(num)
+        if cands:
+            valor = min(cands, key=lambda v: abs(v - esperado) / esperado)
+    return valor, divisa
+
+
+def filas_normalizadas(df: pd.DataFrame, wallet_otc: str) -> list:
+    """Traduce cualquiera de los dos formatos a un esquema común."""
+    cols = set(df.columns)
+    if "Wallet Comprador" in cols:                      # formato venta 2025
+        return [{
+            "fecha": r.get("Fecha de la op."), "proyecto": r.get("Inmueble"),
+            "tokens_txt": r.get("Nº Tokens"),
+            "importe": importe_eur(r.get("Total Pago €")), "divisa": "EUR",
+            "vendedor": str(r.get("Wallet Vendedor", "")).strip().lower(),
+            "comprador": str(r.get("Wallet Comprador", "")).strip().lower(),
+            "hash": r.get("Hash Transacción de los tokens"),
+        } for _, r in df.iterrows()]
+    if "Wallet del inversor" in cols:                   # formato recompra
+        filas = []
+        for _, r in df.iterrows():
+            # tokens x valor del token da el importe esperado en la divisa del
+            # proyecto; sirve de referencia aunque el pago fuera en otra.
+            try:
+                esperado = (float(str(r.get("Tokens", "")).replace(",", ".")) *
+                            float(str(r.get("Valor del token", "")).replace(",", ".")))
+            except (TypeError, ValueError):
+                esperado = None
+            imp, div = _importe_y_divisa(r.get("Amount"), esperado)
+            filas.append({
+                "fecha": r.get("Fecha"), "proyecto": r.get("Proyecto"),
+                "tokens_txt": r.get("Tokens"), "importe": imp, "divisa": div,
+                # Recompra: vende el inversor y compra Reental. El comprador no
+                # figura en el registro porque siempre es el mismo.
+                "vendedor": str(r.get("Wallet del inversor", "")).strip().lower(),
+                "comprador": wallet_otc, "valor_token": _num_simple(r.get("Valor del token")),
+                "hash": r.get("Hash TX de los tokens recibidos a recomprar"),
+            })
+        return filas
+    raise SystemExit(f"Formato no reconocido. Columnas: {sorted(cols)}")
 
 
 def parse_fecha(v):
@@ -178,89 +313,113 @@ def main() -> None:
     ficheros = sorted(glob.glob(os.path.join(DIR_EXPORTS, "*.csv")))
     if not ficheros:
         sys.exit(f"No hay ficheros en {DIR_EXPORTS}")
-    df = pd.concat([pd.read_csv(f, dtype=str) for f in ficheros], ignore_index=True)
-    print(f"operaciones a normalizar: {len(df):,}")
+    print(f"ficheros: {[os.path.basename(f) for f in ficheros]}")
 
     master = load_master_projects()
     addr_por_id = {str(r["id"]).strip().upper(): (r.get("token_address") or "").lower()
                    for _, r in master.iterrows()}
     precio_por_id = {str(r["id"]).strip().upper(): r.get("precio_emision")
                      for _, r in master.iterrows()}
+    id_por_addr = {(r.get("token_address") or "").lower(): str(r["id"]).strip().upper()
+                   for _, r in master.iterrows() if r.get("token_address")}
 
     filas, sin_addr, sin_cadena = [], 0, 0
-    for i, r in df.iterrows():
-        pid   = str(r["Inmueble"]).strip().upper()
+    registros = []
+    for f in ficheros:
+        d = pd.read_csv(f, dtype=str)
+        registros += filas_normalizadas(d, WALLET_OTC)
+    print(f"operaciones tras adaptar esquemas: {len(registros):,}")
+
+    for i, reg in enumerate(registros):
+        pid   = str(reg["proyecto"]).strip().upper()
         pid   = ALIAS_ID.get(pid, pid)
         addr  = addr_por_id.get(pid, "")
-        fecha = parse_fecha(r["Fecha de la op."])
-        tx_m  = re.search(r"0x[0-9a-fA-F]{64}", str(r.get("Hash Transacción de los tokens", "")))
+        fecha = parse_fecha(reg["fecha"])
+        tx_m  = re.search(r"0x[0-9a-fA-F]{64}", str(reg["hash"] or ""))
         tx    = tx_m.group(0).lower() if tx_m else None
-
-        # Cantidad: siempre desde la cadena, filtrando por el token del proyecto
-        # de ESTA fila (una TX puede liquidar varias operaciones distintas).
-        vendedor  = str(r["Wallet Vendedor"]).strip().lower()
-        comprador = str(r["Wallet Comprador"]).strip().lower()
+        vendedor, comprador = reg["vendedor"], reg["comprador"]
 
         # Cada operación tiene su PROPIO Transfer dentro de la transacción, así
         # que se cruza por vendedor y comprador. Sumar todos los del token
-        # asignaba el total del lote a cada fila: cinco operaciones de DNB-1 del
-        # 22/09 salían con 122,112 tokens cada una (el total) en vez de sus
-        # 50 / 25 / 11,79 / 23,58 / 11,75 reales, y el precio se desplomaba a
-        # 8 €/token en vez de los ~85 que fueron.
+        # asignaba el total del lote a cada fila.
         tokens, origen_tokens = None, "cadena"
-        if tx and addr:
+        if tx:
             movs = transfers_de(tx)
-            exacto = [m for m in movs if m[0] == addr and m[1] == vendedor and m[2] == comprador]
-            if not exacto:
-                exacto = [m for m in movs if m[0] == addr and m[2] == comprador]
-            if not exacto:
-                exacto = [m for m in movs if m[0] == addr and m[1] == vendedor]
-            if not exacto:
-                # Última opción: el token está pero no casan las wallets. Solo
-                # vale si es el único movimiento de ese token en la TX.
-                candidatos = [m for m in movs if m[0] == addr]
-                exacto = candidatos if len(candidatos) == 1 else []
+            if not addr:
+                # Proyecto sin dirección conocida (fila incompleta del registro):
+                # se deduce del propio movimiento si la TX solo mueve un token
+                # que no sea stablecoin.
+                cand = {m[0] for m in movs if m[0] not in STABLES_ADDR}
+                if len(cand) == 1:
+                    addr = cand.pop()
+                    pid = id_por_addr.get(addr, pid)
+                    origen_tokens = "cadena (proyecto deducido)"
+            if addr:
+                exacto = [m for m in movs if m[0] == addr and m[1] == vendedor and m[2] == comprador]
+                if not exacto:
+                    exacto = [m for m in movs if m[0] == addr and m[2] == comprador]
+                if not exacto:
+                    exacto = [m for m in movs if m[0] == addr and m[1] == vendedor]
+                if not exacto:
+                    candidatos = [m for m in movs if m[0] == addr]
+                    exacto = candidatos if len(candidatos) == 1 else []
+                    if exacto:
+                        origen_tokens = "cadena (sin casar wallets)"
                 if exacto:
-                    origen_tokens = "cadena (sin casar wallets)"
-            if exacto:
-                tokens = round(sum(m[3] for m in exacto), 8)
+                    tokens = round(sum(m[3] for m in exacto), 8)
         if not addr:
             sin_addr += 1
 
-        eur = importe_eur(r.get("Total Pago €"))
+        importe, divisa = reg["importe"], reg["divisa"] or "EUR"
         pe_ref = precio_por_id.get(pid)
         try:
             pe_ref = float(pe_ref) if pe_ref else None
         except (TypeError, ValueError):
             pe_ref = None
         if tokens is None:
-            # La cadena no lo resuelve (fila sin hash, o el enlace apunta al
-            # token en vez de a la transacción): se recupera del texto.
-            tokens, origen_tokens = tokens_desde_texto(r.get("Nº Tokens"), eur, pe_ref)
+            tokens, origen_tokens = tokens_desde_texto(reg["tokens_txt"], importe, pe_ref)
             sin_cadena += 1
+
+        # La cadena manda, pero no a ciegas: si la cantidad que devuelve implica
+        # un precio disparatado frente al importe pagado, es que se ha casado el
+        # Transfer equivocado (una TX puede mover el mismo token por otros
+        # motivos). En ese caso gana el registro, que sí cuadra con lo pagado.
+        ref = reg.get("valor_token") or pe_ref
+        if tokens and importe and ref and ref > 0:
+            precio = importe / tokens
+            if not (0.4 * ref <= precio <= 2.5 * ref):
+                alt, _ = tokens_desde_texto(reg["tokens_txt"], importe, ref)
+                if alt and 0.4 * ref <= (importe / alt) <= 2.5 * ref:
+                    tokens, origen_tokens = alt, "registro (cadena incoherente)"
+
         origen_importe = "registro"
-        if eur is None:
-            # Sin importe registrado: se valora a precio de emisión, y se marca.
-            pe = pe_ref
-            if pe and tokens:
-                eur = round(tokens * pe, 2)
+        if importe is None:
+            if pe_ref and tokens:
+                importe, divisa = round(tokens * pe_ref, 2), "EUR"
                 origen_importe = "precio de emisión"
             else:
                 origen_importe = "sin importe"
 
+        # Solo lo pagado en euros necesita conversión; lo pagado en USDT ya va
+        # en dólares y aplicarle el tipo lo falsearía.
         fstr = fecha.strftime("%Y-%m-%d") if pd.notna(fecha) else None
-        tasa = eur_usd(fstr) if fstr else None
-        usd  = round(eur * tasa, 2) if (eur is not None and tasa) else None
+        if divisa == "USD":
+            tasa, usd, eur = None, importe, None
+        else:
+            tasa = eur_usd(fstr) if fstr else None
+            eur  = importe
+            usd  = round(importe * tasa, 2) if (importe is not None and tasa) else None
 
         filas.append({
             "fecha": fstr, "proyecto_id": pid, "token_address": addr or None,
             "tokens": tokens, "importe_eur": eur, "eur_usd": tasa, "importe_usd": usd,
+            "divisa_pago": divisa,
             "vendedor": vendedor, "comprador": comprador,
             "tx_hash": tx, "origen_importe": origen_importe,
             "origen_tokens": origen_tokens,
         })
         if (i + 1) % 40 == 0:
-            print(f"  {i+1}/{len(df)}…")
+            print(f"  {i+1}/{len(registros)}…")
 
     out = pd.DataFrame(filas)
 
