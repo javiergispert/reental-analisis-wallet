@@ -392,7 +392,16 @@ def _filas_ranking(master_df: pd.DataFrame, disponibles: list,
         # un número ahí sería una fecha inventada. Lo que SÍ es firme en un
         # proyecto fuera de plazo es la renta que sigue cobrando (`r_rec_ann`,
         # dato real observado), y eso es lo que se muestra como suelo.
-        r_hoy_ann = None if fuera_de_plazo else (1 + r_hoy_total) ** (12 / meses) - 1
+        # DOS convenciones, ambas legítimas y ambas en uso:
+        #   TIR (compuesta): (1+total)^(12/meses)-1. Es el rendimiento financiero
+        #     real y lo único comparable entre proyectos de distinta duración,
+        #     porque penaliza el plazo. Por eso el ranking ordena por esta.
+        #   Simple: total/meses*12. Reparte linealmente, da un número mayor y es
+        #     la que usa el maestro en su columna 33 y el material comercial.
+        # Se muestran las dos: tenerlas conviviendo sin distinguir hacía que el
+        # ranking contradijera a la ficha del proyecto (NCA-1: 15,32% vs 17,00%).
+        r_hoy_ann        = None if fuera_de_plazo else (1 + r_hoy_total) ** (12 / meses) - 1
+        r_hoy_ann_simple = None if fuera_de_plazo else r_hoy_total * 12 / meses
 
         rows.append({
             "_id":              m["id"],
@@ -407,6 +416,7 @@ def _filas_ranking(master_df: pd.DataFrame, disponibles: list,
             "_colateralizable": m.get("colateralizable", False),
             "_fuente":          d["fuente"],
             "_r_hoy_ann":       r_hoy_ann,
+            "_r_hoy_ann_simple": r_hoy_ann_simple,
             "_r_hoy_total":     r_hoy_total,
             "_r_rec_ann":       r_rec_ann,
             "_r_alquiler_pend": r_alquiler_pend,
@@ -528,7 +538,8 @@ def generar_pdf(df: pd.DataFrame, categoria: str,
         ("Precio/Token P2P",              [fmt_precio(r["_precio_p2p"], r["_divisa"])                  for _,r in df.iterrows()]),
         ("Divisa",                        ["€" if r["_divisa"]=="EUR" else "$"                         for _,r in df.iterrows()]),
         ("Est. Meses hasta fin",          [f"{r['_meses']:.1f}"                                        for _,r in df.iterrows()]),
-        ("Rent. total anualizada est. *", [fmt_pct(r["_r_hoy_ann"])                                    for _,r in df.iterrows()]),
+        ("TIR anual (compuesta) *",       [fmt_pct(r["_r_hoy_ann"])                                    for _,r in df.iterrows()]),
+        ("Rent. anualizada simple *",      [fmt_pct(r["_r_hoy_ann_simple"])                             for _,r in df.iterrows()]),
         ("Rent. total pendiente est. *",  [fmt_pct(r["_r_hoy_total"])                                  for _,r in df.iterrows()]),
         ("Rent. alquiler pendiente *",    [fmt_pct(r["_r_alquiler_pend"])                              for _,r in df.iterrows()]),
         ("Rent. alquiler anualiz. real *",[fmt_pct(r["_r_rec_ann"])                                    for _,r in df.iterrows()]),
@@ -569,6 +580,11 @@ def generar_pdf(df: pd.DataFrame, categoria: str,
 
     notas = [
         "* Rentabilidades calculadas sobre precio P2P real. Se proyecta la tasa recurrente real acumulada hasta el vencimiento estimado.",
+        "* <b>TIR anual (compuesta)</b>: (1 + pendiente) ^ (12 / meses) − 1. Es el rendimiento financiero real, "
+        "comparable con cualquier otro producto, y penaliza el plazo. El ranking se ordena por esta cifra.",
+        "* <b>Rentabilidad anualizada simple</b>: pendiente × 12 / meses. Reparte el total linealmente sin componer. "
+        "Es la convención de la ficha comercial del proyecto. Resulta superior a la TIR en plazos de más de doce "
+        "meses e inferior en plazos más cortos, donde componer amplifica en vez de diluir.",
         "** La rent. al final es la ganancia patrimonial esperada en el cierre del proyecto.",
         f"— Categoría aplicada: {categoria}. Las rentabilidades varían según la categoría del inversor.",
         f"— Solo se incluyen proyectos con más de {MIN_TOKENS} tokens disponibles en el OTC interno de Reental.",
@@ -750,7 +766,8 @@ for _, r in df_ops.iterrows():
         "Precio P2P":                     fmt_precio(r["_precio_p2p"], r["_divisa"]),
         "Divisa":                         "€" if r["_divisa"]=="EUR" else "$",
         "Meses hasta fin":                f"{r['_meses']:.1f}",
-        "Rent. anualizada estimada":      fmt_pct(r["_r_hoy_ann"]),
+        "TIR anual (compuesta)":          fmt_pct(r["_r_hoy_ann"]),
+        "Anualizada simple":              fmt_pct(r["_r_hoy_ann_simple"]),
         "Rent. total pendiente":          fmt_pct(r["_r_hoy_total"]),
         "Rent. alquiler pendiente":       fmt_pct(r["_r_alquiler_pend"]),
         "Rent. alquiler anualizada real": fmt_pct(r["_r_rec_ann"]),
@@ -764,6 +781,40 @@ for _, r in df_ops.iterrows():
 st.dataframe(pd.DataFrame(display_rows), hide_index=True, use_container_width=True)
 
 st.caption(f"\\* Rentabilidades calculadas sobre precio P2P, proyectando la tasa real acumulada hasta vencimiento · Categoría: {categoria}")
+with st.expander("📐 TIR compuesta vs anualizada simple — cuál usar y por qué se muestran las dos"):
+    st.markdown("""
+Las dos anualizan la misma rentabilidad pendiente, pero con convenciones distintas:
+
+**⚡ TIR anual (compuesta)** — `(1 + pendiente)^(12 / meses) − 1`
+
+Es el rendimiento financiero **real**: lo que tendría que rendir el dinero cada año, reinvirtiendo,
+para llegar a ese resultado. **Penaliza el plazo**, así que es lo único comparable entre proyectos
+de duración distinta — y por eso **el ranking ordena por esta**. Es la cifra que un inversor puede
+contrastar con cualquier otro producto financiero.
+
+**📊 Anualizada simple** — `pendiente × 12 / meses`
+
+Reparte el total linealmente entre los meses, sin componer. Es la convención que usa el maestro en su
+columna *«Estimación Rentab. Total anualizado»* y, con ella, el material comercial.
+
+**Cuál sale mayor depende del plazo**, no es siempre la misma:
+
+| Plazo | Efecto de componer | Resultado |
+|---|---|---|
+| Menos de 12 meses | amplifica | **TIR > simple** |
+| Exactamente 12 meses | neutro | iguales |
+| Más de 12 meses | diluye | **TIR < simple** |
+
+**Por qué conviven aquí.** Un mismo proyecto puede aparecer con 15,32 % en el ranking y 17,00 % en
+su ficha sin que ninguna cifra esté mal: son dos formas de anualizar. Mostrar solo una hacía que el
+comercial no supiera cuál llevar delante del inversor. Con las dos y su etiqueta, la elección es
+consciente.
+
+> **NCA-1** (34,7 meses, 51 % pendiente) → TIR **15,32 %** · simple **17,64 %**: la simple gana
+> porque el plazo pasa de un año.
+> **DXB-1** (5,8 meses, 24 % pendiente) → TIR **56,66 %** · simple **50,09 %**: aquí gana la TIR,
+> porque componer por debajo del año amplifica en vez de diluir.
+    """)
 st.caption(f"\\*\\* La rent. al final es la ganancia patrimonial esperada al cierre · Mínimo {MIN_TOKENS} tokens disponibles para entrar en el análisis")
 
 # ── Aviso de hipótesis de acumulación ────────────────────────────────────────
@@ -1106,7 +1157,8 @@ with col_wa:
             lineas.append(f"\n{emoji} *{r['_nombre']}* ({r['_id']})")
             lineas.append(f"💰 Precio P2P: *{r['_precio_p2p']:,.0f} {divisa_sym}/token*")
             lineas.append(f"⏳ Tiempo hasta fin: *{r['_meses']:.0f} meses*")
-            lineas.append(f"📈 Rent. anualizada estimada: *{fmt_pct(r['_r_hoy_ann'])}*")
+            lineas.append(f"📈 TIR anual (compuesta): *{fmt_pct(r['_r_hoy_ann'])}*")
+            lineas.append(f"📊 Anualizada simple: *{fmt_pct(r['_r_hoy_ann_simple'])}*")
             lineas.append(f"📊 Rent. total pendiente: *{fmt_pct(r['_r_hoy_total'])}*")
             if r["_r_alquiler_pend"] and r["_r_alquiler_pend"] > 0.001:
                 lineas.append(f"   🏘️ Por alquiler: {fmt_pct(r['_r_alquiler_pend'])}")
