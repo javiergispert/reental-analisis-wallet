@@ -276,8 +276,11 @@ def _load_precios_otc_cached() -> dict:
 
 # ── Cálculo del ranking ───────────────────────────────────────────────────────
 
-def calcular_ranking(master_df: pd.DataFrame, disponibles: list,
-                     categoria: str, tipo_renta: str, top_n: int) -> pd.DataFrame:
+def _filas_ranking(master_df: pd.DataFrame, disponibles: list,
+                   categoria: str, tipo_renta: str) -> pd.DataFrame:
+    """Construye TODAS las filas candidatas, en plazo y fuera de él. La separan
+    `calcular_ranking` y `calcular_fuera_de_plazo`, que comparten así el ajuste
+    por precio P2P en vez de duplicarlo."""
     cols = CATEGORIAS[categoria]
 
     master_by_id = {row["id"].lower(): row for _, row in master_df.iterrows()}
@@ -300,9 +303,13 @@ def calcular_ranking(master_df: pd.DataFrame, disponibles: list,
         if precio_emision <= 0 or precio_p2p <= 0:
             continue
 
-        meses = m.get("meses_pendientes") or 0
-        if meses <= 0:
-            continue
+        # Se anualiza sobre los meses que faltan HASTA EL CIERRE (DB), no sobre
+        # los de renta pendiente (AS): el dinero del inversor sigue inmovilizado
+        # aunque la renta ya haya terminado. Un proyecto cuya fecha de fin ya
+        # pasó no tiene horizonte sobre el que anualizar — se marca «fuera de
+        # plazo» y se trata aparte en vez de descartarlo en silencio.
+        meses = m.get("meses_hasta_fin") or 0
+        fuera_de_plazo = meses <= 0
 
         r_hoy_ann_raw   = m.get(cols["r_hoy_ann"])
         r_hoy_total_raw = m.get(cols["r_hoy_total"])
@@ -336,7 +343,11 @@ def calcular_ranking(master_df: pd.DataFrame, disponibles: list,
         r_plusv         = adj * (1 + (r_plusv_raw     or 0)) - 1
         r_hoy_total     = adj * (1 + (r_hoy_total_raw or 0)) - 1
         r_alquiler_pend = r_hoy_total - r_plusv
-        r_hoy_ann       = (1 + r_hoy_total) ** (12 / meses) - 1
+        # Sin horizonte no hay anualizada posible: depende de cuándo cierre, y
+        # un número ahí sería una fecha inventada. Lo que SÍ es firme en un
+        # proyecto fuera de plazo es la renta que sigue cobrando (`r_rec_ann`,
+        # dato real observado), y eso es lo que se muestra como suelo.
+        r_hoy_ann = None if fuera_de_plazo else (1 + r_hoy_total) ** (12 / meses) - 1
 
         rows.append({
             "_id":              m["id"],
@@ -355,14 +366,45 @@ def calcular_ranking(master_df: pd.DataFrame, disponibles: list,
             "_r_rec_ann":       r_rec_ann,
             "_r_alquiler_pend": r_alquiler_pend,
             "_r_plusv":         r_plusv,
+            "_fuera_plazo":     fuera_de_plazo,
+            "_meses_retraso":   abs(meses) if fuera_de_plazo else 0.0,
         })
 
     if not rows:
         return pd.DataFrame()
 
-    df = pd.DataFrame(rows).sort_values("_r_hoy_ann", ascending=False).head(top_n).reset_index(drop=True)
-    df["_score"] = range(1, len(df) + 1)
-    return df
+    return pd.DataFrame(rows)
+
+
+def calcular_ranking(master_df: pd.DataFrame, disponibles: list,
+                     categoria: str, tipo_renta: str, top_n: int) -> pd.DataFrame:
+    """Top de oportunidades ordenado por rentabilidad anualizada pendiente.
+
+    Excluye los proyectos fuera de plazo: no tienen anualizada con la que
+    ordenarse. Van en su propia tabla, no se pierden.
+    """
+    df = _filas_ranking(master_df, disponibles, categoria, tipo_renta)
+    if df.empty:
+        return df
+    en_plazo = (df[~df["_fuera_plazo"]]
+                .sort_values("_r_hoy_ann", ascending=False)
+                .head(top_n).reset_index(drop=True))
+    en_plazo["_score"] = range(1, len(en_plazo) + 1)
+    return en_plazo
+
+
+def calcular_fuera_de_plazo(master_df: pd.DataFrame, disponibles: list,
+                            categoria: str, tipo_renta: str) -> pd.DataFrame:
+    """Proyectos con saldo disponible cuya fecha estimada de fin ya pasó.
+
+    Se calculan con la misma función para no duplicar la lógica de ajuste por
+    precio P2P; aquí solo se filtra el otro lado.
+    """
+    todos = _filas_ranking(master_df, disponibles, categoria, tipo_renta)
+    if todos.empty:
+        return todos
+    return (todos[todos["_fuera_plazo"]]
+            .sort_values("_r_hoy_total", ascending=False).reset_index(drop=True))
 
 
 # ── Formato ───────────────────────────────────────────────────────────────────
@@ -675,6 +717,81 @@ st.dataframe(pd.DataFrame(display_rows), hide_index=True, use_container_width=Tr
 
 st.caption(f"\\* Rentabilidades calculadas sobre precio P2P, proyectando la tasa real acumulada hasta vencimiento · Categoría: {categoria}")
 st.caption(f"\\*\\* La rent. al final es la ganancia patrimonial esperada al cierre · Mínimo {MIN_TOKENS} tokens disponibles para entrar en el análisis")
+
+# ── Fuera de plazo ────────────────────────────────────────────────────────────
+# Proyectos con saldo cuya fecha estimada de fin ya pasó. No tienen anualizada
+# —depende de cuándo cierren, y una fecha inventada inventaría la TIR— así que
+# van aparte en vez de desaparecer del análisis sin dejar rastro.
+_fuera = calcular_fuera_de_plazo(master_df, disponibles, categoria, tipo_renta_sel)
+if not _fuera.empty:
+    st.markdown("---")
+    st.markdown(
+        '<div style="display:flex;align-items:center;gap:10px;margin-bottom:2px;">'
+        '<span style="background:#dc2626;color:white;border-radius:5px;padding:3px 10px;'
+        'font-size:0.75rem;font-weight:700;letter-spacing:.04em;">⏰ FUERA DE PLAZO</span>'
+        f'<span style="font-weight:700;font-size:1.05rem;">{len(_fuera)} proyecto'
+        f'{"s" if len(_fuera) > 1 else ""} con saldo disponible</span></div>',
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "Su fecha estimada de fin ya pasó y no hay una nueva confirmada, así que **no se puede "
+        "calcular la rentabilidad anualizada**: depende enteramente de cuándo cierren. Lo que sí "
+        "es firme es la renta que siguen pagando."
+    )
+
+    _fp_rows = []
+    for _, r in _fuera.iterrows():
+        _renta = r["_r_rec_ann"] or 0
+        _fp_rows.append({
+            "Token":            r["_id"],
+            "Inmueble":         r["_nombre"],
+            "Precio P2P":       fmt_precio(r["_precio_p2p"], r["_divisa"]),
+            "Renta anual en curso": fmt_pct(_renta) if _renta > 0 else "no renta",
+            "Plusvalía pendiente": fmt_pct(r["_r_plusv"]),
+            "Total pendiente":  fmt_pct(r["_r_hoy_total"]),
+            "Tokens disp.":     f"{int(r['_tokens_disp']):,}",
+        })
+    st.dataframe(pd.DataFrame(_fp_rows), hide_index=True, use_container_width=True)
+
+    # Curva de sensibilidad: no hay UNA rentabilidad, hay una en función de
+    # cuándo cierre. Enseñarla completa es más honesto que elegir una fecha.
+    _sel_fp = st.selectbox(
+        "Ver rentabilidad según cuándo cierre el proyecto",
+        [f"{r['_nombre']} ({r['_id']})" for _, r in _fuera.iterrows()],
+        key="fp_sel",
+    )
+    _r = _fuera.iloc[[f"{x['_nombre']} ({x['_id']})" for _, x in _fuera.iterrows()].index(_sel_fp)]
+    _g = _r["_r_plusv"] or 0
+    _rn = _r["_r_rec_ann"] or 0
+    _meses_curva = [3, 6, 9, 12, 18, 24, 36]
+    _curva = [((1 + _g + _rn * m / 12) ** (12 / m) - 1) for m in _meses_curva]
+    fig_fp = go.Figure(go.Scatter(
+        x=_meses_curva, y=[v * 100 for v in _curva], mode="lines+markers",
+        line=dict(color="#dc2626", width=2), marker=dict(size=7),
+        hovertemplate="Si cierra en %{x} meses<br><b>%{y:.1f}%</b> anualizado<extra></extra>",
+    ))
+    if _rn > 0:
+        # La renta es el suelo: se cobra pase lo que pase con la fecha de cierre.
+        fig_fp.add_hline(y=_rn * 100, line=dict(color="#16a34a", width=1.5, dash="dash"),
+                         annotation_text=f"Renta en curso {_rn*100:.2f}% (suelo cierto)",
+                         annotation_position="bottom right",
+                         annotation_font=dict(size=10, color="#16a34a"))
+    fig_fp.update_layout(
+        height=290, margin=dict(t=30, b=10, l=8, r=8),
+        xaxis=dict(title="Meses hasta el cierre", gridcolor="#e2e8f0",
+                   tickmode="array", tickvals=_meses_curva),
+        yaxis=dict(title="Rentabilidad anualizada (%)", gridcolor="#e2e8f0"),
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", showlegend=False,
+    )
+    st.plotly_chart(fig_fp, use_container_width=True)
+    st.caption(
+        f"**{_r['_nombre']}**: plusvalía pendiente {fmt_pct(_g)}"
+        + (f" más una renta real de {fmt_pct(_rn)} anual que sigue cobrando mientras espera. "
+           "Esa renta es el suelo: se percibe con independencia de cuándo cierre. "
+           if _rn > 0 else " y sin renta en curso, así que todo depende de la fecha de cierre. ")
+        + "Para fijar una fecha y que vuelva al ranking, el equipo de Real Estate debe rellenar "
+          "la columna **CA** del maestro con una reestimación."
+    )
 
 # Índice de proyectos por dirección de token, para resolver nombre, ubicación y
 # precio de emisión en la sección de mercado secundario.

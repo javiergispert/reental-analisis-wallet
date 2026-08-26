@@ -18,7 +18,12 @@ ETHERSCAN_V2_BASE = "https://api.etherscan.io/v2/api"
 POLYGON_CHAIN_ID  = 137
 ZERO_ADDRESS      = "0x0000000000000000000000000000000000000000"
 
-GSHEET_MASTER_URL = os.getenv("GSHEET_CSV_URL", "")
+def _master_url() -> str:
+    """La URL se lee en cada llamada, no al importar el módulo. Si se leyera al
+    importar, bastaría con que una página importase `utils` antes de su
+    `load_dotenv()` para que quedara vacía durante toda la vida del proceso —y
+    el catálogo no cargara en ninguna página."""
+    return os.getenv("GSHEET_CSV_URL", "")
 GSHEET_P2P_URL = (
     "https://docs.google.com/spreadsheets/d/e/"
     "2PACX-1vQBD3VY1WO-MUn22MhdwbN3PKAuLQL5oGutMuZO2uwNc0CkMdr1UU9kjAozdM3U8njLlls6lMlarFG1"
@@ -128,9 +133,10 @@ def load_master_projects() -> pd.DataFrame:
     Carga y normaliza el CSV máster de propiedades.
     Devuelve un DataFrame con columnas tipadas y texto limpio (sin tildes garbled).
     """
-    if not GSHEET_MASTER_URL:
+    url = _master_url()
+    if not url:
         return pd.DataFrame()
-    r = requests.get(GSHEET_MASTER_URL, timeout=15, allow_redirects=True)
+    r = requests.get(url, timeout=15, allow_redirects=True)
     r.raise_for_status()
     raw = pd.read_csv(io.BytesIO(r.content), header=None, encoding="utf-8")
 
@@ -227,7 +233,11 @@ def load_master_projects() -> pd.DataFrame:
             "r_hoy_total":      parse_pct(row.iloc[45]),
             "r_hoy_anualizada": parse_pct(row.iloc[46]),
             "div_anual_token":  div_anual_token,
+            # AS (44) cuenta meses de RENTA pendientes; DB (105) cuenta los que
+            # faltan hasta el cierre. Para anualizar manda DB: el dinero del
+            # inversor sigue inmovilizado aunque la renta ya haya terminado.
             "meses_pendientes": parse_float_val(str(row.iloc[44])),
+            "meses_hasta_fin":  parse_float_val(str(row.iloc[105])) if len(row) > 105 else None,
             "div_pagado_token": parse_float_val(str(row.iloc[51])),
             "fecha_fin":        fecha_fin_real or fecha_fin_est,
             "fecha_lanzamiento": parse_fecha_util(str(row.iloc[3])),
