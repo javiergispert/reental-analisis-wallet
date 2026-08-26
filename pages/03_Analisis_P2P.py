@@ -276,6 +276,21 @@ def _load_precios_otc_cached() -> dict:
 
 # ── Cálculo del ranking ───────────────────────────────────────────────────────
 
+def _num(v):
+    """Convierte a float tratando NaN como ausencia.
+
+    Pandas convierte los None de una columna numérica en NaN, y NaN es un mal
+    centinela: `nan is None` es False, `nan <= 0` es False y `bool(nan)` es
+    True, así que `nan or 0` devuelve nan. Con eso, los proyectos sin dato
+    burlaban los guardianes y llegaban al ranking con todo a nan.
+    """
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return None if f != f else f          # f != f solo es cierto para NaN
+
+
 def _filas_ranking(master_df: pd.DataFrame, disponibles: list,
                    categoria: str, tipo_renta: str) -> pd.DataFrame:
     """Construye TODAS las filas candidatas, en plazo y fuera de él. La separan
@@ -308,15 +323,23 @@ def _filas_ranking(master_df: pd.DataFrame, disponibles: list,
         # aunque la renta ya haya terminado. Un proyecto cuya fecha de fin ya
         # pasó no tiene horizonte sobre el que anualizar — se marca «fuera de
         # plazo» y se trata aparte en vez de descartarlo en silencio.
-        meses = m.get("meses_hasta_fin") or 0
+        # Un proyecto cerrado no es una oportunidad de inversión, por mucho que
+        # queden tokens suyos en la wallet.
+        if "CERRAD" in str(m.get("estado", "")).upper():
+            continue
+
+        meses = _num(m.get("meses_hasta_fin")) or 0.0
         fuera_de_plazo = meses <= 0
 
-        r_hoy_ann_raw   = m.get(cols["r_hoy_ann"])
-        r_hoy_total_raw = m.get(cols["r_hoy_total"])
-        r_rec_ann_raw   = m.get(cols["r_rec_ann"])
-        r_plusv_raw     = m.get(cols["r_plusv"])
+        r_hoy_ann_raw   = _num(m.get(cols["r_hoy_ann"]))
+        r_hoy_total_raw = _num(m.get(cols["r_hoy_total"]))
+        r_rec_ann_raw   = _num(m.get(cols["r_rec_ann"]))
+        r_plusv_raw     = _num(m.get(cols["r_plusv"]))
 
-        if r_hoy_ann_raw is None:
+        # Sin rentabilidad pendiente no hay nada que rankear. Se comprueba sobre
+        # el TOTAL, no sobre la anualizada: un proyecto fuera de plazo tiene
+        # total pero no anualizada, y exigir esta última lo expulsaría.
+        if r_hoy_total_raw is None:
             continue
 
         # Ajuste por precio P2P vs precio de emisión.
@@ -339,9 +362,31 @@ def _filas_ranking(master_df: pd.DataFrame, disponibles: list,
         #     r_ann = (1+r_total_adj)^(12/meses) - 1
         adj = precio_emision / precio_p2p
 
+        # Acumulación en prórroga (columna DC del maestro). Cuando un proyecto
+        # sobrepasa su fecha de fin, el precio OTC/P2P puede fijarse asumiendo
+        # que el activo sigue revalorizándose. Si el precio la incorpora y este
+        # cálculo no, se comparan dos bases distintas y sale un pendiente
+        # negativo que no significa nada: CDS-1 daba −18,52% cotizando a 135
+        # cuando su retorno real bajo esa hipótesis es +5,19%.
+        #
+        # El reloj arranca en la fecha de fin ORIGINAL, no en la reestimada: el
+        # plazo prometido ya estaba cubierto por la plusvalía estimada.
+        _tasa_acum = _num(m.get("tasa_acum_prorroga")) or 0.0
+        _fin_orig  = m.get("fecha_fin_original")
+        _retraso   = 0.0
+        if _tasa_acum and _fin_orig:
+            _retraso = max(0.0, (date.today() - _fin_orig).days / 30.44)
+        # Se acumula por el retraso ya transcurrido (que el precio de hoy ya
+        # refleja) y por lo que queda hasta el cierre (que es lo que gana quien
+        # compra ahora).
+        acumulado = _tasa_acum * (_retraso + max(0.0, meses))
+
         r_rec_ann       = (r_rec_ann_raw or 0) * adj
-        r_plusv         = adj * (1 + (r_plusv_raw     or 0)) - 1
-        r_hoy_total     = adj * (1 + (r_hoy_total_raw or 0)) - 1
+        r_plusv         = adj * (1 + (r_plusv_raw or 0) + acumulado) - 1
+        r_hoy_total     = adj * (1 + (r_hoy_total_raw or 0) + acumulado) - 1
+        # Sin la hipótesis, para poder contrastar en la UI qué parte del retorno
+        # depende de ella.
+        r_hoy_total_est = adj * (1 + (r_hoy_total_raw or 0)) - 1
         r_alquiler_pend = r_hoy_total - r_plusv
         # Sin horizonte no hay anualizada posible: depende de cuándo cierre, y
         # un número ahí sería una fecha inventada. Lo que SÍ es firme en un
@@ -367,7 +412,10 @@ def _filas_ranking(master_df: pd.DataFrame, disponibles: list,
             "_r_alquiler_pend": r_alquiler_pend,
             "_r_plusv":         r_plusv,
             "_fuera_plazo":     fuera_de_plazo,
-            "_meses_retraso":   abs(meses) if fuera_de_plazo else 0.0,
+            "_meses_retraso":   _retraso,
+            "_tasa_acum":       _tasa_acum,
+            "_acumulado":       acumulado,
+            "_r_hoy_total_est": r_hoy_total_est,
         })
 
     if not rows:
@@ -717,6 +765,31 @@ st.dataframe(pd.DataFrame(display_rows), hide_index=True, use_container_width=Tr
 
 st.caption(f"\\* Rentabilidades calculadas sobre precio P2P, proyectando la tasa real acumulada hasta vencimiento · Categoría: {categoria}")
 st.caption(f"\\*\\* La rent. al final es la ganancia patrimonial esperada al cierre · Mínimo {MIN_TOKENS} tokens disponibles para entrar en el análisis")
+
+# ── Aviso de hipótesis de acumulación ────────────────────────────────────────
+# Si el precio de un proyecto se fijó asumiendo que sigue revalorizándose en la
+# prórroga, el retorno mostrado depende de esa hipótesis. Se dice, con la cifra
+# alternativa al lado, para que nadie la tome por un hecho.
+_con_hip = df_ops[df_ops["_acumulado"] > 0] if "_acumulado" in df_ops.columns else pd.DataFrame()
+if not _con_hip.empty:
+    _lineas = []
+    for _, _r in _con_hip.iterrows():
+        _lineas.append(
+            f"- **{_r['_nombre']} ({_r['_id']})** — {fmt_pct(_r['_r_hoy_total'])} pendiente "
+            f"asumiendo que sigue acumulando **{_r['_tasa_acum']*100:.2f}% mensual** durante la "
+            f"prórroga ({_r['_meses_retraso']:.1f} meses de retraso). "
+            f"Sin esa hipótesis sería **{fmt_pct(_r['_r_hoy_total_est'])}**."
+        )
+    with st.expander(f"ℹ️ {len(_con_hip)} proyecto(s) con rentabilidad sujeta a hipótesis de "
+                     "acumulación — ver detalle", expanded=True):
+        for _l in _lineas:
+            st.markdown(_l)
+        st.caption(
+            "Su precio se fijó dando por hecho que el activo sigue revalorizándose pese a haber "
+            "sobrepasado la fecha de fin. Es una hipótesis, no un dato observado: si no se cumple, "
+            "el retorno es el segundo número. La tasa se define por proyecto en la columna **DC** "
+            "del maestro."
+        )
 
 # ── Fuera de plazo ────────────────────────────────────────────────────────────
 # Proyectos con saldo cuya fecha estimada de fin ya pasó. No tienen anualizada

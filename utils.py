@@ -238,6 +238,16 @@ def load_master_projects() -> pd.DataFrame:
             # inversor sigue inmovilizado aunque la renta ya haya terminado.
             "meses_pendientes": parse_float_val(str(row.iloc[44])),
             "meses_hasta_fin":  parse_float_val(str(row.iloc[105])) if len(row) > 105 else None,
+            # DC: ritmo al que se asume que el activo sigue acumulando valor una
+            # vez sobrepasada su fecha de fin. Es una HIPÓTESIS de quien fija el
+            # precio, no un dato observado, y por eso se rellena a mano y solo
+            # en los proyectos donde el precio la incorpora.
+            "tasa_acum_prorroga": parse_pct(row.iloc[106]) if len(row) > 106 else None,
+            # Fecha de fin ORIGINAL: ancla desde la que se cuenta el retraso. No
+            # sirve CA, que es la reestimación: la acumulación empieza cuando
+            # vence el plazo que se prometió.
+            "fecha_fin_original": (parse_fecha_util(str(row.iloc[8]))
+                                   or parse_fecha_util(str(row.iloc[5]))),
             "div_pagado_token": parse_float_val(str(row.iloc[51])),
             "fecha_fin":        fecha_fin_real or fecha_fin_est,
             "fecha_lanzamiento": parse_fecha_util(str(row.iloc[3])),
