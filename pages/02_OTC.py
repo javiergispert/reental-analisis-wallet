@@ -473,11 +473,12 @@ if ofertas_activas:
     st.markdown("#### 👤 Tokens de terceros publicados para venta")
     st.caption("Estas ofertas son de inversores particulares y NO se suman al inventario de Reental.")
 
-    filas_of, avisos_of = [], []
+    filas_of, avisos_of, estados_of = [], [], []
     for o in ofertas_activas:
         addr       = o["token_address"].lower()
         proj       = project_by_addr.get(addr, {})
         est        = estado_oferta(o)
+        estados_of.append(est)
         n_oferta   = float(o["n_tokens"])
         fecha_fin  = proj.get("fecha_fin")
 
@@ -507,6 +508,40 @@ if ofertas_activas:
 
         if not est["ok"]:
             avisos_of.append(f"**{o['proyecto_nombre']}** ({o['inversor']}): {est['motivo']}")
+
+    # ── KPIs de las ofertas de terceros ──────────────────────────────────────
+    # Mismas métricas que la wallet OTC, con dos cambios de concepto: un mismo
+    # proyecto puede estar ofertado por varios inversores (se cuentan proyectos
+    # distintos, no ofertas), y aquí no hay custodia — el token sigue siendo del
+    # inversor.
+    _of_ok       = [e for e in estados_of if e["ok"]]
+    _of_proyectos = len({o["proyecto_id"] for o in ofertas_activas})
+    # Se suma el RESPALDO (lo menor entre lo ofertado y el saldo real), no el
+    # saldo del inversor: si tiene 50 tokens y ofrece 10, en oferta hay 10. Y no
+    # lo publicado a secas, que es lo que ya sabemos que se infla.
+    _of_ofertados  = sum(e["respaldo"]   for e in _of_ok)
+    _of_reservados = sum(e["reservado"]  for e in _of_ok)
+    _of_disp       = sum(e["disponible"] for e in _of_ok)
+    _of_reservas   = [r for r in reservas
+                      if r.get("estado") not in ("completada", "cancelada")
+                      and r.get("tipo_origen") == "tercero"]
+    _sin_verificar = len(estados_of) - len(_of_ok)
+    _sub_ofertados = ("saldo real del inversor" if not _sin_verificar
+                      else f"saldo real · {_sin_verificar} sin verificar")
+
+    o1, o2, o3, o4, o5 = st.columns(5)
+    o1.markdown(kpi_card("🏠", "Proyectos ofertados", str(_of_proyectos),
+                         sublabel=f"{len(ofertas_activas)} oferta(s) activa(s)"), unsafe_allow_html=True)
+    o2.markdown(kpi_card("🪙", "Tokens ofertados", f"{_of_ofertados:,.0f}",
+                         sublabel=_sub_ofertados), unsafe_allow_html=True)
+    o3.markdown(kpi_card("📋", "Tokens reservados", f"{_of_reservados:,.0f}",
+                         sublabel="reservas activas pendientes", value_color="#d97706"), unsafe_allow_html=True)
+    o4.markdown(kpi_card("✅", "Tokens disponibles", f"{_of_disp:,.0f}",
+                         sublabel="libres para nueva reserva", value_color="#16a34a"), unsafe_allow_html=True)
+    o5.markdown(kpi_card("🔖", "Reservas activas", str(len(_of_reservas)),
+                         sublabel="sobre tokens de terceros"), unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
 
     def color_saldo_real(val):
         if val is None: return "color:#94a3b8"
