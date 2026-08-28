@@ -26,6 +26,9 @@ from reental_tokens import codigo_proyecto_atoken
 # de la API se convirtiera en "saldo desconocido".
 import aave_lend as _al
 import otc_saldos as _saldos
+# Avisos de protocolo: los pasos que hay que dar FUERA de la herramienta y en
+# orden. El texto vive en el módulo, no aquí.
+import otc_protocolos as _protocolos
 
 # ── Constantes ────────────────────────────────────────────────────────────────
 
@@ -604,7 +607,11 @@ with st.expander("🔐 Gestión de precios OTC mínimos (acceso administrador)",
 # ══════════════════════════════════════════════════════════════════════════════
 
 st.markdown("---")
-with st.expander("📢 Publicar oferta de token de tercero", expanded=False):
+# El desplegable se mantiene abierto mientras el aviso de protocolo está en
+# pantalla: si se cerrara, al confirmar el modal el usuario perdería de vista
+# los datos que acaba de introducir.
+with st.expander("📢 Publicar oferta de token de tercero",
+                 expanded=_protocolos.pendiente(_protocolos.OFERTA_TERCERO)):
     st.caption("Registra la intención de venta de un inversor para que el equipo comercial pueda gestionarla.")
 
     # Solo tokens activos (no cerrados)
@@ -669,13 +676,32 @@ with st.expander("📢 Publicar oferta de token de tercero", expanded=False):
             else:
                 st.success(f"✅ Saldo verificado: {saldo_real_of:,.3f} tokens disponibles{_col_of}.")
 
-        if st.button("📢 Publicar oferta", type="primary", use_container_width=True, key="of_guardar"):
-            errores_of = []
-            if not of_comercial.strip(): errores_of.append("El campo Comercial es obligatorio.")
-            if not of_inversor.strip():  errores_of.append("El campo Inversor es obligatorio.")
-            if not of_email.strip():     errores_of.append("El campo Email es obligatorio.")
+        def _errores_oferta() -> list:
+            e = []
+            if not of_comercial.strip(): e.append("El campo Comercial es obligatorio.")
+            if not of_inversor.strip():  e.append("El campo Inversor es obligatorio.")
+            if not of_email.strip():     e.append("El campo Email es obligatorio.")
             if not (of_wallet_clean.startswith("0x") and len(of_wallet_clean) == 42):
-                errores_of.append("La wallet del inversor no es una dirección válida.")
+                e.append("La wallet del inversor no es una dirección válida.")
+            return e
+
+        if st.button("📢 Publicar oferta", type="primary", use_container_width=True, key="of_guardar"):
+            errores_of = _errores_oferta()
+            for e in errores_of:
+                st.error(e)
+            # Se valida antes de abrir el aviso: obligar a leer todo el
+            # protocolo para responder después «falta el email» es la forma más
+            # rápida de que se lea en diagonal.
+            if not errores_of:
+                _protocolos.solicitar(_protocolos.OFERTA_TERCERO)
+                st.rerun()
+
+        _protocolos.gestionar(_protocolos.OFERTA_TERCERO)
+
+        if _protocolos.consumir(_protocolos.OFERTA_TERCERO):
+            # Se revalida al guardar: entre abrir el aviso y confirmarlo el
+            # usuario ha podido cambiar cualquier campo del formulario.
+            errores_of = _errores_oferta()
             for e in errores_of:
                 st.error(e)
             if not errores_of:
@@ -714,7 +740,8 @@ with st.expander("📢 Publicar oferta de token de tercero", expanded=False):
 # ══════════════════════════════════════════════════════════════════════════════
 
 st.markdown("---")
-_exp_reserva = st.expander("➕ Crear nueva reserva", expanded=False)
+_exp_reserva = st.expander("➕ Crear nueva reserva",
+                           expanded=_protocolos.pendiente(_protocolos.RESERVA_TERCERO))
 with _exp_reserva:
 
     proyectos_con_saldo = {
@@ -860,7 +887,11 @@ with _exp_reserva:
             unsafe_allow_html=True,
         )
 
-        if st.button("💾 Guardar reserva", type="primary", use_container_width=True, key="nr_guardar", disabled=(_disp_f < _ntok_min)):
+        # La validación se separa del guardado para poder intercalar el aviso de
+        # protocolo entre una y otro. Se vuelve a llamar al confirmar el aviso: el
+        # saldo del tercero se comprueba en cadena y pudo moverse mientras se leía.
+        def _errores_reserva() -> tuple:
+            """(lista de errores, wallet del inversor ya normalizada)."""
             errores = []
             if not comercial.strip():
                 errores.append("El campo Comercial es obligatorio.")
@@ -913,47 +944,68 @@ with _exp_reserva:
                     f"El precio acordado ({precio_acordado:.2f} {divisa_proj}) es inferior al precio {origen_precio} "
                     f"de **{precio_min_efectivo:.2f} {divisa_proj}**."
                 )
-            if errores:
-                for e in errores:
-                    st.error(e)
-            else:
-                nueva = {
-                    "id":               f"RES-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
-                    "tipo_origen":      sel["tipo"],
-                    "oferta_id":        sel.get("oferta_id"),
-                    "token_address":    addr_sel,
-                    "proyecto_nombre":  sel["nombre"],
-                    "proyecto_id":      sel["id"],
-                    "comercial":        comercial.strip(),
-                    "inversor":         inversor.strip(),
-                    "wallet_inversor":  wallet_inv_clean,
-                    "wallet_pendiente": sin_wallet,
-                    "n_tokens":         float(n_tokens),
-                    "precio_acordado":  float(precio_acordado),
-                    "divisa":           divisa_proj,
-                    "total_eur":        round(total_eur, 2),
-                    "total_usd":        round(total_usd, 2),
-                    "eur_usd_rate":     eur_usd,
-                    "eur_usd_fecha":    eur_usd_fecha,
-                    "fecha_reserva":    datetime.utcnow().strftime("%d/%m/%Y %H:%M"),
-                    "estado":           "activa",
-                    "notas":            notas.strip(),
-                    "tx_envio":         None,
-                    "fecha_envio":      None,
-                }
-                reservas_all = _fresh_list(TAB_RESERVAS)
-                reservas_all.append(nueva)
-                save_reservas(reservas_all)
-                for _k in ["nr_proyecto", "nr_comercial", "nr_inversor", "nr_wallet",
-                            "nr_ntokens", "nr_precio", "nr_notas", "nr_sin_wallet"]:
-                    st.session_state.pop(_k, None)
-                aviso = st.success(
-                    f"✅ Reserva anotada — {n_tokens} tokens de **{sel['nombre']}** "
-                    f"para **{inversor.strip()}** · "
-                    f"{total_eur:,.2f} EUR / {total_usd:,.2f} USD"
-                )
-                time.sleep(2)
-                st.rerun()
+            return errores, wallet_inv_clean
+
+        def _persistir_reserva(wallet_inv_clean: str) -> None:
+            nueva = {
+                "id":               f"RES-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
+                "tipo_origen":      sel["tipo"],
+                "oferta_id":        sel.get("oferta_id"),
+                "token_address":    addr_sel,
+                "proyecto_nombre":  sel["nombre"],
+                "proyecto_id":      sel["id"],
+                "comercial":        comercial.strip(),
+                "inversor":         inversor.strip(),
+                "wallet_inversor":  wallet_inv_clean,
+                "wallet_pendiente": sin_wallet,
+                "n_tokens":         float(n_tokens),
+                "precio_acordado":  float(precio_acordado),
+                "divisa":           divisa_proj,
+                "total_eur":        round(total_eur, 2),
+                "total_usd":        round(total_usd, 2),
+                "eur_usd_rate":     eur_usd,
+                "eur_usd_fecha":    eur_usd_fecha,
+                "fecha_reserva":    datetime.utcnow().strftime("%d/%m/%Y %H:%M"),
+                "estado":           "activa",
+                "notas":            notas.strip(),
+                "tx_envio":         None,
+                "fecha_envio":      None,
+            }
+            reservas_all = _fresh_list(TAB_RESERVAS)
+            reservas_all.append(nueva)
+            save_reservas(reservas_all)
+            for _k in ["nr_proyecto", "nr_comercial", "nr_inversor", "nr_wallet",
+                        "nr_ntokens", "nr_precio", "nr_notas", "nr_sin_wallet"]:
+                st.session_state.pop(_k, None)
+            aviso = st.success(
+                f"✅ Reserva anotada — {n_tokens} tokens de **{sel['nombre']}** "
+                f"para **{inversor.strip()}** · "
+                f"{total_eur:,.2f} EUR / {total_usd:,.2f} USD"
+            )
+            time.sleep(2)
+            st.rerun()
+
+        if st.button("💾 Guardar reserva", type="primary", use_container_width=True, key="nr_guardar", disabled=(_disp_f < _ntok_min)):
+            _errs, _wallet = _errores_reserva()
+            for e in _errs:
+                st.error(e)
+            if not _errs:
+                # Los tokens de stock propio no necesitan coordinación con el
+                # comercial del vendedor: el aviso solo aplica a los de tercero.
+                if sel["tipo"] == "tercero":
+                    _protocolos.solicitar(_protocolos.RESERVA_TERCERO)
+                    st.rerun()
+                else:
+                    _persistir_reserva(_wallet)
+
+        _protocolos.gestionar(_protocolos.RESERVA_TERCERO)
+
+        if _protocolos.consumir(_protocolos.RESERVA_TERCERO):
+            _errs, _wallet = _errores_reserva()
+            for e in _errs:
+                st.error(e)
+            if not _errs:
+                _persistir_reserva(_wallet)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
