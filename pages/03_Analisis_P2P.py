@@ -426,6 +426,10 @@ def _filas_ranking(master_df: pd.DataFrame, disponibles: list,
             "_tasa_acum":       _tasa_acum,
             "_acumulado":       acumulado,
             "_r_hoy_total_est": r_hoy_total_est,
+            # Lo que el modelo dice que valdrá el token al cierre, y el precio a
+            # partir del cual comprarlo da pérdida. Sin esto, un pendiente
+            # negativo obliga a rehacer la cuenta a mano para saber por qué.
+            "_valor_cierre":    precio_emision * (1 + (r_hoy_total_raw or 0) + acumulado),
         })
 
     if not rows:
@@ -825,11 +829,18 @@ _con_hip = df_ops[df_ops["_acumulado"] > 0] if "_acumulado" in df_ops.columns el
 if not _con_hip.empty:
     _lineas = []
     for _, _r in _con_hip.iterrows():
+        _vc = _r["_valor_cierre"]
+        _sobre = _r["_precio_p2p"] > _vc
         _lineas.append(
             f"- **{_r['_nombre']} ({_r['_id']})** — {fmt_pct(_r['_r_hoy_total'])} pendiente "
             f"asumiendo que sigue acumulando **{_r['_tasa_acum']*100:.2f}% mensual** durante la "
             f"prórroga ({_r['_meses_retraso']:.1f} meses de retraso). "
-            f"Sin esa hipótesis sería **{fmt_pct(_r['_r_hoy_total_est'])}**."
+            f"Sin esa hipótesis sería **{fmt_pct(_r['_r_hoy_total_est'])}**.  \n"
+            f"  Valor proyectado al cierre: **{fmt_precio(_vc, _r['_divisa'])}** · "
+            f"precio actual {fmt_precio(_r['_precio_p2p'], _r['_divisa'])}"
+            + (f" → ⚠️ **el precio supera ese valor**, por eso la rentabilidad sale negativa. "
+               f"Por debajo de {fmt_precio(_vc, _r['_divisa'])} vuelve a ser positiva."
+               if _sobre else "")
         )
     with st.expander(f"ℹ️ {len(_con_hip)} proyecto(s) con rentabilidad sujeta a hipótesis de "
                      "acumulación — ver detalle", expanded=True):
