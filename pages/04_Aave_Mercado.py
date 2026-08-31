@@ -13,6 +13,8 @@ este pool privado. El histórico de USDT/USDC y el análisis de concentración d
 holders sí se reconstruyen on-chain, escaneando eventos Transfer (mint/burn) de
 los aTokens y debt tokens de USDT/USDC desde su despliegue.
 """
+from __future__ import annotations
+
 
 import io
 import json
@@ -393,7 +395,8 @@ def build_historical_fig(df_m: pd.DataFrame, sym: str, dark: bool = True) -> go.
 # ── Exportación: PDF e informe WhatsApp ──────────────────────────────────────
 
 def generar_pdf_aave(stables: dict, df_col: pd.DataFrame, supply_holders: dict, borrow_holders: dict,
-                      historical_resumen: dict = None, historical_dfs: dict = None) -> bytes:
+                      historical_resumen: dict = None, historical_dfs: dict = None,
+                      salud: dict = None) -> bytes:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4,
                              leftMargin=1.5 * cm, rightMargin=1.5 * cm,
@@ -498,6 +501,137 @@ def generar_pdf_aave(stables: dict, df_col: pd.DataFrame, supply_holders: dict, 
         ))
     story.append(Spacer(1, 0.5 * cm))
 
+    # ── Salud agregada del mercado ───────────────────────────────────────────
+    # Va aquí, antes de los gráficos, en el mismo orden que la web: es el dato
+    # de cabecera para explicar la exposición del mercado de una sola vez.
+    story.append(seccion("Salud del mercado — el pool como una sola cuenta"))
+    story.append(Spacer(1, 0.2 * cm))
+
+    if not salud or not salud.get("n_posiciones"):
+        story.append(Paragraph(
+            "No se incluyó en este informe. Se calcula bajo demanda desde la sección "
+            "«Salud del mercado» de la herramienta (requiere consultar la posición de cada "
+            "prestatario en el pool); una vez calculada, se incorpora automáticamente al PDF.",
+            nota_s,
+        ))
+        story.append(Spacer(1, 0.5 * cm))
+    else:
+        hf_pdf = salud["health_factor"]
+        _, etiqueta_pdf, _ = _al.nivel_riesgo(hf_pdf)
+
+        # Franja de cifras de cabecera: mismo lenguaje visual que las secciones
+        # de arriba, con el valor grande sobre la etiqueta.
+        kpi_lbl = ParagraphStyle("kl", fontSize=7.5, leading=10, alignment=TA_CENTER,
+                                 fontName="Helvetica-Bold", textColor=PDF_BLANCO)
+        kpi_val = ParagraphStyle("kv", fontSize=14, leading=17, alignment=TA_CENTER,
+                                 fontName="Helvetica-Bold", textColor=PDF_NAVY_OSC)
+        kpi_sub = ParagraphStyle("ks", fontSize=6.5, leading=9, alignment=TA_CENTER,
+                                 fontName="Helvetica", textColor=colors.HexColor("#64748B"))
+
+        cabecera = [
+            ("Health Factor agregado", f"{hf_pdf:,.3f}", f"{etiqueta_pdf} · liquidación si &lt; 1"),
+            ("Colateral respaldando deuda", f"${salud['colateral_usd']:,.0f}",
+             f"umbral medio {salud['umbral_medio'] * 100:,.1f}%"),
+            ("Deuda total", f"${salud['deuda_usd']:,.0f}",
+             f"{salud['n_posiciones']} posiciones abiertas"),
+            ("Sobrecolateralización", f"{salud['sobrecolateral']:,.2f}&#215;",
+             f"LTV medio {salud['ltv_medio'] * 100:,.1f}%"),
+        ]
+        t_kpi = Table(
+            [[Paragraph(l, kpi_lbl) for l, _, _ in cabecera],
+             [Paragraph(v, kpi_val) for _, v, _ in cabecera],
+             [Paragraph(x, kpi_sub) for _, _, x in cabecera]],
+            colWidths=["25%"] * 4,
+        )
+        t_kpi.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), PDF_NAVY_OSC),
+            ("BACKGROUND", (0, 1), (-1, -1), PDF_GRIS_CLAR),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#CBD5E1")),
+            ("TOPPADDING", (0, 0), (-1, 0), 5), ("BOTTOMPADDING", (0, 0), (-1, 0), 5),
+            ("TOPPADDING", (0, 1), (-1, 1), 6), ("BOTTOMPADDING", (0, 2), (-1, 2), 6),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ]))
+        story.append(t_kpi)
+        story.append(Spacer(1, 0.3 * cm))
+
+        en_riesgo_pdf = sum(t["pct_deuda"] for t in salud["tramos"] if t["desde"] < 1.3)
+        story.append(Paragraph(
+            "El Health Factor no se promedia entre carteras, pero sí se reconstruye para el conjunto "
+            "con su propia definición: <b>HF = &#931;(colateral &#215; umbral de liquidación) &#247; "
+            "&#931;(deuda)</b>. El resultado mide la solvencia del mercado <b>como bloque</b>: por encima "
+            "de 1, el colateral aportado cubre la deuda viva. El colateral se valora con el oráculo del "
+            "pool, que es el precio con el que el protocolo decide las liquidaciones.",
+            nota_s,
+        ))
+        story.append(Spacer(1, 0.15 * cm))
+        story.append(Paragraph(
+            f"<b>Matiz importante:</b> un agregado holgado no impide liquidaciones, porque cada posición "
+            f"se liquida por su cuenta cuando su propio HF baja de 1. A día de hoy, con el conjunto en "
+            f"{hf_pdf:,.3f}, un <b>{en_riesgo_pdf:,.1f}% de la deuda</b> está en posiciones por debajo de "
+            f"1.3. Por eso el reparto y el test de estrés que siguen acompañan siempre a la cifra de arriba.",
+            nota_s,
+        ))
+        story.append(Spacer(1, 0.3 * cm))
+
+        # Reparto de la deuda por tramo. Helvetica no tiene emoji: el nivel se
+        # marca con una banda de color en la primera columna.
+        filas_tramos = []
+        for t in salud["tramos"]:
+            # Separador decimal con punto, como el resto del informe.
+            rango = ("< 1.0" if t["desde"] == 0 else
+                     f"&#8805; {t['desde']:.1f}" if t["hasta"] is None else
+                     f"{t['desde']:.1f} &#8211; {t['hasta']:.1f}")
+            filas_tramos.append([
+                "", t["etiqueta"], rango, str(t["posiciones"]),
+                f"${t['deuda']:,.0f}", f"{t['pct_deuda']:,.1f}%",
+            ])
+        t_tr = tabla_estandar(
+            ["", "Tramo", "Health Factor", "Posiciones", "Deuda", "% de la deuda"],
+            filas_tramos,
+            col_widths=["4%", "20%", "18%", "16%", "22%", "20%"],
+        )
+        estilo_color = [("BACKGROUND", (0, i + 1), (0, i + 1), colors.HexColor(t["color"]))
+                        for i, t in enumerate(salud["tramos"])]
+        t_tr.setStyle(TableStyle(estilo_color))
+        story.append(Paragraph(
+            "<b>Dónde está la deuda, por riesgo de la posición.</b> Se reparte la deuda y no el número "
+            "de prestatarios: doscientos préstamos de mil dólares no pesan lo que uno de seiscientos mil.",
+            nota_s,
+        ))
+        story.append(Spacer(1, 0.15 * cm))
+        story.append(t_tr)
+        story.append(Spacer(1, 0.3 * cm))
+
+        filas_estres = [[
+            f"&#8722;{e['caida_pct']}%", str(e["posiciones"]),
+            f"${e['deuda']:,.0f}", f"{e['pct_deuda']:,.1f}%",
+        ] for e in salud["estres"]]
+        story.append(Paragraph(
+            "<b>Test de estrés.</b> El Health Factor es proporcional al valor del colateral, así que una "
+            "caída del x% deja cada posición en HF &#215; (1 &#8722; x). La tabla mide qué parte de la "
+            "deuda quedaría liquidable en cada escenario. No es una previsión: es la sensibilidad de la "
+            "cartera actual a una bajada del precio de los inmuebles.",
+            nota_s,
+        ))
+        story.append(Spacer(1, 0.15 * cm))
+        story.append(tabla_estandar(
+            ["Caída del colateral", "Posiciones afectadas", "Deuda liquidable", "% de la deuda"],
+            filas_estres,
+            col_widths=["25%", "25%", "25%", "25%"],
+        ))
+        story.append(Spacer(1, 0.2 * cm))
+        story.append(Paragraph(
+            f"El conjunto llega al umbral de liquidación con una caída del "
+            f"<b>{salud['margen_caida'] * 100:,.1f}%</b>, pero las primeras liquidaciones individuales "
+            f"empiezan mucho antes. Posición más grande: ${salud['mayor_posicion']:,.0f} "
+            f"({salud['pct_mayor']:,.1f}% de la deuda) &#183; HF mínimo {salud['hf_minimo']:,.3f} &#183; "
+            f"mediana {salud['hf_mediana']:,.3f}."
+            + (f" {salud['fallidas']} carteras no se pudieron consultar y quedan fuera del cálculo."
+               if salud.get("fallidas") else ""),
+            nota_s,
+        ))
+        story.append(Spacer(1, 0.5 * cm))
+
     # Gráficos de evolución histórica (renderizados con kaleido a partir de las
     # mismas figuras que se muestran en la web, en variante clara para imprimir)
     if historical_dfs:
@@ -571,6 +705,10 @@ def generar_pdf_aave(stables: dict, df_col: pd.DataFrame, supply_holders: dict, 
         f"contrato Pool {RNT_LEND_POOL}. No es el pool público de Aave.",
         "— El estado actual y el colateral por proyecto son un snapshot en el momento de generación. "
         "La concentración de holders se reconstruye on-chain a partir de eventos Transfer.",
+        "— La salud agregada se calcula consultando la posición de cada prestatario en el pool en el "
+        "momento de generar el informe. El colateral se valora con el oráculo del pool (el que decide las "
+        "liquidaciones), a diferencia del colateral por proyecto de arriba, que usa el precio de emisión "
+        "del máster: por eso ambas cifras no tienen por qué coincidir.",
         "— Este informe no constituye consejo de inversión. Las cifras son estimaciones a partir de datos on-chain.",
     ]
     for nota in notas:
@@ -582,7 +720,7 @@ def generar_pdf_aave(stables: dict, df_col: pd.DataFrame, supply_holders: dict, 
 
 # ── Salud agregada del mercado ───────────────────────────────────────────────
 
-def render_salud_agregada(borrow_holders: dict) -> None:
+def render_salud_agregada(borrow_holders: dict) -> dict | None:
     """El mercado entero como una sola cuenta: exposición y cobertura.
 
     Va detrás de un botón a propósito. Son ~340 consultas al pool (una por
@@ -598,7 +736,7 @@ def render_salud_agregada(borrow_holders: dict) -> None:
 
     if not borrow_holders:
         st.info("No hay prestatarios que analizar en este momento.")
-        return
+        return None
 
     if not st.session_state.get("salud_calculada"):
         st.caption(
@@ -609,14 +747,14 @@ def render_salud_agregada(borrow_holders: dict) -> None:
         if st.button("🩺 Calcular salud agregada", type="primary", key="btn_salud"):
             st.session_state["salud_calculada"] = True
             st.rerun()
-        return
+        return None
 
     with st.spinner(f"Consultando {len(borrow_holders)} posiciones en el pool…"):
         salud = _al.salud_agregada(tuple(sorted(borrow_holders)), API_KEY)
 
     if not salud or not salud.get("n_posiciones"):
         st.warning("No se pudo reconstruir la posición agregada en este momento.")
-        return
+        return None
 
     hf = salud["health_factor"]
     emoji, etiqueta, color = _al.nivel_riesgo(hf)
@@ -626,13 +764,43 @@ def render_salud_agregada(borrow_holders: dict) -> None:
     # si < 1" acaba leyéndose como una buena noticia.
     k1, k2, k3, k4 = st.columns(4)
     k1.metric(f"{emoji} Health Factor agregado", f"{hf:,.3f}",
-              f"{etiqueta} · liquidación si < 1", delta_color="off")
+              f"{etiqueta} · liquidación si < 1", delta_color="off",
+              help=(
+                  "El mercado entero tratado como una sola cuenta:\n\n"
+                  "**HF = Σ(colateral × umbral) ÷ Σ(deuda)**\n\n"
+                  "No es una media de los Health Factor individuales —eso no tendría "
+                  "sentido matemático—, sino el mismo cociente que aplica el protocolo, "
+                  "calculado sobre las sumas. Por encima de 1 el conjunto está cubierto; "
+                  "por debajo, la deuda superaría lo que el colateral puede respaldar.\n\n"
+                  "⚠️ Que el agregado vaya holgado NO impide liquidaciones: cada posición "
+                  "se liquida por su cuenta cuando SU HF baja de 1."))
     k2.metric("🏠 Colateral respaldando deuda", f"${salud['colateral_usd']:,.0f}",
-              f"umbral medio {salud['umbral_medio'] * 100:,.1f}%", delta_color="off")
+              f"umbral medio {salud['umbral_medio'] * 100:,.1f}%", delta_color="off",
+              help=(
+                  "Valor de los tokens inmobiliarios depositados por quienes TIENEN deuda "
+                  "viva. No incluye el colateral de quien solo aporta y no ha pedido "
+                  "prestado, porque ese no respalda ningún préstamo.\n\n"
+                  "Se valora con el **oráculo del pool**, que es el precio con el que el "
+                  "protocolo decide las liquidaciones — no con el precio de emisión del "
+                  "máster, que puede diferir.\n\n"
+                  "El *umbral medio* es el porcentaje del colateral que el protocolo "
+                  "reconoce como respaldo efectivo, ponderado por la cesta de cada uno."))
     k3.metric("💳 Deuda total", f"${salud['deuda_usd']:,.0f}",
-              f"{salud['n_posiciones']} posiciones abiertas", delta_color="off")
+              f"{salud['n_posiciones']} posiciones abiertas", delta_color="off",
+              help=(
+                  "Suma de USDT y USDC prestados y aún no devueltos, **con los intereses "
+                  "ya devengados incluidos**: es la cifra que el protocolo usaría hoy para "
+                  "liquidar, no el principal que se pidió en su día.\n\n"
+                  "Cuenta solo posiciones con deuda viva por encima de un céntimo."))
     k4.metric("🛡️ Sobrecolateralización", f"{salud['sobrecolateral']:,.2f}×",
-              f"LTV medio {salud['ltv_medio'] * 100:,.1f}%", delta_color="off")
+              f"LTV medio {salud['ltv_medio'] * 100:,.1f}%", delta_color="off",
+              help=(
+                  "Cuántos dólares de inmueble hay depositados por cada dólar prestado. "
+                  "Es la lectura directa de la cobertura, sin ponderar por el umbral de "
+                  "liquidación.\n\n"
+                  "El **LTV medio** es la misma relación al revés: de cada 100 $ de "
+                  "inmueble aportado, cuántos están prestados. Es el dato que se compara "
+                  "con la política de riesgo del protocolo."))
 
     # El agregado por sí solo se lee como una tranquilidad que no ha demostrado:
     # es un cociente de sumas, y una posición al borde no lo mueve. El reparto
@@ -648,7 +816,17 @@ def render_salud_agregada(borrow_holders: dict) -> None:
     g1, g2 = st.columns(2)
 
     with g1:
-        st.markdown("**Dónde está la deuda, por riesgo de la posición**")
+        st.markdown("**Dónde está la deuda, por riesgo de la posición**",
+                    help=(
+                        "Cada prestatario tiene su propio Health Factor. Aquí se reparte "
+                        "la deuda —no el número de prestatarios— entre los cinco tramos "
+                        "de riesgo.\n\n"
+                        "Se pondera por deuda a propósito: doscientos préstamos de mil "
+                        "dólares no pesan lo mismo que uno de seiscientos mil, y contar "
+                        "posiciones daría una foto tranquilizadora que no se sostiene.\n\n"
+                        "**Cómo leerlo:** lo que hay a la izquierda de la barra (rojo y "
+                        "naranja) es la deuda que se liquidaría con caídas pequeñas del "
+                        "colateral. Es la métrica que un LP mira antes que el agregado."))
         fig = go.Figure()
         for t in salud["tramos"]:
             if t["deuda"] <= 0:
@@ -678,7 +856,15 @@ def render_salud_agregada(borrow_holders: dict) -> None:
         )
 
     with g2:
-        st.markdown("**Si el valor del colateral cayera…**")
+        st.markdown("**Si el valor del colateral cayera…**",
+                    help=(
+                        "Test de estrés. El Health Factor es proporcional al valor del "
+                        "colateral, así que una caída del x% deja cada posición en "
+                        "**HF × (1 − x)**. Se cuenta qué deuda quedaría por debajo de 1 "
+                        "—es decir, liquidable— en cada escenario.\n\n"
+                        "No predice nada: mide la sensibilidad de la cartera actual a una "
+                        "bajada del precio de los inmuebles. Es la pregunta que hará "
+                        "cualquier LP, y conviene tener la respuesta antes que él."))
         est = salud["estres"]
         fig2 = go.Figure(go.Bar(
             x=[f"−{e['caida_pct']}%" for e in est],
@@ -710,6 +896,10 @@ def render_salud_agregada(borrow_holders: dict) -> None:
         + (f" · ⚠️ {salud['fallidas']} wallets no se pudieron consultar."
            if salud.get("fallidas") else "")
     )
+
+    # Se devuelve para que el informe PDF pueda incluir exactamente lo mismo
+    # que se está viendo, sin recalcularlo.
+    return salud
 
 
 # ── Carga de datos ────────────────────────────────────────────────────────────
@@ -763,6 +953,7 @@ st.caption(
 # mercado quede arriba, donde se busca, y se rellena cuando el dato existe.
 st.markdown("---")
 _hueco_salud = st.container()
+salud_mercado = None   # lo rellena render_salud_agregada si el usuario la calcula
 
 st.markdown("---")
 
@@ -844,7 +1035,7 @@ if historical:
     borrow_holders = combinar_holders(*[h["borrow_holders"] for h in historical.values()])
 
     with _hueco_salud:
-        render_salud_agregada(borrow_holders)
+        salud_mercado = render_salud_agregada(borrow_holders)
 
     col_a, col_b = st.columns(2)
     for col, holders, titulo in (
@@ -972,7 +1163,8 @@ with col_pdf:
     if st.button("📥 Generar PDF", type="primary", use_container_width=True):
         with st.spinner("Generando PDF…"):
             pdf_bytes = generar_pdf_aave(
-                stables, df_col, supply_holders, borrow_holders, historical_resumen, historical_dfs,
+                stables, df_col, supply_holders, borrow_holders, historical_resumen,
+                historical_dfs, salud_mercado,
             )
         st.download_button(
             label="⬇️ Descargar PDF",
