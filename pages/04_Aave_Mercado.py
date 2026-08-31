@@ -580,6 +580,138 @@ def generar_pdf_aave(stables: dict, df_col: pd.DataFrame, supply_holders: dict, 
     return buf.getvalue()
 
 
+# ── Salud agregada del mercado ───────────────────────────────────────────────
+
+def render_salud_agregada(borrow_holders: dict) -> None:
+    """El mercado entero como una sola cuenta: exposición y cobertura.
+
+    Va detrás de un botón a propósito. Son ~340 consultas al pool (una por
+    prestatario) y tardan un par de minutos; quien entra a mirar los tipos o la
+    concentración no tiene por qué pagarlas. Una vez calculado queda en caché
+    media hora, así que las recargas son instantáneas.
+    """
+    st.subheader("🩺 Salud del mercado — el pool como una sola cuenta")
+    st.caption(
+        "Cuánto capital respalda el total de la deuda, agregando las posiciones de todos "
+        "los prestatarios. Útil para explicar la exposición del mercado de una sola vez."
+    )
+
+    if not borrow_holders:
+        st.info("No hay prestatarios que analizar en este momento.")
+        return
+
+    if not st.session_state.get("salud_calculada"):
+        st.caption(
+            f"Requiere consultar la posición de los **{len(borrow_holders)} prestatarios** "
+            "uno a uno en el pool: tarda un par de minutos la primera vez y luego queda "
+            "en caché 30 minutos."
+        )
+        if st.button("🩺 Calcular salud agregada", type="primary", key="btn_salud"):
+            st.session_state["salud_calculada"] = True
+            st.rerun()
+        return
+
+    with st.spinner(f"Consultando {len(borrow_holders)} posiciones en el pool…"):
+        salud = _al.salud_agregada(tuple(sorted(borrow_holders)), API_KEY)
+
+    if not salud or not salud.get("n_posiciones"):
+        st.warning("No se pudo reconstruir la posición agregada en este momento.")
+        return
+
+    hf = salud["health_factor"]
+    emoji, etiqueta, color = _al.nivel_riesgo(hf)
+
+    # delta_color="off": estos subtítulos son contexto, no variaciones. Sin
+    # apagarlo, Streamlit los pinta con flecha verde hacia arriba y "liquidación
+    # si < 1" acaba leyéndose como una buena noticia.
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric(f"{emoji} Health Factor agregado", f"{hf:,.3f}",
+              f"{etiqueta} · liquidación si < 1", delta_color="off")
+    k2.metric("🏠 Colateral respaldando deuda", f"${salud['colateral_usd']:,.0f}",
+              f"umbral medio {salud['umbral_medio'] * 100:,.1f}%", delta_color="off")
+    k3.metric("💳 Deuda total", f"${salud['deuda_usd']:,.0f}",
+              f"{salud['n_posiciones']} posiciones abiertas", delta_color="off")
+    k4.metric("🛡️ Sobrecolateralización", f"{salud['sobrecolateral']:,.2f}×",
+              f"LTV medio {salud['ltv_medio'] * 100:,.1f}%", delta_color="off")
+
+    # El agregado por sí solo se lee como una tranquilidad que no ha demostrado:
+    # es un cociente de sumas, y una posición al borde no lo mueve. El reparto
+    # de abajo es lo que dice dónde está el riesgo de verdad.
+    en_riesgo = sum(t["pct_deuda"] for t in salud["tramos"] if t["desde"] < 1.3)
+    st.info(
+        f"El agregado ({hf:,.3f}) mide la solvencia del pool **como bloque**, no la de "
+        f"cada prestatario: las liquidaciones ocurren posición a posición. Ahora mismo "
+        f"un **{en_riesgo:,.1f}% de la deuda** está en posiciones con Health Factor por "
+        f"debajo de 1,3, aunque el conjunto vaya holgado."
+    )
+
+    g1, g2 = st.columns(2)
+
+    with g1:
+        st.markdown("**Dónde está la deuda, por riesgo de la posición**")
+        fig = go.Figure()
+        for t in salud["tramos"]:
+            if t["deuda"] <= 0:
+                continue
+            fig.add_trace(go.Bar(
+                x=[t["pct_deuda"]], y=["Deuda"], orientation="h", name=t["etiqueta"],
+                marker_color=t["color"],
+                hovertemplate=(f"{t['etiqueta']}<br>${t['deuda']:,.0f}"
+                               f"<br>{t['posiciones']} posiciones<extra></extra>"),
+            ))
+        fig.update_layout(
+            template=TEMPLATE_PLOTLY, barmode="stack", height=200,
+            margin=dict(t=10, b=10, l=10, r=10),
+            xaxis_title="% de la deuda total", yaxis=dict(showticklabels=False),
+            legend=dict(orientation="h", y=-0.35),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        st.dataframe(
+            pd.DataFrame([{
+                "": t["emoji"], "Tramo": t["etiqueta"],
+                "HF": (f"< {t['hasta']:.1f}" if t["desde"] == 0 else
+                       f"≥ {t['desde']:.1f}" if t["hasta"] is None else
+                       f"{t['desde']:.1f} – {t['hasta']:.1f}"),
+                "Posiciones": t["posiciones"], "Deuda": t["deuda"], "% deuda": t["pct_deuda"],
+            } for t in salud["tramos"]]).style.format({"Deuda": "${:,.0f}", "% deuda": "{:,.1f}%"}),
+            use_container_width=True, hide_index=True,
+        )
+
+    with g2:
+        st.markdown("**Si el valor del colateral cayera…**")
+        est = salud["estres"]
+        fig2 = go.Figure(go.Bar(
+            x=[f"−{e['caida_pct']}%" for e in est],
+            y=[e["pct_deuda"] for e in est],
+            marker_color=[t for t in ("#ca8a04", "#ea580c", "#dc2626", "#dc2626", "#991b1b")],
+            text=[f"{e['pct_deuda']:,.0f}%" for e in est], textposition="outside",
+            customdata=[[e["deuda"], e["posiciones"]] for e in est],
+            hovertemplate=("Caída %{x}<br>Deuda liquidable: $%{customdata[0]:,.0f}"
+                           "<br>%{customdata[1]} posiciones<extra></extra>"),
+        ))
+        fig2.update_layout(
+            template=TEMPLATE_PLOTLY, height=260, margin=dict(t=30, b=10, l=10, r=10),
+            yaxis_title="% de la deuda que quedaría liquidable",
+            yaxis_range=[0, 105],
+        )
+        st.plotly_chart(fig2, use_container_width=True)
+        st.caption(
+            f"El Health Factor cae en proporción directa al valor del colateral, así que una "
+            f"caída del x% deja cada posición en HF×(1−x). El conjunto llega al umbral con una "
+            f"caída del **{salud['margen_caida'] * 100:,.1f}%**, pero las primeras liquidaciones "
+            f"empiezan mucho antes."
+        )
+
+    st.caption(
+        f"Posición más grande: ${salud['mayor_posicion']:,.0f} "
+        f"({salud['pct_mayor']:,.1f}% de la deuda) · HF mínimo {salud['hf_minimo']:,.3f} · "
+        f"mediana {salud['hf_mediana']:,.3f}. El colateral se valora con el **oráculo del pool**, "
+        f"que es el que decide las liquidaciones — no con el precio de emisión del máster."
+        + (f" · ⚠️ {salud['fallidas']} wallets no se pudieron consultar."
+           if salud.get("fallidas") else "")
+    )
+
+
 # ── Carga de datos ────────────────────────────────────────────────────────────
 
 if not API_KEY:
@@ -625,6 +757,12 @@ st.caption(
     "⚠️ Tipos mostrados como APR simple (tasa anual sin componer), tal como los "
     "almacena el contrato del pool. Es una foto actual, no una serie histórica."
 )
+
+# La salud agregada necesita la lista de prestatarios, que sale del escaneo
+# histórico de más abajo. Se reserva el hueco aquí para que el titular del
+# mercado quede arriba, donde se busca, y se rellena cuando el dato existe.
+st.markdown("---")
+_hueco_salud = st.container()
 
 st.markdown("---")
 
@@ -704,6 +842,9 @@ supply_holders, borrow_holders = {}, {}
 if historical:
     supply_holders = combinar_holders(*[h["supply_holders"] for h in historical.values()])
     borrow_holders = combinar_holders(*[h["borrow_holders"] for h in historical.values()])
+
+    with _hueco_salud:
+        render_salud_agregada(borrow_holders)
 
     col_a, col_b = st.columns(2)
     for col, holders, titulo in (

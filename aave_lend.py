@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -441,3 +442,107 @@ def apr_borrow_medio_historico(reserve_address: str, api_key: str) -> float | No
         return float(df["borrow_apr"].iloc[-1])
     except Exception:
         return None
+
+
+# ── Salud agregada del mercado ───────────────────────────────────────────────
+
+# Tramos de riesgo, alineados con `nivel_riesgo` para que la tabla y los KPIs
+# individuales cuenten la misma historia.
+TRAMOS_HF = [
+    (0.0, 1.0,  "Liquidable",  "🔴", "#dc2626"),
+    (1.0, 1.1,  "Crítico",     "🔴", "#dc2626"),
+    (1.1, 1.3,  "Alerta",      "🟠", "#ea580c"),
+    (1.3, 1.5,  "Vigilar",     "🟡", "#ca8a04"),
+    (1.5, None, "Saludable",   "🟢", "#16a34a"),
+]
+
+CAIDAS_ESTRES = (10, 20, 30, 40, 50)
+
+
+@st.cache_data(show_spinner=False, ttl=1800)
+def salud_agregada(wallets: tuple, api_key: str, max_workers: int = 3) -> dict:
+    """El mercado entero visto como una sola cuenta.
+
+    El Health Factor NO se puede promediar entre wallets, pero SÍ se puede
+    reconstruir para el conjunto con su propia definición, sumando numerador y
+    denominador:
+
+        HF = Σ(colateral_i × umbral_i) / Σ(deuda_i)
+
+    El resultado es un dato real —la solvencia del mercado como bloque—, no una
+    media. Lo que NO es: una garantía de que nadie se liquide. Las liquidaciones
+    ocurren posición a posición, así que un agregado holgado convive con
+    prestatarios al borde. Por eso se devuelve también el reparto de la DEUDA
+    por tramo de riesgo y el test de estrés: sin ellos, el número de arriba se
+    lee como una tranquilidad que no ha demostrado.
+
+    Se pondera por deuda y no por número de posiciones: doscientos préstamos de
+    mil dólares no pesan lo que uno de seiscientos mil.
+
+    `wallets` es una tupla para que sea hashable y la caché funcione.
+    """
+    if not wallets:
+        return {}
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        datos = list(pool.map(lambda w: get_user_account_data(w, api_key), wallets))
+
+    # Solo posiciones con deuda viva: quien solo aporta colateral no corre
+    # riesgo de liquidación y su colateral no respalda ningún préstamo.
+    pos = [d for d in datos if d and d.get("deuda_usd", 0) > 0.01
+           and d.get("health_factor") is not None]
+    fallidas = sum(1 for d in datos if not d)
+    if not pos:
+        return {"n_posiciones": 0, "consultadas": len(wallets), "fallidas": fallidas}
+
+    colateral = sum(d["colateral_usd"] for d in pos)
+    deuda     = sum(d["deuda_usd"] for d in pos)
+    ponderado = sum(d["colateral_usd"] * d["umbral_liquidacion"] for d in pos)
+    hf        = (ponderado / deuda) if deuda > 0 else None
+
+    tramos = []
+    for lo, hi, etiqueta, emoji, color in TRAMOS_HF:
+        dentro = [d for d in pos
+                  if lo <= d["health_factor"] and (hi is None or d["health_factor"] < hi)]
+        d_tramo = sum(d["deuda_usd"] for d in dentro)
+        tramos.append({
+            "etiqueta": etiqueta, "emoji": emoji, "color": color,
+            "desde": lo, "hasta": hi,
+            "posiciones": len(dentro), "deuda": d_tramo,
+            "pct_deuda": (d_tramo / deuda * 100) if deuda > 0 else 0.0,
+        })
+
+    # El HF escala linealmente con el valor del colateral (HF = col×LT/deuda),
+    # así que una caída del x% deja el HF en HF×(1−x).
+    estres = []
+    for caida in CAIDAS_ESTRES:
+        f = 1 - caida / 100
+        afectadas = [d for d in pos if d["health_factor"] * f < 1.0]
+        d_af = sum(d["deuda_usd"] for d in afectadas)
+        estres.append({
+            "caida_pct": caida, "posiciones": len(afectadas), "deuda": d_af,
+            "pct_deuda": (d_af / deuda * 100) if deuda > 0 else 0.0,
+        })
+
+    hfs_ord = sorted(d["health_factor"] for d in pos)
+    mayor   = max(d["deuda_usd"] for d in pos)
+    return {
+        "n_posiciones":   len(pos),
+        "consultadas":    len(wallets),
+        "fallidas":       fallidas,
+        "colateral_usd":  colateral,
+        "deuda_usd":      deuda,
+        "health_factor":  hf,
+        "sobrecolateral": (colateral / deuda) if deuda > 0 else None,
+        "ltv_medio":      (deuda / colateral) if colateral > 0 else None,
+        # Cuánto puede caer el colateral antes de que el CONJUNTO llegue al
+        # umbral. No es lo mismo que "antes de que se liquide alguien".
+        "margen_caida":   (1 - deuda / ponderado) if ponderado > 0 else None,
+        "umbral_medio":   (ponderado / colateral) if colateral > 0 else None,
+        "hf_minimo":      hfs_ord[0],
+        "hf_mediana":     hfs_ord[len(hfs_ord) // 2],
+        "mayor_posicion": mayor,
+        "pct_mayor":      (mayor / deuda * 100) if deuda > 0 else 0.0,
+        "tramos":         tramos,
+        "estres":         estres,
+    }
