@@ -203,8 +203,13 @@ def load_master_projects() -> pd.DataFrame:
             "nombre":           strip_accents(str(row.iloc[1]).strip()),
             "estado":           estado,
             "divisa":           divisa,
-            "ubicacion":        strip_accents(str(row.iloc[14]).strip()),
-            "tip_explotacion":  strip_accents(str(row.iloc[15]).strip()),
+            # Sin strip_accents: son campos de PRESENTACIÓN —acaban en tablas,
+            # gráficos y en el PDF que se manda a un inversor—, y ninguna
+            # comparación depende de ellos. «Espana» y «Prestamo promotor»
+            # quedaban feos en un informe. El mapa de banderas del analizador ya
+            # acepta las dos formas, así que no se rompe nada.
+            "ubicacion":        str(row.iloc[14]).strip(),
+            "tip_explotacion":  str(row.iloc[15]).strip(),
             "tip_dividendo":    tip_div,
             "tipo_renta":       tipo_renta,
             "precio_emision":   precio_emision,

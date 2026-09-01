@@ -39,7 +39,8 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import cm
 from reportlab.platypus import (
-    HRFlowable, Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
+    HRFlowable, Image, KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table,
+    TableStyle,
 )
 
 from utils import load_master_projects
@@ -630,6 +631,73 @@ def generar_pdf_aave(stables: dict, df_col: pd.DataFrame, supply_holders: dict, 
                if salud.get("fallidas") else ""),
             nota_s,
         ))
+        story.append(Spacer(1, 0.35 * cm))
+
+        # ── Diversificación: el contrapeso al test de estrés ─────────────────
+        if not df_col.empty and df_col["valor_estimado"].sum() > 0:
+            total_col = float(df_col["valor_estimado"].sum())
+            por_pais, _, eq_pais = _reparto(df_col, "ubicacion")
+            por_tipo, _, _       = _reparto(df_col, "tip_explotacion")
+            por_proy, _, _       = _reparto(df_col, "proyecto")
+
+            # KeepTogether: partir la tabla de mercados entre dos páginas deja el
+            # argumento a medias justo donde más importa que se lea entero.
+            bloque_div = []
+            bloque_div.append(Paragraph(
+                "<b>Diversificación del colateral.</b> El escenario anterior trata la cartera como si "
+                "fuera un unico activo: asume que todos los inmuebles caen a la vez y en la misma "
+                "proporción. Para que eso ocurra haría falta una crisis inmobiliaria global y "
+                f"simultánea. El colateral está repartido entre <b>{len(por_proy)} proyectos</b> en "
+                f"<b>{len(por_pais)} mercados</b> y {len(por_tipo)} tipologías de explotación; por peso, "
+                f"equivale a una cartera repartida entre {eq_pais:,.1f} mercados del mismo tamaño.",
+                nota_s,
+            ))
+            bloque_div.append(Spacer(1, 0.15 * cm))
+
+            filas_div = [[str(k), f"${v:,.0f}", f"{v / total_col * 100:,.1f}%"]
+                         for k, v in por_pais.items()]
+            filas_div.append(["", "", ""])
+            for k, v in por_tipo.items():
+                filas_div.append([str(k), f"${v:,.0f}", f"{v / total_col * 100:,.1f}%"])
+            t_div = tabla_estandar(
+                ["Mercado / tipología", "Valor del colateral", "% del total"],
+                filas_div, col_widths=["50%", "28%", "22%"],
+            )
+            # Fila en blanco como separador entre los dos bloques de la tabla.
+            t_div.setStyle(TableStyle([
+                ("BACKGROUND", (0, len(por_pais) + 1), (-1, len(por_pais) + 1), PDF_NAVY_OSC),
+            ]))
+            bloque_div.append(t_div)
+            bloque_div.append(Spacer(1, 0.2 * cm))
+
+            # Comparación concreta: el mayor mercado cayendo un 30% frente a
+            # que caiga todo un 30%. Es la forma mas directa de ensenar lo que
+            # aporta la diversificacion.
+            mayor_m = por_pais.index[0]
+            peso_m  = float(por_pais.iloc[0]) / total_col
+            def _liq(f):
+                af = [x for x in salud["_hf_deuda"] if x[0] * (1 - f) < 1.0]
+                return sum(d for _, d in af), len(af)
+            d_loc, n_loc = _liq(peso_m * 0.30)
+            d_glo, n_glo = _liq(0.30)
+            bloque_div.append(tabla_estandar(
+                ["Escenario", "Caída efectiva del colateral", "Deuda liquidable", "% de la deuda"],
+                [[f"Solo {mayor_m} cae un 30%", f"{peso_m * 30:,.1f}%",
+                  f"${d_loc:,.0f}", f"{d_loc / salud['deuda_usd'] * 100:,.1f}%"],
+                 ["Todos los mercados caen un 30%", "30.0%",
+                  f"${d_glo:,.0f}", f"{d_glo / salud['deuda_usd'] * 100:,.1f}%"]],
+                col_widths=["38%", "24%", "20%", "18%"],
+            ))
+            bloque_div.append(Spacer(1, 0.15 * cm))
+            bloque_div.append(Paragraph(
+                f"El mercado con más peso ({mayor_m}, {peso_m * 100:,.1f}% del colateral) cayendo un 30% "
+                f"equivale a un {peso_m * 30:,.1f}% sobre el total. La cifra real se sitúa entre ambas "
+                "filas: no se conoce qué inmuebles concretos respalda cada prestatario, de modo que la "
+                "primera supone carteras diversificadas y la segunda, todas concentradas. Los pesos se "
+                "calculan sobre el precio de emisión del máster, único con desglose por proyecto.",
+                nota_s,
+            ))
+            story.append(KeepTogether(bloque_div))
         story.append(Spacer(1, 0.5 * cm))
 
     # Gráficos de evolución histórica (renderizados con kaleido a partir de las
@@ -720,7 +788,150 @@ def generar_pdf_aave(stables: dict, df_col: pd.DataFrame, supply_holders: dict, 
 
 # ── Salud agregada del mercado ───────────────────────────────────────────────
 
-def render_salud_agregada(borrow_holders: dict) -> dict | None:
+def _reparto(df_col: pd.DataFrame, columna: str) -> tuple:
+    """Reparto del colateral por una dimensión, con su índice de concentración.
+
+    Se usa el HHI (suma de los cuadrados de los pesos) porque su inverso tiene
+    lectura directa: 1/HHI es "a cuántas categorías del mismo tamaño equivale
+    esta cartera". Decir «equivale a 2,4 mercados iguales» se entiende sin
+    explicar qué es un índice de concentración.
+    """
+    serie = (df_col.assign(**{columna: df_col[columna].fillna("Sin clasificar")})
+                   .groupby(columna)["valor_estimado"].sum()
+                   .sort_values(ascending=False))
+    total = float(serie.sum())
+    if total <= 0:
+        return serie, None, None
+    pesos = serie / total
+    hhi = float((pesos ** 2).sum())
+    return serie, hhi, (1 / hhi if hhi > 0 else None)
+
+
+def _diversificacion_colateral(df_col: pd.DataFrame, salud: dict) -> None:
+    """El contrapeso al test de estrés.
+
+    El escenario "el colateral cae un x%" trata la cartera como si fuera un
+    único activo: asume que todos los inmuebles caen a la vez y en la misma
+    proporción. Eso es el peor caso, no el caso probable. Si el colateral está
+    repartido entre mercados que no se mueven juntos, para que se cumpla ese
+    escenario haría falta una crisis global simultánea.
+
+    Aquí se mide ese reparto y se traduce a la misma escala del test de estrés,
+    para poder responder «¿y si cae solo un mercado?» con un número en vez de
+    con una intuición.
+    """
+    st.markdown("---")
+    st.markdown("##### 🌍 Diversificación del colateral")
+    st.caption(
+        "El test de estrés de arriba asume que **todos los inmuebles caen a la vez y por igual**: "
+        "es el peor caso, no el más probable. Cuanto más repartido esté el colateral entre mercados "
+        "que no se mueven juntos, menos verosímil resulta ese escenario."
+    )
+
+    if df_col is None or df_col.empty:
+        st.caption("No hay desglose de colateral por proyecto con el que medir la diversificación.")
+        return
+
+    total = float(df_col["valor_estimado"].sum())
+    if total <= 0:
+        return
+
+    por_pais, hhi_pais, eq_pais = _reparto(df_col, "ubicacion")
+    por_tipo, _, _              = _reparto(df_col, "tip_explotacion")
+    por_proy, hhi_proy, eq_proy = _reparto(df_col, "proyecto")
+
+    d1, d2, d3, d4 = st.columns(4)
+    d1.metric("🏗️ Proyectos en garantía", f"{len(por_proy):,}",
+              help=("Número de inmuebles distintos aportados como colateral. Cada uno tiene su "
+                    "propio ciclo: obra, alquiler, venta. Un problema en uno no arrastra a los demás."))
+    d2.metric("🌍 Mercados", f"{len(por_pais):,}",
+              help=("Países distintos representados en el colateral. Es el eje que más peso tiene "
+                    "en el argumento: los precios inmobiliarios de España, México o Emiratos no "
+                    "responden al mismo ciclo ni a la misma política monetaria."))
+    d3.metric("📍 Peso del mayor mercado", f"{por_pais.iloc[0] / total * 100:,.1f}%",
+              f"{por_pais.index[0]}", delta_color="off",
+              help=("Qué parte del colateral depende de un solo país. Es el límite práctico de la "
+                    "diversificación: por muy repartido que esté el resto, una caída en este "
+                    "mercado arrastra esta proporción del total."))
+    d4.metric("⚖️ Mercados equivalentes", f"{eq_pais:,.1f}" if eq_pais else "—",
+              "si todos pesaran igual", delta_color="off",
+              help=("Inverso del índice de Herfindahl (HHI). Traduce el reparto real a un número "
+                    "intuitivo: «esta cartera se comporta como si estuviera repartida entre N "
+                    "mercados del mismo tamaño».\n\n"
+                    "Siempre es menor que el número de mercados: cuanto más desigual el reparto, "
+                    "más baja. Con 7 países pero uno pesando el 60%, el equivalente ronda 2."))
+
+    c1, c2 = st.columns(2)
+    for col, serie, titulo, ayuda in (
+        (c1, por_pais, "Por mercado geográfico",
+         "Reparto del valor del colateral por país del inmueble."),
+        (c2, por_tipo, "Por tipología de explotación",
+         "Compra + alquiler, préstamo promotor y flipping tienen riesgos distintos: el primero "
+         "depende del mercado de alquiler, el segundo del promotor y el tercero del precio de venta. "
+         "Que el colateral mezcle los tres reparte también el tipo de riesgo, no solo el geográfico."),
+    ):
+        with col:
+            st.markdown(f"**{titulo}**", help=ayuda)
+            fig = go.Figure(go.Pie(
+                labels=list(serie.index), values=list(serie.values), hole=0.45,
+                textinfo="label+percent", textposition="inside",
+                hovertemplate="%{label}<br>$%{value:,.0f}<br>%{percent}<extra></extra>",
+            ))
+            fig.update_layout(template=TEMPLATE_PLOTLY, height=300,
+                              margin=dict(t=10, b=10, l=10, r=10), showlegend=False)
+            st.plotly_chart(fig, use_container_width=True)
+
+    # ── Traductor de shock localizado ────────────────────────────────────────
+    st.markdown("**¿Y si cae solo un mercado?**", help=(
+        "Traduce una caída localizada a la escala del test de estrés. Si un mercado pesa un w% "
+        "del colateral y cae un d%, el colateral total baja w × d%.\n\n"
+        "Se dan las dos puntas del rango porque no sabemos qué inmuebles concretos respalda cada "
+        "prestatario: la realidad está entre ambas."))
+
+    s1, s2 = st.columns([2, 1])
+    mercado = s1.selectbox("Mercado afectado", list(por_pais.index), key="shock_mercado")
+    caida   = s2.slider("Caída de precios en ese mercado", 5, 60, 30, step=5,
+                        format="%d%%", key="shock_caida")
+
+    peso = float(por_pais.loc[mercado]) / total
+    caida_pool = peso * caida / 100
+
+    def _liquidable(factor: float) -> tuple:
+        """(deuda, nº posiciones) que quedarían por debajo de HF 1."""
+        afect = [t for t in salud["_hf_deuda"] if t[0] * (1 - factor) < 1.0]
+        return sum(d for _, d in afect), len(afect)
+
+    deuda_div, n_div = _liquidable(caida_pool)
+    deuda_cor, n_cor = _liquidable(caida / 100)
+    deuda_total = salud["deuda_usd"]
+
+    r1, r2 = st.columns(2)
+    r1.metric(f"Si cae solo {mercado}", f"{deuda_div / deuda_total * 100:,.1f}%",
+              f"${deuda_div:,.0f} · {n_div} posiciones", delta_color="off",
+              help=("Escenario diversificado: se supone que cada prestatario tiene una cesta "
+                    "parecida a la del pool, así que una caída del "
+                    f"{caida}% en {mercado} —que pesa un {peso * 100:,.1f}% del colateral— "
+                    f"equivale a una caída del {caida_pool * 100:,.1f}% en el total.\n\n"
+                    "Es la **cota optimista**: si un prestatario tiene todo su colateral en ese "
+                    "mercado concreto, él sufre la caída entera."))
+    r2.metric(f"Si cayera todo un {caida}%", f"{deuda_cor / deuda_total * 100:,.1f}%",
+              f"${deuda_cor:,.0f} · {n_cor} posiciones", delta_color="off",
+              help=("Escenario correlacionado: todos los mercados caen a la vez y por igual. Es "
+                    "la **cota pesimista**, y es lo que mide el test de estrés de arriba.\n\n"
+                    "Requiere una crisis inmobiliaria global simultánea en los "
+                    f"{len(por_pais)} países representados."))
+
+    st.caption(
+        f"Una caída del **{caida}% en {mercado}** equivale a un **{caida_pool * 100:,.1f}%** sobre el "
+        f"colateral total, porque ese mercado pesa un {peso * 100:,.1f}%. La cifra real está entre "
+        f"las dos columnas: no sabemos qué inmuebles concretos respalda cada prestatario, así que la "
+        f"izquierda supone carteras diversificadas y la derecha, todas concentradas. "
+        f"Los pesos se calculan sobre el precio de emisión del máster (es el único con desglose por "
+        f"proyecto), mientras que las cifras de deuda salen del oráculo del pool."
+    )
+
+
+def render_salud_agregada(borrow_holders: dict, df_col: pd.DataFrame) -> dict | None:
     """El mercado entero como una sola cuenta: exposición y cobertura.
 
     Va detrás de un botón a propósito. Son ~340 consultas al pool (una por
@@ -888,6 +1099,8 @@ def render_salud_agregada(borrow_holders: dict) -> dict | None:
             f"empiezan mucho antes."
         )
 
+    _diversificacion_colateral(df_col, salud)
+
     st.caption(
         f"Posición más grande: ${salud['mayor_posicion']:,.0f} "
         f"({salud['pct_mayor']:,.1f}% de la deuda) · HF mínimo {salud['hf_minimo']:,.3f} · "
@@ -947,6 +1160,23 @@ st.caption(
     "⚠️ Tipos mostrados como APR simple (tasa anual sin componer), tal como los "
     "almacena el contrato del pool. Es una foto actual, no una serie histórica."
 )
+
+# El desglose de colateral por proyecto se construye aquí, y no en su sección de
+# más abajo, porque la salud agregada lo necesita para medir la diversificación.
+# Es un merge en memoria: no cuesta ninguna llamada extra.
+df_col = pd.DataFrame()
+if colateral_rows and not master_df.empty:
+    df_col = pd.DataFrame(colateral_rows)
+    df_col = df_col[df_col["colateral_tokens"] > 0.001]
+
+    master_slim = master_df[["token_address", "nombre", "id", "divisa", "precio_emision",
+                             "ubicacion", "tip_explotacion"]].copy()
+    master_slim["token_address"] = master_slim["token_address"].astype(str).str.lower()
+
+    df_col = df_col.merge(master_slim, on="token_address", how="left")
+    df_col["valor_estimado"] = df_col["colateral_tokens"] * df_col["precio_emision"]
+    df_col["proyecto"] = df_col["id"].fillna(df_col["token_address"])
+    df_col = df_col.dropna(subset=["valor_estimado"]).sort_values("valor_estimado", ascending=False)
 
 # La salud agregada necesita la lista de prestatarios, que sale del escaneo
 # histórico de más abajo. Se reserva el hueco aquí para que el titular del
@@ -1035,7 +1265,7 @@ if historical:
     borrow_holders = combinar_holders(*[h["borrow_holders"] for h in historical.values()])
 
     with _hueco_salud:
-        salud_mercado = render_salud_agregada(borrow_holders)
+        salud_mercado = render_salud_agregada(borrow_holders, df_col)
 
     col_a, col_b = st.columns(2)
     for col, holders, titulo in (
@@ -1081,19 +1311,7 @@ st.caption(
     "cruzados con el precio de emisión del CSV máster para estimar su valor en USD/EUR."
 )
 
-df_col = pd.DataFrame()
-if colateral_rows and not master_df.empty:
-    df_col = pd.DataFrame(colateral_rows)
-    df_col = df_col[df_col["colateral_tokens"] > 0.001]
-
-    master_slim = master_df[["token_address", "nombre", "id", "divisa", "precio_emision"]].copy()
-    master_slim["token_address"] = master_slim["token_address"].astype(str).str.lower()
-
-    df_col = df_col.merge(master_slim, on="token_address", how="left")
-    df_col["valor_estimado"] = df_col["colateral_tokens"] * df_col["precio_emision"]
-    df_col["proyecto"] = df_col["id"].fillna(df_col["token_address"])
-    df_col = df_col.dropna(subset=["valor_estimado"]).sort_values("valor_estimado", ascending=False)
-
+if not df_col.empty:
     if len(df_col) > 5:
         top_n = st.slider("Nº de proyectos a mostrar", 5, min(50, len(df_col)), min(20, len(df_col)))
         df_top = df_col.head(top_n)

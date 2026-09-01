@@ -545,4 +545,8 @@ def salud_agregada(wallets: tuple, api_key: str, max_workers: int = 3) -> dict:
         "pct_mayor":      (mayor / deuda * 100) if deuda > 0 else 0.0,
         "tramos":         tramos,
         "estres":         estres,
+        # Pares (health factor, deuda) de cada posición. Los necesita quien
+        # quiera reescalar el estrés con otro supuesto —por ejemplo, una caída
+        # que afecte solo a un mercado— sin volver a consultar la cadena.
+        "_hf_deuda":      [(d["health_factor"], d["deuda_usd"]) for d in pos],
     }
