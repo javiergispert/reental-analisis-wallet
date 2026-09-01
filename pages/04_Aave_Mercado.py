@@ -880,14 +880,21 @@ def _diversificacion_colateral(df_col: pd.DataFrame, salud: dict) -> None:
     _shock_localizado(por_pais, total, salud["_hf_deuda"], salud["deuda_usd"])
 
 
+# «Fuera de plazo» y «ya cerrado» son cosas distintas y se separan a propósito:
+# un proyecto cerrado no está vencido, terminó. Que sus tokens sigan depositados
+# como garantía es otro fenómeno —y sin riesgo de calendario—, mientras que uno
+# vivo que pasó su fecha estimada sí es una señal. Mezclarlos hacía leer como
+# retraso lo que era simplemente colateral de proyectos ya finalizados.
 TRAMOS_VENCIMIENTO = [
-    (-1e9, 0,    "Ya vencido",   "#dc2626"),
+    (-1e9, 0,    "Fuera de plazo", "#dc2626"),
     (0,    6,    "0-6 meses",    "#16a34a"),
     (6,    12,   "6-12 meses",   "#22c55e"),
     (12,   24,   "1-2 años",     "#3B82F6"),
     (24,   36,   "2-3 años",     "#6366f1"),
     (36,   1e9,  "Más de 3 años", "#8b5cf6"),
 ]
+
+COLOR_CERRADO = "#94a3b8"
 
 
 def _vencimientos_colateral(df_col: pd.DataFrame, master_df: pd.DataFrame) -> None:
@@ -912,7 +919,9 @@ def _vencimientos_colateral(df_col: pd.DataFrame, master_df: pd.DataFrame) -> No
     st.markdown("##### 📅 Vencimientos del colateral")
     st.caption(
         "Cuándo se espera que cada inmueble en garantía llegue a su fin. Un colateral escalonado "
-        "se va convirtiendo en caja por tramos en vez de tener que realizarse todo a la vez."
+        "se va convirtiendo en caja por tramos en vez de tener que realizarse todo a la vez. "
+        "**Fuera de plazo** son proyectos vivos que pasaron su fecha estimada; los que ya cerraron "
+        "van aparte, en gris, porque no están retrasados sino terminados."
     )
 
     hoy = pd.Timestamp(date.today())
@@ -925,16 +934,29 @@ def _vencimientos_colateral(df_col: pd.DataFrame, master_df: pd.DataFrame) -> No
     d["_meses"] = (d["_fin"] - hoy).dt.days / 30.44
     total = float(d["valor_estimado"].sum())
 
+    # Los cerrados salen de la escalera entera, no solo del tramo vencido: ya
+    # tuvieron su evento de liquidez, así que no «vencen» en ninguna fecha
+    # futura y colocarlos en un tramo daría una foto falsa del calendario.
+    d["_cerrado"] = d["estado"].astype(str).str.upper().str.contains("CERRAD", na=False)
+    cerrados_df = d[d["_cerrado"]]
+    vivos       = d[~d["_cerrado"]]
+
     filas = []
     for lo, hi, etiqueta, color in TRAMOS_VENCIMIENTO:
-        z = d[(d["_meses"] >= lo) & (d["_meses"] < hi)]
+        z = vivos[(vivos["_meses"] >= lo) & (vivos["_meses"] < hi)]
         filas.append({"tramo": etiqueta, "color": color, "n": len(z),
                       "valor": float(z["valor_estimado"].sum()),
                       "pct": float(z["valor_estimado"].sum()) / total * 100 if total else 0.0})
+    if len(cerrados_df):
+        filas.append({"tramo": "Proyecto ya cerrado", "color": COLOR_CERRADO,
+                      "n": len(cerrados_df),
+                      "valor": float(cerrados_df["valor_estimado"].sum()),
+                      "pct": float(cerrados_df["valor_estimado"].sum()) / total * 100 if total else 0.0})
 
-    vida_media = float((d["_meses"].clip(lower=0) * d["valor_estimado"]).sum() / total) if total else 0
+    _vv = vivos["valor_estimado"].sum()
+    vida_media = float((vivos["_meses"].clip(lower=0) * vivos["valor_estimado"]).sum() / _vv) if _vv else 0
     dentro_12  = sum(f["pct"] for f in filas if f["tramo"] in ("0-6 meses", "6-12 meses"))
-    vencido    = next(f for f in filas if f["tramo"] == "Ya vencido")
+    vencido    = next(f for f in filas if f["tramo"] == "Fuera de plazo")
 
     v1, v2, v3 = st.columns(3)
     v1.metric("⏳ Vida media del colateral", f"{vida_media:,.1f} meses",
@@ -942,17 +964,23 @@ def _vencimientos_colateral(df_col: pd.DataFrame, master_df: pd.DataFrame) -> No
               help=("Plazo medio hasta el vencimiento de los inmuebles en garantía, ponderado por "
                     "su valor. Es el horizonte en el que la garantía se convierte en caja de forma "
                     "natural.\n\nUn plazo corto significa rotación rápida y menos tiempo expuesto "
-                    "a que el precio se mueva; uno largo, más incertidumbre sobre el valor de salida."))
+                    "a que el precio se mueva; uno largo, más incertidumbre sobre el valor de salida."
+                    "\n\nSe calcula solo sobre proyectos vivos: los ya cerrados no vencen en "
+                    "ninguna fecha futura."))
     v2.metric("📆 Vence en 12 meses", f"{dentro_12:,.1f}%",
               "del colateral", delta_color="off",
               help=("Parte del colateral cuyo proyecto termina dentro del año. Al cerrarse, el "
                     "inmueble se vende y el inversor puede repagar su préstamo: la exposición se "
                     "reduce sola, sin necesidad de liquidar a nadie."))
-    v3.metric("⚠️ Pasado de fecha", f"{vencido['pct']:,.1f}%",
+    v3.metric("⚠️ Fuera de plazo", f"{vencido['pct']:,.1f}%",
               f"{vencido['n']} proyectos", delta_color="off",
-              help=("Colateral cuyo proyecto ya superó su fecha estimada de fin. No implica "
-                    "pérdida —muchos siguen generando valor y algunos acumulan rentabilidad por la "
-                    "prórroga—, pero sí que el calendario previsto no se está cumpliendo ahí.\n\n"
+              help=("Colateral de proyectos **todavía en marcha** que ya superaron su fecha "
+                    "estimada de fin. No implica pérdida —muchos siguen generando valor y algunos "
+                    "acumulan rentabilidad por la prórroga—, pero sí que el calendario previsto no "
+                    "se está cumpliendo ahí.\n\n"
+                    "**No incluye los proyectos ya cerrados.** Uno cerrado no está retrasado: "
+                    "terminó, y que sus tokens sigan depositados como garantía es otra cosa. Van "
+                    "en su propia barra gris.\n\n"
                     "Se muestra porque un inversor lo va a encontrar igualmente."))
 
     fig = go.Figure()
