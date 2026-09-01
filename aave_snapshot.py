@@ -290,18 +290,25 @@ def stables_en_vivo(snap: dict, api_key: str) -> dict:
     if not tokens:
         return {}
     out = {}
-    for sym, addrs in tokens.items():
-        cfg = al.config_de_reserva(addrs["reserve"], api_key)
-        if not cfg:
-            return {}
-        sup = al.total_supply(addrs["atoken"], 6, api_key)
-        bor = al.total_supply(addrs["debt_token"], 6, api_key)
-        out[sym] = {
-            "supply_apr": cfg["liquidity_rate_apr"],
-            "borrow_apr": cfg["borrow_rate_apr"],
-            "supply_total": sup, "borrow_total": bor,
-            "utilizacion": (bor / sup) if sup else None,
-        }
+    try:
+        for sym, addrs in tokens.items():
+            cfg = al.config_de_reserva(addrs["reserve"], api_key)
+            if not cfg:
+                return {}
+            sup = al.total_supply(addrs["atoken"], 6, api_key)
+            bor = al.total_supply(addrs["debt_token"], 6, api_key)
+            out[sym] = {
+                "supply_apr": cfg["liquidity_rate_apr"],
+                "borrow_apr": cfg["borrow_rate_apr"],
+                "supply_total": sup, "borrow_total": bor,
+                "utilizacion": (bor / sup) if sup else None,
+            }
+    except (AttributeError, KeyError, TypeError):
+        # AttributeError se da si aave_lend quedó obsoleto en sys.modules tras un
+        # despliegue: la función existe en el commit pero no en el módulo vivo.
+        # Devolver {} hace que la página use los datos de la foto en vez de
+        # caerse entera por no poder refrescar el titular.
+        return {}
     return out
 
 

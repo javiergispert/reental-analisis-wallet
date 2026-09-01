@@ -57,6 +57,13 @@ import aave_lend as _al
 # Foto diaria del mercado, generada por scripts/snapshot_aave.py y commiteada
 # por una GitHub Action. La página lee de ahí en vez de reconstruirlo todo.
 import aave_snapshot as _snap
+import recarga as _recarga
+# Streamlit reejecuta el script pero NO reimporta lo que ya está en sys.modules:
+# tras un despliegue esta página puede convivir con una versión anterior de sus
+# módulos y una función recién añadida "no existe" aunque esté en el commit.
+# Ya pasó con aave_lend.config_de_reserva. En orden de dependencia: aave_snapshot
+# usa aave_lend.
+_recarga.refrescar("aave_lend", "aave_snapshot")
 
 RNT_LEND_POOL = _al.RNT_LEND_POOL
 
