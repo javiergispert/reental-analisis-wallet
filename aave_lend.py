@@ -444,6 +444,59 @@ def apr_borrow_medio_historico(reserve_address: str, api_key: str) -> float | No
         return None
 
 
+# ── Estado del pool: reservas, configuración y circulante ────────────────────
+# Estaban en pages/04_Aave_Mercado.py. Se suben aquí porque ahora las necesitan
+# dos consumidores —la página y el script que genera la foto diaria— y tener dos
+# copias es exactamente como se han roto cosas antes en este repo.
+
+@st.cache_data(show_spinner=False, ttl=86400)
+def reservas_del_pool(api_key: str) -> list:
+    """Direcciones de todos los activos subyacentes listados en el pool."""
+    raw = eth_call(RNT_LEND_POOL, SEL_GET_RESERVES_LIST, api_key)
+    if not raw or len(raw) < 130:
+        return []
+    h = raw[2:]
+    try:
+        n = int(h[64:128], 16)
+    except ValueError:
+        return []
+    return ["0x" + h[128 + i * 64: 128 + (i + 1) * 64][-40:] for i in range(n)]
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def config_de_reserva(asset: str, api_key: str) -> dict:
+    """aToken, debt token y tipos actuales (supply/borrow APR) de una reserva."""
+    raw = eth_call(RNT_LEND_POOL, SEL_GET_RESERVE_DATA + _addr_arg(asset), api_key)
+    if not raw:
+        return {}
+    h = raw[2:]
+    w = [h[i:i + 64] for i in range(0, len(h), 64)]
+    if len(w) < 11:
+        return {}
+    try:
+        return {
+            "liquidity_rate_apr": int(w[2], 16) / RAY,
+            "borrow_rate_apr":    int(w[4], 16) / RAY,
+            "atoken":             "0x" + w[8][-40:],
+            "variable_debt_token": "0x" + w[10][-40:],
+        }
+    except ValueError:
+        return {}
+
+
+@st.cache_data(show_spinner=False, ttl=600)
+def total_supply(token_address: str, decimals: int, api_key: str) -> float:
+    """Circulante de un token. En un aToken equivale a lo aportado al pool; en
+    un debt token, a lo prestado."""
+    raw = eth_call(token_address, SEL_TOTAL_SUPPLY, api_key)
+    if not raw or raw == "0x":
+        return 0.0
+    try:
+        return int(raw, 16) / (10 ** decimals)
+    except ValueError:
+        return 0.0
+
+
 # ── Salud agregada del mercado ───────────────────────────────────────────────
 
 # Tramos de riesgo, alineados con `nivel_riesgo` para que la tabla y los KPIs

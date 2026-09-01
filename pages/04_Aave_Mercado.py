@@ -54,6 +54,9 @@ POLYGON_CHAIN_ID = 137
 # Analizador_de_Wallets.py (ver aave_lend.py). Una única implementación evita
 # que las páginas se desincronicen y hace que compartan la misma caché.
 import aave_lend as _al
+# Foto diaria del mercado, generada por scripts/snapshot_aave.py y commiteada
+# por una GitHub Action. La página lee de ahí en vez de reconstruirlo todo.
+import aave_snapshot as _snap
 
 RNT_LEND_POOL = _al.RNT_LEND_POOL
 
@@ -108,46 +111,20 @@ def _eth_call(to: str, data: str, retries: int = 6) -> str:
     return _al.eth_call(to, data, API_KEY, retries=retries)
 
 
-@st.cache_data(show_spinner=False, ttl=86400)
+# Las tres primitivas del pool viven en aave_lend: las comparten esta página y
+# el script que genera la foto diaria. Aquí solo se les pone la API key delante
+# para no repetirla en cada llamada.
+
 def fetch_reserves_list() -> list:
-    """Direcciones de todos los activos subyacentes listados en el pool RNT Lend."""
-    raw = _eth_call(RNT_LEND_POOL, SEL_GET_RESERVES_LIST)
-    if not raw:
-        return []
-    hexres = raw[2:]
-    length = int(hexres[64:128], 16)
-    start = 128
-    return [
-        "0x" + hexres[start + i * 64: start + (i + 1) * 64][-40:]
-        for i in range(length)
-    ]
+    return _al.reservas_del_pool(API_KEY)
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
 def fetch_reserve_config(asset: str) -> dict:
-    """aToken, debt token y tipos actuales (supply/borrow APR) de una reserva del pool."""
-    data = SEL_GET_RESERVE_DATA + "000000000000000000000000" + asset[2:]
-    raw = _eth_call(RNT_LEND_POOL, data)
-    if not raw:
-        return {}
-    hexres = raw[2:]
-    words = [hexres[i:i + 64] for i in range(0, len(hexres), 64)]
-    if len(words) < 11:
-        return {}
-    return {
-        "liquidity_rate_apr": int(words[2], 16) / RAY,
-        "borrow_rate_apr":    int(words[4], 16) / RAY,
-        "atoken":             "0x" + words[8][-40:],
-        "variable_debt_token": "0x" + words[10][-40:],
-    }
+    return _al.config_de_reserva(asset, API_KEY)
 
 
-@st.cache_data(show_spinner=False, ttl=600)
 def fetch_total_supply(token_address: str, decimals: int = 18) -> float:
-    raw = _eth_call(token_address, SEL_TOTAL_SUPPLY)
-    if not raw:
-        return 0.0
-    return int(raw, 16) / (10 ** decimals)
+    return _al.total_supply(token_address, decimals, API_KEY)
 
 
 # ── Escaneo de eventos Transfer (histórico + holders) ────────────────────────
@@ -1183,13 +1160,14 @@ def _shock_localizado(por_pais, total: float, hf_deuda: list, deuda_total: float
 
 
 def render_salud_agregada(borrow_holders: dict, df_col: pd.DataFrame,
-                          master_df: pd.DataFrame) -> dict | None:
+                          master_df: pd.DataFrame,
+                          salud_guardada: dict | None = None) -> dict | None:
     """El mercado entero como una sola cuenta: exposición y cobertura.
 
-    Va detrás de un botón a propósito. Son ~340 consultas al pool (una por
-    prestatario) y tardan un par de minutos; quien entra a mirar los tipos o la
-    concentración no tiene por qué pagarlas. Una vez calculado queda en caché
-    media hora, así que las recargas son instantáneas.
+    Normalmente sale de la foto diaria y se pinta al instante. Calcularlo en
+    vivo son ~340 consultas al pool, una por prestatario, y un par de minutos:
+    por eso, sin foto, queda detrás de un botón en vez de imponerle esa espera a
+    quien solo venía a mirar los tipos.
     """
     st.subheader("🩺 Salud del mercado — el pool como una sola cuenta")
     st.caption(
@@ -1197,27 +1175,30 @@ def render_salud_agregada(borrow_holders: dict, df_col: pd.DataFrame,
         "los prestatarios. Útil para explicar la exposición del mercado de una sola vez."
     )
 
-    if not borrow_holders:
-        st.info("No hay prestatarios que analizar en este momento.")
-        return None
+    salud = salud_guardada if (salud_guardada or {}).get("n_posiciones") else None
 
-    if not st.session_state.get("salud_calculada"):
-        st.caption(
-            f"Requiere consultar la posición de los **{len(borrow_holders)} prestatarios** "
-            "uno a uno en el pool: tarda un par de minutos la primera vez y luego queda "
-            "en caché 30 minutos."
-        )
-        if st.button("🩺 Calcular salud agregada", type="primary", key="btn_salud"):
-            st.session_state["salud_calculada"] = True
-            st.rerun()
-        return None
+    if salud is None:
+        if not borrow_holders:
+            st.info("No hay prestatarios que analizar en este momento.")
+            return None
 
-    with st.spinner(f"Consultando {len(borrow_holders)} posiciones en el pool…"):
-        # El nº de esquema va explícito, no como valor por defecto: así entra
-        # seguro en la clave de caché y una versión anterior del diccionario no
-        # puede reutilizarse.
-        salud = _al.salud_agregada(tuple(sorted(borrow_holders)), API_KEY,
-                                   esquema=_al.ESQUEMA_SALUD)
+        if not st.session_state.get("salud_calculada"):
+            st.caption(
+                f"No hay foto del día disponible, así que hay que consultar la posición de "
+                f"los **{len(borrow_holders)} prestatarios** uno a uno en el pool: tarda un "
+                "par de minutos."
+            )
+            if st.button("🩺 Calcular salud agregada", type="primary", key="btn_salud"):
+                st.session_state["salud_calculada"] = True
+                st.rerun()
+            return None
+
+        with st.spinner(f"Consultando {len(borrow_holders)} posiciones en el pool…"):
+            # El nº de esquema va explícito, no como valor por defecto: así entra
+            # seguro en la clave de caché y una versión anterior del diccionario no
+            # puede reutilizarse.
+            salud = _al.salud_agregada(tuple(sorted(borrow_holders)), API_KEY,
+                                       esquema=_al.ESQUEMA_SALUD)
 
     if not salud or not salud.get("n_posiciones"):
         st.warning("No se pudo reconstruir la posición agregada en este momento.")
@@ -1379,12 +1360,23 @@ if not API_KEY:
     st.error("Falta configurar ETHERSCAN_API_KEY.")
     st.stop()
 
-with st.spinner("Consultando el pool RNT Lend on-chain (Polygon)… puede tardar unos segundos"):
-    snapshot = build_market_snapshot()
-    master_df = load_master_projects()
+# La foto diaria evita reconstruir el mercado entero en cada visita. Los KPIs de
+# cabecera SÍ se piden en vivo —son 6 llamadas y unos segundos— porque son el
+# titular de la página. Si no hay foto (repo recién clonado, o el pase nocturno
+# falló) se cae al camino de siempre: más lento, pero nunca sin datos.
+foto = _snap.cargar()
 
-stables = snapshot.get("stables", {})
-colateral_rows = snapshot.get("colateral", [])
+with st.spinner("Cargando el mercado RNT Lend…"):
+    master_df = load_master_projects()
+    if foto:
+        stables       = _snap.stables_en_vivo(foto, API_KEY) or foto.get("stables", {})
+        colateral_rows = foto.get("colateral", [])
+        stable_tokens = foto.get("tokens_stable", {})
+    else:
+        snapshot = build_market_snapshot()
+        stables       = snapshot.get("stables", {})
+        colateral_rows = snapshot.get("colateral", [])
+        stable_tokens = snapshot.get("stable_tokens", {})
 
 if not stables and not colateral_rows:
     st.error(
@@ -1418,6 +1410,27 @@ st.caption(
     "⚠️ Tipos mostrados como APR simple (tasa anual sin componer), tal como los "
     "almacena el contrato del pool. Es una foto actual, no una serie histórica."
 )
+
+# Servir datos guardados sin decir de cuándo son sería engañoso: quien enseñe
+# esto a un inversor tiene que saber si mira lo de ahora o lo de esta mañana.
+if foto:
+    _edad = _snap.edad_horas(foto)
+    _cuando = (f"hace {_edad:,.0f} h" if _edad is not None and _edad >= 1
+               else "hace menos de una hora" if _edad is not None else "fecha desconocida")
+    _aviso = (f"📅 Los KPIs de arriba son **en vivo**. El resto de la página "
+              f"—histórico, concentración, colateral y salud del mercado— sale de la foto "
+              f"diaria generada **{_cuando}** (bloque {foto.get('bloque', 0):,}).")
+    if _edad is not None and _edad > 36:
+        st.warning(_aviso + " ⚠️ Lleva más de un día sin actualizarse: revisa que la "
+                            "GitHub Action nocturna esté corriendo.")
+    else:
+        st.caption(_aviso)
+else:
+    st.info(
+        "No hay foto diaria disponible, así que la página está reconstruyendo el mercado "
+        "en vivo y va a tardar varios minutos. Se genera con "
+        "`python3 scripts/snapshot_aave.py` o esperando al pase nocturno."
+    )
 
 # El desglose de colateral por proyecto se construye aquí, y no en su sección de
 # más abajo, porque la salud agregada lo necesita para medir la diversificación.
@@ -1466,9 +1479,10 @@ st.caption(
     "largo plazo que el tipo instantáneo, muy ruidoso al cambiar en cada depósito/préstamo/repago."
 )
 
-stable_tokens = snapshot.get("stable_tokens", {})
 historical = {}
-if stable_tokens:
+if foto:
+    historical = _snap.historico(foto)
+elif stable_tokens:
     with st.spinner("Reconstruyendo histórico on-chain (puede tardar 1-2 minutos la primera vez)…"):
         historical = build_historical_series_batch(stable_tokens)
 
@@ -1531,7 +1545,8 @@ if historical:
     borrow_holders = combinar_holders(*[h["borrow_holders"] for h in historical.values()])
 
     with _hueco_salud:
-        salud_mercado = render_salud_agregada(borrow_holders, df_col, master_df)
+        salud_mercado = render_salud_agregada(borrow_holders, df_col, master_df,
+                                              (foto or {}).get("salud"))
 
     col_a, col_b = st.columns(2)
     for col, holders, titulo in (
