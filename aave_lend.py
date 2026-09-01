@@ -459,8 +459,17 @@ TRAMOS_HF = [
 CAIDAS_ESTRES = (10, 20, 30, 40, 50)
 
 
+# Versión del diccionario que devuelve `salud_agregada`. Va como argumento de
+# la función cacheada a propósito: `st.cache_data` indexa por los argumentos y
+# NO se entera de que ha cambiado el cuerpo de la función, así que una entrada
+# guardada antes de añadir una clave se seguía sirviendo sin ella y el llamante
+# reventaba con un KeyError. Subir este número invalida lo viejo.
+ESQUEMA_SALUD = 2
+
+
 @st.cache_data(show_spinner=False, ttl=1800)
-def salud_agregada(wallets: tuple, api_key: str, max_workers: int = 3) -> dict:
+def salud_agregada(wallets: tuple, api_key: str, max_workers: int = 3,
+                   esquema: int = ESQUEMA_SALUD) -> dict:
     """El mercado entero visto como una sola cuenta.
 
     El Health Factor NO se puede promediar entre wallets, pero SÍ se puede

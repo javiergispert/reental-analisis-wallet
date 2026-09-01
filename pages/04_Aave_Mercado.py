@@ -882,6 +882,17 @@ def _diversificacion_colateral(df_col: pd.DataFrame, salud: dict) -> None:
             st.plotly_chart(fig, use_container_width=True)
 
     # ── Traductor de shock localizado ────────────────────────────────────────
+    # Necesita el detalle por posición. Si falta —una entrada de caché anterior
+    # al campo—, se pide recalcular en vez de tumbar la página: el reparto de
+    # arriba sigue siendo válido y útil por sí solo.
+    if not salud.get("_hf_deuda"):
+        st.info(
+            "El escenario por mercado necesita recalcular la salud agregada con los datos "
+            "actuales. Vuelve a pulsar «Calcular salud agregada» dentro de unos minutos, "
+            "cuando expire la caché."
+        )
+        return
+
     st.markdown("**¿Y si cae solo un mercado?**", help=(
         "Traduce una caída localizada a la escala del test de estrés. Si un mercado pesa un w% "
         "del colateral y cae un d%, el colateral total baja w × d%.\n\n"
@@ -961,7 +972,11 @@ def render_salud_agregada(borrow_holders: dict, df_col: pd.DataFrame) -> dict | 
         return None
 
     with st.spinner(f"Consultando {len(borrow_holders)} posiciones en el pool…"):
-        salud = _al.salud_agregada(tuple(sorted(borrow_holders)), API_KEY)
+        # El nº de esquema va explícito, no como valor por defecto: así entra
+        # seguro en la clave de caché y una versión anterior del diccionario no
+        # puede reutilizarse.
+        salud = _al.salud_agregada(tuple(sorted(borrow_holders)), API_KEY,
+                                   esquema=_al.ESQUEMA_SALUD)
 
     if not salud or not salud.get("n_posiciones"):
         st.warning("No se pudo reconstruir la posición agregada en este momento.")
