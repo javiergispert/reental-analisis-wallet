@@ -1,0 +1,62 @@
+name: Foto diaria del mercado Aave
+
+# Regenera data/aave/snapshot.json y lo commitea si ha cambiado. La p√°gina web
+# solo lee ese fichero: sin esto tendr√≠a que reconstruirlo en cada visita, que
+# son cuatro o cinco minutos de llamadas a Etherscan.
+#
+# El pase reutiliza la foto anterior, as√≠ que el escaneo de eventos solo pide
+# los bloques nuevos del d√≠a (~20 eventos) en vez de los 20.000 acumulados. Eso
+# ahorra sobre todo CUOTA de Etherscan: el tiempo del pase lo marcan las
+# consultas de estado actual, que no se pueden pedir "desde el √∫ltimo bloque".
+
+on:
+  schedule:
+    # 04:30 UTC: fuera de horas de oficina en Espa√±a y con margen de sobra antes
+    # de que nadie abra la herramienta por la ma√±ana.
+    - cron: "30 4 * * *"
+  workflow_dispatch:        # y a mano desde la pesta√±a Actions cuando haga falta
+
+concurrency:
+  # Dos pases a la vez se pisar√≠an el fichero y agotar√≠an la cuota de Etherscan.
+  group: snapshot-aave
+  cancel-in-progress: false
+
+permissions:
+  contents: write           # necesario para commitear el snapshot
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    # Medido: ~8,5 min un pase incremental y ~11 min uno completo. Casi todo es
+    # espera de red (2% de CPU): el limitador de 0,4 s por llamada protege la
+    # clave de Etherscan, y las 104 reservas y 339 posiciones se rehacen enteras
+    # porque no son acumulativas. El margen es amplio a prop√≥sito.
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Generar la foto
+        env:
+          ETHERSCAN_API_KEY: ${{ secrets.ETHERSCAN_API_KEY }}
+        run: python3 scripts/snapshot_aave.py
+
+      - name: Commitear si ha cambiado
+        run: |
+          if git diff --quiet -- data/aave/snapshot.json; then
+            echo "Sin cambios en la foto: no se commitea."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/aave/snapshot.json
+          git commit -m "Foto del mercado Aave: $(date -u '+%Y-%m-%d %H:%M UTC')"
+          git push
