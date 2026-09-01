@@ -1,23 +1,23 @@
 name: Foto diaria del mercado Aave
 
-# Regenera data/aave/snapshot.json y lo commitea si ha cambiado. La p√°gina web
-# solo lee ese fichero: sin esto tendr√≠a que reconstruirlo en cada visita, que
+# Regenera data/aave/snapshot.json y lo commitea si ha cambiado. La página web
+# solo lee ese fichero: sin esto tendría que reconstruirlo en cada visita, que
 # son cuatro o cinco minutos de llamadas a Etherscan.
 #
-# El pase reutiliza la foto anterior, as√≠ que el escaneo de eventos solo pide
-# los bloques nuevos del d√≠a (~20 eventos) en vez de los 20.000 acumulados. Eso
+# El pase reutiliza la foto anterior, así que el escaneo de eventos solo pide
+# los bloques nuevos del día (~20 eventos) en vez de los 20.000 acumulados. Eso
 # ahorra sobre todo CUOTA de Etherscan: el tiempo del pase lo marcan las
-# consultas de estado actual, que no se pueden pedir "desde el √∫ltimo bloque".
+# consultas de estado actual, que no se pueden pedir "desde el último bloque".
 
 on:
   schedule:
-    # 04:30 UTC: fuera de horas de oficina en Espa√±a y con margen de sobra antes
-    # de que nadie abra la herramienta por la ma√±ana.
+    # 04:30 UTC: fuera de horas de oficina en España y con margen de sobra antes
+    # de que nadie abra la herramienta por la mañana.
     - cron: "30 4 * * *"
-  workflow_dispatch:        # y a mano desde la pesta√±a Actions cuando haga falta
+  workflow_dispatch:        # y a mano desde la pestaña Actions cuando haga falta
 
 concurrency:
-  # Dos pases a la vez se pisar√≠an el fichero y agotar√≠an la cuota de Etherscan.
+  # Dos pases a la vez se pisarían el fichero y agotarían la cuota de Etherscan.
   group: snapshot-aave
   cancel-in-progress: false
 
@@ -30,7 +30,7 @@ jobs:
     # Medido: ~8,5 min un pase incremental y ~11 min uno completo. Casi todo es
     # espera de red (2% de CPU): el limitador de 0,4 s por llamada protege la
     # clave de Etherscan, y las 104 reservas y 339 posiciones se rehacen enteras
-    # porque no son acumulativas. El margen es amplio a prop√≥sito.
+    # porque no son acumulativas. El margen es amplio a propósito.
     timeout-minutes: 60
 
     steps:
