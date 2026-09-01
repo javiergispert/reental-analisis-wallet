@@ -385,7 +385,7 @@ def generar_pdf_aave(stables: dict, df_col: pd.DataFrame, supply_holders: dict, 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4,
                              leftMargin=1.5 * cm, rightMargin=1.5 * cm,
-                             topMargin=1.5 * cm, bottomMargin=1.5 * cm)
+                             topMargin=1.5 * cm, bottomMargin=2.0 * cm)
 
     tit_s    = ParagraphStyle("t",  fontSize=17, leading=21, alignment=TA_LEFT,   fontName="Helvetica-Bold", textColor=PDF_NAVY_OSC)
     fecha_s  = ParagraphStyle("f",  fontSize=9,  leading=12, alignment=TA_RIGHT,  fontName="Helvetica",      textColor=PDF_NAVY_OSC)
@@ -419,6 +419,40 @@ def generar_pdf_aave(stables: dict, df_col: pd.DataFrame, supply_holders: dict, 
         t.setStyle(TableStyle(ts))
         return t
 
+    # ── Marcado de borrador interno ──────────────────────────────────────────
+    # El informe lleva cifras de rentabilidad, y hasta que Legal y Compliance lo
+    # revisen no puede circular fuera de Reental: sin marcar, un PDF reenviado
+    # por error es indistinguible de material comercial. Se marca en tres sitios
+    # a la vez porque cada uno cubre un fallo distinto: la banda superior se lee
+    # en la primera ojeada, la diagonal sobrevive a una captura de pantalla de
+    # media página, y el pie acompaña a cada hoja si alguien imprime y separa.
+
+    def _marcar_borrador(canvas, doc_):
+        canvas.saveState()
+        ancho, alto = A4
+
+        # Diagonal, muy tenue para no estorbar la lectura pero imposible de
+        # recortar sin que se note.
+        canvas.setFont("Helvetica-Bold", 58)
+        canvas.setFillColor(colors.HexColor("#DC2626"))
+        canvas.setFillAlpha(0.10)
+        canvas.translate(ancho / 2, alto / 2)
+        canvas.rotate(38)
+        canvas.drawCentredString(0, 30, "BORRADOR")
+        canvas.drawCentredString(0, -40, "USO INTERNO")
+        canvas.restoreState()
+
+        # Pie en todas las páginas, con numeración para detectar hojas sueltas.
+        canvas.saveState()
+        canvas.setFillColor(colors.HexColor("#DC2626"))
+        canvas.rect(0, 0, ancho, 1.05 * cm, stroke=0, fill=1)
+        canvas.setFont("Helvetica-Bold", 7.5)
+        canvas.setFillColor(colors.white)
+        canvas.drawString(1.5 * cm, 0.4 * cm,
+                          "BORRADOR — USO INTERNO EXCLUSIVO DE REENTAL · NO DIFUNDIR A TERCEROS")
+        canvas.drawRightString(ancho - 1.5 * cm, 0.4 * cm, f"Página {doc_.page}")
+        canvas.restoreState()
+
     story = []
 
     ht = Table([[
@@ -427,6 +461,29 @@ def generar_pdf_aave(stables: dict, df_col: pd.DataFrame, supply_holders: dict, 
     ]], colWidths=["65%", "35%"])
     ht.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
     story += [ht, Spacer(1, 0.3 * cm), HRFlowable(width="100%", thickness=3, color=PDF_DORADO), Spacer(1, 0.4 * cm)]
+
+    aviso_s = ParagraphStyle("av", fontSize=7.5, leading=10, alignment=TA_LEFT,
+                             fontName="Helvetica", textColor=colors.HexColor("#7F1D1D"))
+    aviso_t = ParagraphStyle("avt", fontSize=9, leading=12, alignment=TA_LEFT,
+                             fontName="Helvetica-Bold", textColor=colors.HexColor("#7F1D1D"))
+    caja_aviso = Table([[Paragraph(
+        "DOCUMENTO EN BORRADOR — USO INTERNO EXCLUSIVO DE REENTAL", aviso_t)], [Paragraph(
+        "Pendiente de revisión y aprobación por las áreas de Legal y Cumplimiento Normativo. "
+        "<b>No difundir, publicar ni entregar a terceros</b>, ni total ni parcialmente.<br/><br/>"
+        "Este documento tiene finalidad exclusivamente informativa y de análisis interno. "
+        "<b>No constituye una comunicación publicitaria</b>, ni una oferta, invitación o "
+        "recomendación de compra, venta o suscripción de ningún instrumento financiero, ni "
+        "asesoramiento en materia de inversión. Las cifras proceden de lecturas automatizadas de "
+        "la cadena de bloques y de estimaciones internas no auditadas, se refieren al momento de "
+        "su generación y pueden variar; las rentabilidades pasadas o estimadas no garantizan "
+        "rentabilidades futuras.", aviso_s)]], colWidths=["100%"])
+    caja_aviso.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#FEF2F2")),
+        ("BOX", (0, 0), (-1, -1), 1.1, colors.HexColor("#DC2626")),
+        ("LEFTPADDING", (0, 0), (-1, -1), 10), ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+        ("TOPPADDING", (0, 0), (-1, 0), 7), ("BOTTOMPADDING", (0, 1), (-1, 1), 8),
+    ]))
+    story += [caja_aviso, Spacer(1, 0.45 * cm)]
 
     # KPIs USDT/USDC
     story.append(seccion("Estado actual — USDT / USDC"))
@@ -766,7 +823,7 @@ def generar_pdf_aave(stables: dict, df_col: pd.DataFrame, supply_holders: dict, 
     for nota in notas:
         story.append(Paragraph(nota, nota_s))
 
-    doc.build(story)
+    doc.build(story, onFirstPage=_marcar_borrador, onLaterPages=_marcar_borrador)
     return buf.getvalue()
 
 
@@ -1703,7 +1760,9 @@ with col_pdf:
         st.download_button(
             label="⬇️ Descargar PDF",
             data=pdf_bytes,
-            file_name=f"Reental_RNT_Lend_{date.today().strftime('%Y%m%d')}.pdf",
+            # El nombre del fichero también lo declara: es lo único que se ve
+            # cuando el PDF llega adjunto y nadie lo ha abierto todavía.
+            file_name=f"BORRADOR_INTERNO_Reental_RNT_Lend_{date.today().strftime('%Y%m%d')}.pdf",
             mime="application/pdf",
             type="primary",
         )
