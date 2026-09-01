@@ -255,6 +255,16 @@ def load_master_projects() -> pd.DataFrame:
                                    or parse_fecha_util(str(row.iloc[5]))),
             "div_pagado_token": parse_float_val(str(row.iloc[51])),
             "fecha_fin":        fecha_fin_real or fecha_fin_est,
+            # Comportamiento de las rentas recurrentes: lo estimado al lanzar
+            # (X), lo que realmente lleva pagado anualizado (BB) y la desviación
+            # entre ambos (BC), tal cual la calcula el maestro. Solo tiene
+            # sentido en proyectos que ya deberían estar pagando: en uno en obra
+            # el real es 0 y la desviación sale -100% sin que nadie incumpla.
+            "r_rec_ann_estimada": parse_pct(row.iloc[23]),
+            "r_rec_ann_real":     parse_pct(row.iloc[53]),
+            "var_rec_real_est":   parse_pct(row.iloc[54]) if len(row) > 54 else None,
+            "fecha_fin_real":     fecha_fin_real,
+            "fecha_inicio_renta": (parse_fecha_util(str(row.iloc[102])) if len(row) > 102 else None),
             "fecha_lanzamiento": parse_fecha_util(str(row.iloc[3])),
             "token_address":    token_addr,
             "link_web":         str(row.iloc[75]).strip() if str(row.iloc[75]).strip() not in ("nan", "") else None,

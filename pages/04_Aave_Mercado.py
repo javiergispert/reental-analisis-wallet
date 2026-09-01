@@ -893,6 +893,247 @@ def _diversificacion_colateral(df_col: pd.DataFrame, salud: dict) -> None:
         )
         return
 
+    _shock_localizado(por_pais, total, salud["_hf_deuda"], salud["deuda_usd"])
+
+
+TRAMOS_VENCIMIENTO = [
+    (-1e9, 0,    "Ya vencido",   "#dc2626"),
+    (0,    6,    "0-6 meses",    "#16a34a"),
+    (6,    12,   "6-12 meses",   "#22c55e"),
+    (12,   24,   "1-2 años",     "#3B82F6"),
+    (24,   36,   "2-3 años",     "#6366f1"),
+    (36,   1e9,  "Más de 3 años", "#8b5cf6"),
+]
+
+
+def _vencimientos_colateral(df_col: pd.DataFrame, master_df: pd.DataFrame) -> None:
+    """Escalera de vencimientos: la otra cara de la diversificación.
+
+    Repartir el colateral entre mercados protege del shock simultáneo; repartir
+    los VENCIMIENTOS protege de otra cosa distinta: que toda la garantía tenga
+    que realizarse a la vez. Un colateral escalonado se va convirtiendo en caja
+    y repagando deuda por tramos, y cada proyecto que vence reduce la exposición
+    sin que nadie tenga que vender a la fuerza.
+
+    El argumento solo vale si las fechas se cumplen, así que se enseña también
+    el historial: cuántos proyectos ya cerrados terminaron antes o después de lo
+    estimado. Sin eso sería una promesa; con eso es un dato.
+
+    No cuesta ni una llamada a la cadena: todo sale del maestro, ya cacheado.
+    """
+    if df_col is None or df_col.empty or "fecha_fin" not in df_col.columns:
+        return
+
+    st.markdown("---")
+    st.markdown("##### 📅 Vencimientos del colateral")
+    st.caption(
+        "Cuándo se espera que cada inmueble en garantía llegue a su fin. Un colateral escalonado "
+        "se va convirtiendo en caja por tramos en vez de tener que realizarse todo a la vez."
+    )
+
+    hoy = pd.Timestamp(date.today())
+    d = df_col.copy()
+    d["_fin"] = pd.to_datetime(d["fecha_fin"], errors="coerce")
+    d = d.dropna(subset=["_fin"])
+    if d.empty:
+        st.caption("Sin fechas de vencimiento con las que construir la escalera.")
+        return
+    d["_meses"] = (d["_fin"] - hoy).dt.days / 30.44
+    total = float(d["valor_estimado"].sum())
+
+    filas = []
+    for lo, hi, etiqueta, color in TRAMOS_VENCIMIENTO:
+        z = d[(d["_meses"] >= lo) & (d["_meses"] < hi)]
+        filas.append({"tramo": etiqueta, "color": color, "n": len(z),
+                      "valor": float(z["valor_estimado"].sum()),
+                      "pct": float(z["valor_estimado"].sum()) / total * 100 if total else 0.0})
+
+    vida_media = float((d["_meses"].clip(lower=0) * d["valor_estimado"]).sum() / total) if total else 0
+    dentro_12  = sum(f["pct"] for f in filas if f["tramo"] in ("0-6 meses", "6-12 meses"))
+    vencido    = next(f for f in filas if f["tramo"] == "Ya vencido")
+
+    v1, v2, v3 = st.columns(3)
+    v1.metric("⏳ Vida media del colateral", f"{vida_media:,.1f} meses",
+              "ponderada por valor", delta_color="off",
+              help=("Plazo medio hasta el vencimiento de los inmuebles en garantía, ponderado por "
+                    "su valor. Es el horizonte en el que la garantía se convierte en caja de forma "
+                    "natural.\n\nUn plazo corto significa rotación rápida y menos tiempo expuesto "
+                    "a que el precio se mueva; uno largo, más incertidumbre sobre el valor de salida."))
+    v2.metric("📆 Vence en 12 meses", f"{dentro_12:,.1f}%",
+              "del colateral", delta_color="off",
+              help=("Parte del colateral cuyo proyecto termina dentro del año. Al cerrarse, el "
+                    "inmueble se vende y el inversor puede repagar su préstamo: la exposición se "
+                    "reduce sola, sin necesidad de liquidar a nadie."))
+    v3.metric("⚠️ Pasado de fecha", f"{vencido['pct']:,.1f}%",
+              f"{vencido['n']} proyectos", delta_color="off",
+              help=("Colateral cuyo proyecto ya superó su fecha estimada de fin. No implica "
+                    "pérdida —muchos siguen generando valor y algunos acumulan rentabilidad por la "
+                    "prórroga—, pero sí que el calendario previsto no se está cumpliendo ahí.\n\n"
+                    "Se muestra porque un inversor lo va a encontrar igualmente."))
+
+    fig = go.Figure()
+    for f in filas:
+        if f["valor"] <= 0:
+            continue
+        fig.add_trace(go.Bar(
+            x=[f["tramo"]], y=[f["valor"]], name=f["tramo"], marker_color=f["color"],
+            text=[f"{f['pct']:,.1f}%"], textposition="outside",
+            customdata=[[f["n"]]],
+            hovertemplate="%{x}<br>$%{y:,.0f}<br>%{customdata[0]} proyectos<extra></extra>",
+        ))
+    fig.update_layout(template=TEMPLATE_PLOTLY, height=300, showlegend=False,
+                      margin=dict(t=30, b=10, l=10, r=10),
+                      yaxis_title="Valor del colateral que vence")
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Historial: ¿se cumplen las fechas? Sin esto, la escalera es una promesa.
+    _campos_hist = {"estado", "fecha_fin_real", "fecha_inicio_renta", "fecha_fin_original"}
+    if not _campos_hist.issubset(master_df.columns):
+        return          # maestro cacheado sin los campos nuevos: se omite el historial
+    cerrados = master_df[
+        master_df["estado"].astype(str).str.upper().str.contains("CERRAD", na=False)
+        & master_df["fecha_fin_real"].notna()
+        & master_df["fecha_inicio_renta"].notna()
+        & master_df["fecha_fin_original"].notna()
+    ].copy()
+    if len(cerrados) >= 10:
+        real = (pd.to_datetime(cerrados["fecha_fin_real"]) -
+                pd.to_datetime(cerrados["fecha_inicio_renta"])).dt.days / 30.44
+        est  = (pd.to_datetime(cerrados["fecha_fin_original"]) -
+                pd.to_datetime(cerrados["fecha_inicio_renta"])).dt.days / 30.44
+        desv = (real - est).dropna()
+        if len(desv):
+            antes = int((desv < 0).sum())
+            st.caption(
+                f"**¿Se cumplen estas fechas?** De los **{len(desv)} proyectos ya cerrados**, "
+                f"**{antes} terminaron antes** de su fecha estimada y {len(desv) - antes} después, "
+                f"con una desviación mediana de **{desv.median():+,.1f} meses**. "
+                f"El sesgo histórico es a cerrar antes de plazo, no después — lo que juega a favor "
+                f"de que la garantía se realice antes de lo que dice la escalera, no más tarde."
+            )
+
+
+def _comportamiento_rentas(df_col: pd.DataFrame) -> None:
+    """¿Las rentas recurrentes van donde dijimos que irían?
+
+    Un inmueble que paga lo prometido sostiene su valoración: el colateral no es
+    solo un precio de tasación, es un activo con caja verificable. Por eso mide
+    riesgo, no solo marketing.
+
+    El cálculo tiene una trampa que hay que evitar: un proyecto EN OBRA todavía
+    no paga renta, su real es 0 y la desviación sale -100% sin que nadie haya
+    incumplido nada. Mezclarlos hundía la media del -6,6% real al -25,8%. Solo
+    se comparan los que ya deberían estar pagando, y los que están en
+    explotación sin pagar nada se sacan aparte en vez de diluirlos en la media.
+    """
+    if df_col is None or df_col.empty:
+        return
+    if not {"var_rec_real_est", "r_rec_ann_real", "tip_dividendo", "estado"}.issubset(df_col.columns):
+        return          # maestro cacheado sin los campos nuevos
+
+    rec = df_col[
+        df_col["tip_dividendo"].astype(str).str.lower().str.contains("mensual|trimestral", na=False)
+        & df_col["estado"].astype(str).str.upper().str.contains("EXPLOTACI", na=False)
+        & df_col["var_rec_real_est"].notna()
+    ].copy()
+    if rec.empty:
+        return
+
+    st.markdown("---")
+    st.markdown("##### 🏘️ Comportamiento de las rentas")
+    st.caption(
+        "De los inmuebles en garantía que ya están en explotación y pagan rentas periódicas: "
+        "cuánto están rindiendo frente a lo que se estimó al lanzarlos. Un activo que paga lo "
+        "prometido sostiene su propia valoración."
+    )
+
+    # Los que están en explotación pero no pagan nada se tratan aparte: son un
+    # problema distinto —y peor— que rendir por debajo, y promediarlos con el
+    # resto esconde las dos cosas a la vez.
+    sin_pagar = rec[rec["r_rec_ann_real"].fillna(0) <= 0.0001]
+    pagando   = rec[rec["r_rec_ann_real"].fillna(0) > 0.0001]
+    total_rec = float(rec["valor_estimado"].sum())
+
+    if pagando.empty:
+        st.caption("Ningún proyecto en explotación registra rentas cobradas todavía.")
+        return
+
+    tv = float(pagando["valor_estimado"].sum())
+    desv_pond = float((pagando["var_rec_real_est"] * pagando["valor_estimado"]).sum() / tv)
+    en_linea  = pagando[pagando["var_rec_real_est"] >= -0.05]
+
+    p1, p2, p3 = st.columns(3)
+    p1.metric("🎯 En línea o mejor", f"{en_linea['valor_estimado'].sum() / tv * 100:,.1f}%",
+              f"{len(en_linea)} de {len(pagando)} proyectos", delta_color="off",
+              help=("Colateral cuya renta real está como mucho un 5% por debajo de la estimada, o "
+                    "por encima. El umbral del 5% absorbe el ruido de una mensualidad que entra "
+                    "unos días tarde o de un mes con una reparación."))
+    p2.metric("📊 Desviación media", f"{desv_pond * 100:+,.1f}%",
+              "ponderada por valor", delta_color="off",
+              help=("Diferencia entre la renta real anualizada y la estimada, ponderada por el "
+                    "valor del colateral: un inmueble grande que se desvía pesa más que uno "
+                    "pequeño.\n\nSe calcula solo sobre proyectos en explotación que ya cobran. "
+                    "Incluir los que están en obra daría un -100% por cada uno y haría la métrica "
+                    "inservible."))
+    p3.metric("🔴 En explotación sin cobrar",
+              f"{sin_pagar['valor_estimado'].sum() / total_rec * 100:,.1f}%",
+              f"{len(sin_pagar)} proyectos", delta_color="off",
+              help=("Proyectos declarados en explotación pero sin ninguna renta registrada. Se "
+                    "sacan de la media a propósito: es un problema distinto —y más serio— que "
+                    "rendir por debajo, y mezclarlos escondería las dos cosas.\n\n"
+                    "Puede ser un retraso en el arranque o un dato aún no cargado en el maestro."))
+
+    filas_r = []
+    for lo, hi, etiqueta, color in (
+        (-1e9, -0.20, "Más de 20% por debajo", "#dc2626"),
+        (-0.20, -0.05, "Entre 5% y 20% por debajo", "#ea580c"),
+        (-0.05, 0.05, "En línea (±5%)", "#16a34a"),
+        (0.05, 1e9, "Por encima de lo estimado", "#3B82F6"),
+    ):
+        z = pagando[(pagando["var_rec_real_est"] >= lo) & (pagando["var_rec_real_est"] < hi)]
+        filas_r.append({"tramo": etiqueta, "color": color, "n": len(z),
+                        "valor": float(z["valor_estimado"].sum()),
+                        "pct": float(z["valor_estimado"].sum()) / tv * 100 if tv else 0.0})
+
+    fig = go.Figure()
+    for f in filas_r:
+        if f["valor"] <= 0:
+            continue
+        fig.add_trace(go.Bar(
+            x=[f["pct"]], y=["Rentas"], orientation="h", name=f["tramo"], marker_color=f["color"],
+            customdata=[[f["valor"], f["n"]]],
+            hovertemplate=(f"{f['tramo']}<br>$%{{customdata[0]:,.0f}}"
+                           "<br>%{customdata[1]} proyectos<extra></extra>"),
+        ))
+    fig.update_layout(template=TEMPLATE_PLOTLY, barmode="stack", height=190,
+                      margin=dict(t=10, b=10, l=10, r=10),
+                      xaxis_title="% del colateral en explotación que ya cobra rentas",
+                      yaxis=dict(showticklabels=False),
+                      legend=dict(orientation="h", y=-0.5))
+    st.plotly_chart(fig, use_container_width=True)
+
+    if len(sin_pagar):
+        st.caption(
+            "Sin rentas registradas pese a figurar en explotación: **"
+            + "**, **".join(str(x) for x in sin_pagar["proyecto"])
+            + f"** (${sin_pagar['valor_estimado'].sum():,.0f} de colateral). "
+            "Conviene tener la explicación preparada antes de que la pregunte un inversor."
+        )
+
+
+@st.fragment
+def _shock_localizado(por_pais, total: float, hf_deuda: list, deuda_total: float) -> None:
+    """Escenario de caída en un solo mercado, aislado en un fragmento.
+
+    Es lo único interactivo de toda la página, y sin aislarlo cada movimiento
+    del slider re-ejecutaba el script entero: volver a pintar los gráficos, las
+    tablas y el histórico antes de llegar hasta aquí, con los KPIs
+    desapareciendo por el camino. Como fragmento, Streamlit re-ejecuta solo esta
+    función y el resto de la página ni se entera.
+
+    Recibe los datos ya calculados —no consulta nada— para que mover el slider
+    sea aritmética sobre 337 pares en memoria.
+    """
     st.markdown("**¿Y si cae solo un mercado?**", help=(
         "Traduce una caída localizada a la escala del test de estrés. Si un mercado pesa un w% "
         "del colateral y cae un d%, el colateral total baja w × d%.\n\n"
@@ -909,12 +1150,11 @@ def _diversificacion_colateral(df_col: pd.DataFrame, salud: dict) -> None:
 
     def _liquidable(factor: float) -> tuple:
         """(deuda, nº posiciones) que quedarían por debajo de HF 1."""
-        afect = [t for t in salud["_hf_deuda"] if t[0] * (1 - factor) < 1.0]
+        afect = [t for t in hf_deuda if t[0] * (1 - factor) < 1.0]
         return sum(d for _, d in afect), len(afect)
 
     deuda_div, n_div = _liquidable(caida_pool)
     deuda_cor, n_cor = _liquidable(caida / 100)
-    deuda_total = salud["deuda_usd"]
 
     r1, r2 = st.columns(2)
     r1.metric(f"Si cae solo {mercado}", f"{deuda_div / deuda_total * 100:,.1f}%",
@@ -942,7 +1182,8 @@ def _diversificacion_colateral(df_col: pd.DataFrame, salud: dict) -> None:
     )
 
 
-def render_salud_agregada(borrow_holders: dict, df_col: pd.DataFrame) -> dict | None:
+def render_salud_agregada(borrow_holders: dict, df_col: pd.DataFrame,
+                          master_df: pd.DataFrame) -> dict | None:
     """El mercado entero como una sola cuenta: exposición y cobertura.
 
     Va detrás de un botón a propósito. Son ~340 consultas al pool (una por
@@ -1115,6 +1356,8 @@ def render_salud_agregada(borrow_holders: dict, df_col: pd.DataFrame) -> dict | 
         )
 
     _diversificacion_colateral(df_col, salud)
+    _vencimientos_colateral(df_col, master_df)
+    _comportamiento_rentas(df_col)
 
     st.caption(
         f"Posición más grande: ${salud['mayor_posicion']:,.0f} "
@@ -1184,8 +1427,16 @@ if colateral_rows and not master_df.empty:
     df_col = pd.DataFrame(colateral_rows)
     df_col = df_col[df_col["colateral_tokens"] > 0.001]
 
-    master_slim = master_df[["token_address", "nombre", "id", "divisa", "precio_emision",
-                             "ubicacion", "tip_explotacion"]].copy()
+    # Se piden solo las columnas que EXISTEN. `load_master_projects` está
+    # cacheada una hora: justo después de un despliegue que añade campos, la
+    # copia en memoria todavía es la vieja, y un select fijo reventaría la
+    # página entera con un KeyError hasta que expirase la caché. Los bloques que
+    # dependen de un campo nuevo ya comprueban si está y se saltan si no.
+    _quiero = ["token_address", "nombre", "id", "divisa", "precio_emision",
+               "ubicacion", "tip_explotacion", "estado", "fecha_fin",
+               "tip_dividendo", "var_rec_real_est", "r_rec_ann_estimada",
+               "r_rec_ann_real"]
+    master_slim = master_df[[c for c in _quiero if c in master_df.columns]].copy()
     master_slim["token_address"] = master_slim["token_address"].astype(str).str.lower()
 
     df_col = df_col.merge(master_slim, on="token_address", how="left")
@@ -1280,7 +1531,7 @@ if historical:
     borrow_holders = combinar_holders(*[h["borrow_holders"] for h in historical.values()])
 
     with _hueco_salud:
-        salud_mercado = render_salud_agregada(borrow_holders, df_col)
+        salud_mercado = render_salud_agregada(borrow_holders, df_col, master_df)
 
     col_a, col_b = st.columns(2)
     for col, holders, titulo in (
