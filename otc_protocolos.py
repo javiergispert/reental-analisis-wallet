@@ -238,8 +238,35 @@ def abrir_consulta() -> None:
     st.session_state[_CONSULTA] = True
 
 
+# Ámbar de marca Reental. El botón va relleno y no en gris para que se vea a la
+# primera: si hay que buscarlo, la gente vuelve a hacer la operación de memoria,
+# que es justo lo que se quiere evitar. Se estila por su `key`, que Streamlit
+# expone como clase `.st-key-<key>`, para no pintar de ámbar todos los botones.
+AMBAR_REENTAL = "#f5a623"
+_CSS_BOTON = """
+    <style>
+    .st-key-{key} button {{
+        background-color: {amb} !important;
+        color: #0d1b2e !important;
+        border: none !important;
+        font-weight: 700 !important;
+        border-radius: 8px !important;
+    }}
+    .st-key-{key} button:hover {{
+        background-color: #e0951f !important;
+        color: #0d1b2e !important;
+    }}
+    .st-key-{key} button:active {{
+        background-color: #c47f16 !important;
+        color: #0d1b2e !important;
+    }}
+    </style>
+"""
+
+
 def boton_consulta(key: str = "btn_protocolo_otc", ancho: bool = True) -> None:
     """Botón + modal de consulta. Se llama una sola vez por página."""
+    st.markdown(_CSS_BOTON.format(key=key, amb=AMBAR_REENTAL), unsafe_allow_html=True)
     if st.button("📖 Ver protocolo de operación", key=key,
                  use_container_width=ancho,
                  help="Los pasos a seguir en una operación OTC de tercero, según seas "
