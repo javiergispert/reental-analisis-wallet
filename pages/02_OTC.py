@@ -470,7 +470,14 @@ else:
 ofertas_activas = [o for o in load_ofertas() if o.get("estado") == "activa"]
 
 if ofertas_activas:
-    st.markdown("#### 👤 Tokens de terceros publicados para venta")
+    # El botón va pegado al título porque es donde mira quien está siguiendo una
+    # operación. Los avisos obligatorios se ven una vez, al guardar; la operación
+    # dura días, y cuando llega la respuesta del otro comercial ya nadie recuerda
+    # qué le tocaba. Esto deja releerlo sin tener que empezar una oferta falsa.
+    _tit, _btn = st.columns([3, 1])
+    _tit.markdown("#### 👤 Tokens de terceros publicados para venta")
+    with _btn:
+        _protocolos.boton_consulta()
     st.caption("Estas ofertas son de inversores particulares y NO se suman al inventario de Reental.")
 
     filas_of, avisos_of, estados_of = [], [], []

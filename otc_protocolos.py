@@ -129,6 +129,11 @@ _CONFIRMADO = "confirmado"
 _ESTADO = "_otc_protocolo_{}"
 _LEIDO  = "_otc_protocolo_leido_{}"
 
+# La consulta libre es otro modal distinto: no bloquea nada, se abre cuando el
+# usuario quiere releer los pasos. Streamlit solo admite uno abierto a la vez,
+# así que abrir cualquiera cierra los demás.
+_CONSULTA = "_otc_protocolo_consulta"
+
 
 def solicitar(clave: str) -> None:
     """Marca que hay que enseñar el aviso antes de continuar.
@@ -139,6 +144,7 @@ def solicitar(clave: str) -> None:
     for otra in PROTOCOLOS:
         if otra != clave:
             limpiar(otra)
+    st.session_state.pop(_CONSULTA, None)
     st.session_state[_ESTADO.format(clave)] = _PENDIENTE
     st.session_state.pop(_LEIDO.format(clave), None)
 
@@ -172,7 +178,13 @@ def gestionar(clave: str) -> None:
         _modal(clave)
 
 
-def _html(clave: str) -> str:
+def _html(clave: str, con_intro: bool = True) -> str:
+    """Los pasos en HTML. `con_intro` añade la banda ámbar de advertencia.
+
+    En la consulta libre se omite: está redactada para el momento de la acción
+    («estás realizando una publicación…») y a quien solo viene a releer los pasos
+    le suena a que ha empezado algo que no ha empezado.
+    """
     p = PROTOCOLOS[clave]
     filas = []
     for i, paso in enumerate(p["pasos"], 1):
@@ -193,11 +205,86 @@ def _html(clave: str) -> str:
             f'<div style="flex:1;font-size:0.9rem;color:#1e293b;line-height:1.5;">'
             f'{paso["texto"]}{detalle}</div></div>'
         )
-    return (
+    intro = (
         '<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;'
         'padding:14px 18px;margin-bottom:6px;font-size:0.92rem;color:#78350f;">'
-        f'⚠️ {p["intro"]}</div>' + "".join(filas)
+        f'⚠️ {p["intro"]}</div>'
+    ) if con_intro else ""
+    return intro + "".join(filas)
+
+
+# ── Consulta libre del protocolo ─────────────────────────────────────────────
+# Los modales de arriba se enseñan UNA vez, justo antes de guardar. Pero la
+# operación se alarga días: cuando llega la respuesta del otro comercial, quien
+# leyó los pasos ya no se acuerda de en qué punto estaba ni de qué le toca. Este
+# botón deja releerlos en cualquier momento, separados por rol para que cada uno
+# encuentre su secuencia sin leer la del otro.
+#
+# Reutiliza los mismos textos de PROTOCOLOS: si el proceso cambia, se edita una
+# vez y cambian a la vez el aviso obligatorio y la consulta.
+
+ROLES = [
+    (OFERTA_TERCERO,  "🏷️ Represento al VENDEDOR",
+     "Publicaste la oferta de un inversor que quiere vender sus tokens."),
+    (RESERVA_TERCERO, "🤝 Represento al COMPRADOR",
+     "Vas a reservar, o ya reservaste, tokens que pertenecen a un tercero."),
+]
+
+
+def abrir_consulta() -> None:
+    """Abre la chuleta. Cierra los avisos de guardado por si hubiera uno vivo."""
+    for clave in PROTOCOLOS:
+        limpiar(clave)
+    st.session_state[_CONSULTA] = True
+
+
+def boton_consulta(key: str = "btn_protocolo_otc", ancho: bool = True) -> None:
+    """Botón + modal de consulta. Se llama una sola vez por página."""
+    if st.button("📖 Ver protocolo de operación", key=key,
+                 use_container_width=ancho,
+                 help="Los pasos a seguir en una operación OTC de tercero, según seas "
+                      "el comercial del vendedor o el del comprador. Consultable en "
+                      "cualquier momento."):
+        abrir_consulta()
+        st.rerun()
+
+    if st.session_state.get(_CONSULTA):
+        _modal_consulta()
+
+
+@st.dialog("Protocolo de una operación OTC de tercero", width="large")
+def _modal_consulta() -> None:
+    st.caption(
+        "Una venta entre inversores la ejecuta Reental en dos tramos: primero le compra "
+        "los tokens al vendedor y después se los vende al comprador. Por eso hay dos "
+        "secuencias distintas y cada comercial tiene que hacer la suya."
     )
+    pestanas = st.tabs([etiqueta for _, etiqueta, _ in ROLES])
+    for pestana, (clave, _, cuando) in zip(pestanas, ROLES):
+        with pestana:
+            st.markdown(f"**Cuándo te aplica:** {cuando}")
+            st.markdown(_html(clave, con_intro=False), unsafe_allow_html=True)
+
+    st.markdown("---")
+    st.markdown(
+        f'<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;'
+        f'padding:12px 16px;font-size:0.84rem;color:#334155;">'
+        f'<b>Datos que siempre hacen falta</b><br>'
+        f'SAFE OTC de Reental: <code>{SAFE_OTC}</code><br>'
+        f'Excel de OFF-RAMP: <a href="{URL_OFFRAMP}" target="_blank">abrir</a> '
+        f'— imprescindible el hash del envío de los tokens.</div>',
+        unsafe_allow_html=True,
+    )
+    # El error caro del proceso, repetido aquí: es el único paso cuyo orden
+    # dispara algo irreversible fuera de la herramienta.
+    st.warning(
+        "**El justificante de pago no se sube al ADMIN hasta que los tokens estén en la "
+        "wallet OTC.** Subirlo antes dispara el envío de contratos de una operación que "
+        "todavía puede caerse."
+    )
+    if st.button("Cerrar", use_container_width=True, key="_otc_cerrar_consulta"):
+        st.session_state.pop(_CONSULTA, None)
+        st.rerun()
 
 
 @st.dialog("Protocolo operativo", width="large")
