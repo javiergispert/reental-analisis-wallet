@@ -119,10 +119,18 @@ _AUTOALTURA = """
     ultima = alto;
     marco.style.height = alto + 'px';
     marco.setAttribute('height', alto);
-    // Streamlit envuelve el iframe en contenedores con altura fija; si no se
-    // sueltan, el iframe crece por dentro y se recorta por fuera.
-    for(var n = marco.parentElement, i = 0; n && i < 4; n = n.parentElement, i++){
-      if(n.style && n.style.height) n.style.height = 'auto';
+    // Streamlit le da al contenedor del elemento una altura fija igual al
+    // `height` que se pidió, y lo hace por CLASE, no por estilo en línea. Si no
+    // se suelta, el iframe crece pero el hueco reservado sigue midiendo lo de
+    // antes y lo que va después —el pie de página— se dibuja encima. Se pone
+    // 'auto' en línea, que gana a la clase.
+    var cont = marco.parentElement;
+    for(var i = 0; cont && i < 3; cont = cont.parentElement, i++){
+      if(cont.getAttribute &&
+         cont.getAttribute('data-testid') === 'stElementContainer'){
+        cont.style.height = 'auto';
+        break;
+      }
     }
   }
   window.addEventListener('load', ajustar);
