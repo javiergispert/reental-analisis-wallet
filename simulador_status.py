@@ -91,6 +91,58 @@ def configuracion(foto_aave: dict | None) -> dict:
     return cfg
 
 
+# Ajuste de altura del iframe.
+#
+# `components.html` fija la altura y, si el contenido es más largo, saca una
+# barra de desplazamiento DENTRO de la página, que ya tiene la suya. Dos barras
+# anidadas son incómodas: se hace scroll y se mueve la que no toca.
+#
+# Streamlit no reajusta el iframe solo, pero el documento se sirve por `srcdoc`,
+# así que comparte origen con la página y desde dentro se puede tocar
+# `window.frameElement`. El propio contenido se mide y estira su iframe, de modo
+# que la única barra que queda es la de la página.
+#
+# Se reajusta con `ResizeObserver` porque la altura cambia sola: al desplegar el
+# bloque de apalancamiento o al redibujarse los gráficos.
+_AUTOALTURA = """
+<script>
+(function(){
+  var marco = window.frameElement;
+  if(!marco) return;                      // fuera de un iframe: nada que hacer
+  var ultima = 0;
+  function ajustar(){
+    var alto = Math.max(
+      document.documentElement.scrollHeight,
+      document.body ? document.body.scrollHeight : 0
+    );
+    if(!alto || Math.abs(alto - ultima) < 8) return;   // evita bucles por 1-2 px
+    ultima = alto;
+    marco.style.height = alto + 'px';
+    marco.setAttribute('height', alto);
+    // Streamlit envuelve el iframe en contenedores con altura fija; si no se
+    // sueltan, el iframe crece por dentro y se recorta por fuera.
+    for(var n = marco.parentElement, i = 0; n && i < 4; n = n.parentElement, i++){
+      if(n.style && n.style.height) n.style.height = 'auto';
+    }
+  }
+  window.addEventListener('load', ajustar);
+  document.addEventListener('DOMContentLoaded', ajustar);
+  // Se observa el BODY, no el documentElement: la caja de este último la fija
+  // el propio iframe, así que no cambia de tamaño cuando el contenido crece
+  // —solo crece su scrollHeight— y el observador no llegaba a dispararse.
+  if(window.ResizeObserver && document.body){
+    new ResizeObserver(ajustar).observe(document.body);
+  }
+  // Y un repaso periódico como red de seguridad. Lo barato es comparar un
+  // número: solo se toca el DOM cuando la altura ha cambiado de verdad. Cubre
+  // lo que se pinta tarde (fuentes, SVG) y los despliegues que el observador
+  // no vea, como el bloque de apalancamiento.
+  setInterval(ajustar, 400);
+})();
+</script>
+"""
+
+
 def html(foto_aave: dict | None = None) -> str:
     """La calculadora lista para `st.components.v1.html`, o "" si falta."""
     base = _plantilla()
@@ -108,7 +160,7 @@ def html(foto_aave: dict | None = None) -> str:
         "  var c=window.__RNT_CFG||{};"
         "  var m=document.getElementById('rnt_aprMedio');"
         "  if(m&&c.rlApr){m.textContent=(c.rlApr*100).toFixed(2).replace('.',',')+'%';}"
-        "});</script>"
+        "});</script>" + _AUTOALTURA
     )
     return base.replace("<body", inyeccion + "<body", 1) if "<body" in base \
         else inyeccion + base

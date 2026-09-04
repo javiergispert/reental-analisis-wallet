@@ -60,9 +60,11 @@ st.warning(
     "cualquier resultado con un inversor."
 )
 
-# `scrolling=False` con una altura generosa: la calculadora ya gestiona su
-# propio desplazamiento interno y una barra dentro de otra es incómoda de usar.
-components.html(_html, height=1500, scrolling=True)
+# Sin barra propia: el contenido se mide a sí mismo y estira el iframe (ver
+# `_AUTOALTURA` en simulador_status), de modo que la única barra de
+# desplazamiento es la de la página. La altura inicial es solo el punto de
+# partida hasta que el script ajusta.
+components.html(_html, height=1400, scrolling=False)
 
 st.caption(
     "Calculadora mantenida por Jesús González · empotrada tal cual, con los supuestos de "

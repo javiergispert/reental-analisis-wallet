@@ -8,11 +8,11 @@ nueva baste con volver a ejecutarlo en vez de rehacer los ajustes de memoria.
 
 Hace dos cosas:
 
-1. ADELGAZA EL LOGO. El fichero original pesa 2 MB, y el 95% es un GIF animado
-   de 800x800 y 202 fotogramas... que se muestra a 42 píxeles en la cabecera.
-   Se reescala a 72 px y se queda con uno de cada tres fotogramas: 90 KB en vez
-   de 1.368, sin diferencia visible y conservando la animación. Importa porque
-   el HTML viaja entero al navegador cada vez que se abre la sección.
+1. QUITA EL LOGO. El fichero original pesa 2 MB, y el 95% es un GIF animado de
+   800x800 y 202 fotogramas... que se muestra a 42 píxeles en la cabecera.
+   Dentro de la herramienta no aporta —el usuario ya sabe dónde está— y se
+   elimina entero: el fichero baja de 1.952 KB a 159, que es lo que viaja al
+   navegador cada vez que se abre la sección.
 
 2. PARAMETRIZA LOS SUPUESTOS. La calculadora trae congelados el interés del
    préstamo y el umbral de liquidación. Nuestra aplicación conoce los valores
@@ -39,8 +39,6 @@ import sys
 RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SALIDA = os.path.join(RAIZ, "data", "simulador", "calculadora.html")
 
-LADO_LOGO = 72      # se muestra a 28-42 px; 72 sobra para pantallas retina
-SALTO_FOTOGRAMAS = 3
 
 # Cada sustitución se verifica: si el HTML nuevo ya no contiene el texto exacto,
 # el script falla en vez de generar en silencio una calculadora sin parametrizar.
@@ -58,37 +56,20 @@ SUSTITUCIONES = [
 ]
 
 
-def adelgazar_logo(html: str, log=print) -> str:
-    """Reescala el GIF animado de la cabecera y lo vuelve a incrustar."""
-    from PIL import Image, ImageSequence
+def quitar_logo(html: str, log=print) -> str:
+    """Elimina el GIF animado de la cabecera.
 
-    m = re.search(r'data:image/gif;base64,([A-Za-z0-9+/=]{100000,})', html)
-    if not m:
-        log("  (sin GIF grande que adelgazar)")
+    Era 1,3 MB para pintar un icono de 42 px. Dentro de la herramienta el logo
+    no aporta —ya se sabe de qué aplicación es— y quitarlo deja el fichero en
+    una sexta parte.
+    """
+    antes = len(html)
+    nuevo = re.sub(r'<img id="rntLogo".*?>', "", html, count=1, flags=re.S)
+    if nuevo == html:
+        log("  (no se encontró el logo; puede que ya se haya quitado)")
         return html
-
-    b64 = m.group(1)
-    crudo = base64.b64decode(b64 + "=" * (-len(b64) % 4))
-    im = Image.open(io.BytesIO(crudo))
-    dur = im.info.get("duration", 40)
-
-    # OJO: hay que materializar cada fotograma DENTRO del bucle. `Iterator` va
-    # reposicionando la misma imagen, así que `list(Iterator(im))[::3]` devuelve
-    # 68 referencias al último fotograma y el GIF sale congelado (y de 2 KB, que
-    # es la pista de que algo va mal). `convert` crea una copia nueva.
-    todos = [f.convert("RGBA") for f in ImageSequence.Iterator(im)]
-    fotogramas = [
-        f.resize((LADO_LOGO, LADO_LOGO), Image.LANCZOS)
-         .convert("P", palette=Image.ADAPTIVE, colors=96)
-        for f in todos[::SALTO_FOTOGRAMAS]
-    ]
-    buf = io.BytesIO()
-    fotogramas[0].save(buf, format="GIF", save_all=True, append_images=fotogramas[1:],
-                       loop=0, duration=dur * SALTO_FOTOGRAMAS, disposal=2, optimize=True)
-    nuevo = base64.b64encode(buf.getvalue()).decode("ascii")
-    log(f"  logo: {len(crudo)/1024:,.0f} KB ({im.size[0]}x{im.size[1]}, {im.n_frames} fotogramas)"
-        f" → {len(buf.getvalue())/1024:,.0f} KB ({LADO_LOGO}x{LADO_LOGO}, {len(fotogramas)})")
-    return html.replace(b64, nuevo, 1)
+    log(f"  logo eliminado: -{(antes - len(nuevo)) / 1024:,.0f} KB")
+    return nuevo
 
 
 def parametrizar(html: str, log=print) -> str:
@@ -116,7 +97,7 @@ def main() -> int:
 
     html = open(args.origen, encoding="utf-8", errors="replace").read()
     print(f"origen: {len(html)/1024:,.0f} KB")
-    html = adelgazar_logo(html)
+    html = quitar_logo(html)
     html = parametrizar(html)
 
     os.makedirs(os.path.dirname(args.salida), exist_ok=True)
