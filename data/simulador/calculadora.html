@@ -966,7 +966,7 @@ function renderRL(){
   }else if(ltvEfectivo>=LIQ_THRESHOLD){
     if(liqT){liqT.textContent='Inmediato';liqT.style.color=C.R;}
   }else if(rlApr>0){
-    const tYears=Math.log(LIQ_THRESHOLD/ltvEfectivo)/Math.log(1+rlApr);
+    const tYears=Math.log(LIQ_THRESHOLD/ltvEfectivo)/rlApr;
     const totalMonths=Math.round(tYears*12);
     if(liqT){liqT.textContent=fLiqTime(totalMonths);liqT.style.color=tYears<2?C.R:(tYears<5?'#ffc56b':C.GL);}
   }else{

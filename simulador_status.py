@@ -42,15 +42,26 @@ RUTA = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 
 @st.cache_data(show_spinner=False)
-def _plantilla(ruta: str = RUTA) -> str:
-    """El HTML preparado. Se cachea sin TTL: es un fichero versionado en el
-    repo, solo cambia con un despliegue, y releerlo en cada interacción serían
-    250 KB de disco por rerun."""
+def _leer(ruta: str, _mtime: float) -> str:
+    """Lee el HTML. `_mtime` no se usa dentro: está en la firma para que forme
+    parte de la clave de caché, de modo que regenerar el fichero lo invalide
+    solo. Sin eso, el proceso servía la copia anterior hasta reiniciarse —me
+    pasó al corregir la fórmula de liquidación y no verla en pantalla."""
     try:
         with open(ruta, encoding="utf-8") as f:
             return f.read()
     except OSError:
         return ""
+
+
+def _plantilla(ruta: str = RUTA) -> str:
+    """El HTML preparado, releído solo si el fichero ha cambiado. Comprobar la
+    fecha cuesta microsegundos; releer los 130 KB en cada interacción, no."""
+    try:
+        mtime = os.path.getmtime(ruta)
+    except OSError:
+        return ""
+    return _leer(ruta, mtime)
 
 
 def configuracion(foto_aave: dict | None) -> dict:

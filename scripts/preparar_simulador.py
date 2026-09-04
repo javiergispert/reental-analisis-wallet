@@ -53,6 +53,13 @@ SUSTITUCIONES = [
     ('Media histórica: <b style="color:#fff">12%</b> · máximo: 17%',
      'Media histórica: <b style="color:#fff" id="rnt_aprMedio">12%</b> '
      '· máximo: <span id="rnt_aprMax">17%</span>'),
+    # Tiempo hasta la liquidación. La calculadora capitalizaba una vez al año
+    # -log(1+r)- y Aave lo hace en continuo, así que daba de más: con un HF de
+    # 1,30 decía 836 días donde nuestro `aave_lend.dias_hasta_liquidacion` dice
+    # 789, un 5,9% optimista. Ahora que ambas piezas viven en la misma
+    # herramienta no pueden contradecirse, y menos hacia el lado de tranquilizar.
+    ("Math.log(LIQ_THRESHOLD/ltvEfectivo)/Math.log(1+rlApr)",
+     "Math.log(LIQ_THRESHOLD/ltvEfectivo)/rlApr"),
 ]
 
 
