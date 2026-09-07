@@ -128,65 +128,105 @@ def coste_total(apr: float, plazo_meses: float, frecuencia_meses: float | None =
     return n_periodos * (math.exp(apr * frecuencia_meses / 12.0) - 1.0)
 
 
-def rentabilidad_de_equilibrio(apr: float, tipo_marginal: float = 0.0,
+def rentabilidad_de_equilibrio(coste_anual: float, tipo_marginal: float = 0.0,
                                deducible: bool = False) -> float:
     """Rentabilidad BRUTA anual que debe dar lo comprado con el préstamo para
     que la operación no pierda dinero.
 
-    Sin impuestos el umbral es el propio APY. Con impuestos hay dos casos:
+    Recibe el COSTE ANUAL EFECTIVO, no el APR. Antes tomaba el APR y usaba
+    siempre su APY, con lo que el umbral ignoraba la frecuencia de pago que
+    hubiera elegido el usuario: alguien que pensara no pagar en cinco años veía
+    un umbral calculado como si pagara cada año. Ahora se le pasa el coste que
+    corresponda al escenario.
+
+    Sin impuestos el umbral es el propio coste. Con impuestos hay dos casos:
 
       * Intereses NO deducibles: la ganancia tributa entera y el interés sale de
-        dinero ya tributado, así que `y·(1−t) = APY`  →  `y = APY / (1−t)`.
-      * Intereses deducibles: solo tributa el margen, `(y−APY)·(1−t)`, y el
-        umbral vuelve a ser el APY. La deducibilidad neutraliza el efecto.
+        dinero ya tributado, así que `y·(1−t) = coste`  →  `y = coste / (1−t)`.
+      * Intereses deducibles: solo tributa el margen, `(y−coste)·(1−t)`, y el
+        umbral vuelve a ser el coste. La deducibilidad neutraliza el efecto.
 
     Que el segundo caso salga idéntico al de sin impuestos no es un descuido: es
     exactamente lo que significa poder deducir.
     """
-    coste = apy(apr)
+    if coste_anual is None or coste_anual <= 0:
+        return 0.0
     if not tipo_marginal or tipo_marginal <= 0 or deducible:
-        return coste
+        return coste_anual
     if tipo_marginal >= 1:
         return float("inf")
-    return coste / (1.0 - tipo_marginal)
+    return coste_anual / (1.0 - tipo_marginal)
 
 
-def margen_neto(rentabilidad_bruta: float, apr: float,
-                tipo_marginal: float = 0.0, deducible: bool = False) -> float:
-    """Lo que queda al año, ya neto de impuestos y del coste del préstamo, por
-    cada euro prestado. Negativo significa que la operación destruye valor."""
+def renta_disponible(rentabilidad_bruta: float, tipo_marginal: float = 0.0,
+                     deducible: bool = False) -> float:
+    """Lo que queda de la rentabilidad para atender intereses, expresado en el
+    MISMO eje que el coste.
+
+    Es el espejo del umbral y sirve para poder dibujarlos juntos: comparar en
+    un gráfico una curva de coste con una línea de rentabilidad bruta solo es
+    válido si no hay impuestos. Con ellos hay que descontarlos primero, y lo que
+    de verdad está disponible para pagar el préstamo es `y·(1−t)`.
+    """
     if rentabilidad_bruta is None:
         return 0.0
-    coste = apy(apr)
+    if deducible:
+        return rentabilidad_bruta
+    return rentabilidad_bruta * (1.0 - (tipo_marginal or 0.0))
+
+
+def margen_neto(rentabilidad_bruta: float, coste_anual: float,
+                tipo_marginal: float = 0.0, deducible: bool = False) -> float:
+    """Lo que queda al año, ya neto de impuestos y del coste del préstamo, por
+    cada euro prestado. Negativo significa que la operación destruye valor.
+
+    También recibe el coste efectivo, por el mismo motivo que el umbral."""
+    if rentabilidad_bruta is None:
+        return 0.0
+    coste = coste_anual or 0.0
     t = tipo_marginal or 0.0
     if deducible:
         return (rentabilidad_bruta - coste) * (1.0 - t)
     return rentabilidad_bruta * (1.0 - t) - coste
 
 
-def resumen(apr: float, meses: float, rentabilidad_bruta: float | None = None,
+def resumen(apr: float, frecuencia_meses: float, plazo_meses: float | None = None,
+            rentabilidad_bruta: float | None = None,
             tipo_marginal: float = 0.0, deducible: bool = False) -> dict:
     """Todo lo anterior de una vez, para que la interfaz no repita el cálculo.
 
-    `meses` es cada cuánto se atienden los intereses: es a la vez el plazo que
-    se deja correr la deuda y el punto de la curva de `coste_anualizado`.
+    Devuelve DOS umbrales, porque responden a preguntas distintas:
+
+      * `equilibrio_apy`  — con el APY publicado, es decir, pagando una vez al
+        año. Sirve de referencia de mercado, comparable entre operaciones.
+      * `equilibrio`      — con el coste efectivo del escenario que ha
+        configurado el usuario. Es el que decide si SU operación sale a cuenta.
+
+    Mezclarlos fue un error de la primera versión: el umbral se calculaba
+    siempre sobre el APY aunque el usuario dijera que no pensaba pagar en cinco
+    años, con lo que el escenario configurado no afectaba a la conclusión.
     """
-    anos = (meses or 0) / 12.0
-    equilibrio = rentabilidad_de_equilibrio(apr, tipo_marginal, deducible)
+    plazo_meses = plazo_meses or frecuencia_meses
+    coste_efectivo = coste_anualizado(apr, frecuencia_meses)
+    coste_sin_pagar = coste_anualizado(apr, plazo_meses)
+    equilibrio = rentabilidad_de_equilibrio(coste_efectivo, tipo_marginal, deducible)
     out = {
         "apr": apr,
         "apy": apy(apr),
-        "meses": meses,
-        "anos": anos,
-        "coste_anualizado": coste_anualizado(apr, meses),
-        "coste_acumulado": coste_acumulado(apr, anos),
-        "coste_lineal": coste_lineal(apr, anos),
+        "frecuencia_meses": frecuencia_meses,
+        "plazo_meses": plazo_meses,
+        "coste_anualizado": coste_efectivo,
+        "coste_sin_pagar": coste_sin_pagar,
+        "coste_total": coste_total(apr, plazo_meses, frecuencia_meses),
+        "coste_total_sin_pagar": coste_total(apr, plazo_meses, None),
         "equilibrio": equilibrio,
-        "sobrecoste_fiscal": max(0.0, equilibrio - apy(apr)),
+        "equilibrio_apy": rentabilidad_de_equilibrio(apy(apr), tipo_marginal, deducible),
+        "sobrecoste_fiscal": max(0.0, equilibrio - coste_efectivo),
     }
-    out["exceso_sobre_lineal"] = out["coste_acumulado"] - out["coste_lineal"]
     if rentabilidad_bruta is not None:
         out["rentabilidad_bruta"] = rentabilidad_bruta
-        out["margen"] = margen_neto(rentabilidad_bruta, apr, tipo_marginal, deducible)
+        out["renta_disponible"] = renta_disponible(rentabilidad_bruta, tipo_marginal, deducible)
+        out["margen"] = margen_neto(rentabilidad_bruta, coste_efectivo,
+                                    tipo_marginal, deducible)
         out["sale_a_cuenta"] = rentabilidad_bruta > equilibrio
     return out

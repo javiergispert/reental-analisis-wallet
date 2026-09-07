@@ -95,10 +95,9 @@ def _umbral_rentabilidad(apr: float) -> None:
               "hasta el final."),
     )
 
-    r = _coste.resumen(apr, _frec, rentabilidad_bruta=_bruto,
+    r = _coste.resumen(apr, _frec, _plazo, rentabilidad_bruta=_bruto,
                        tipo_marginal=_t, deducible=_deducible)
-    _total = _coste.coste_total(apr, _plazo, _frec)
-    _total_sin = _coste.coste_total(apr, _plazo, None)
+    _total, _total_sin = r["coste_total"], r["coste_total_sin_pagar"]
 
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("💸 Coste real ANUAL del préstamo", f"{r['apy'] * 100:,.2f}%",
@@ -110,12 +109,20 @@ def _umbral_rentabilidad(apr: float) -> None:
                     "cambia con el plazo es cuánto se acumula, y eso es el último "
                     "recuadro — que con 1 año da exactamente esta misma cifra."))
     k2.metric("🎯 Rentabilidad bruta necesaria", f"{r['equilibrio'] * 100:,.2f}%",
-              (f"+{r['sobrecoste_fiscal'] * 100:,.2f} pp por fiscalidad"
-               if r["sobrecoste_fiscal"] > 0.0001 else "sin recargo fiscal"),
+              f"con el APY publicado sería {r['equilibrio_apy'] * 100:,.2f}%",
               delta_color="off",
-              help=("Lo que tiene que rendir la inversión SOLO PARA EMPATAR. Si los "
-                    "intereses no se deducen, se pagan con dinero ya tributado mientras la "
-                    "ganancia sí tributa, así que el umbral sube a APY ÷ (1 − tipo)."))
+              help=("Lo que tiene que rendir la inversión SOLO PARA EMPATAR, **en el "
+                    "escenario configurado**: se calcula sobre el coste efectivo de pagar "
+                    "cada {} mes{}, no sobre el APY publicado.\n\n"
+                    "· Referencia de mercado (APY, pagando una vez al año): "
+                    "**{:.2f}%**\n"
+                    "· Tu escenario (pagando cada {} mes{}): **{:.2f}%**\n\n"
+                    "Si los intereses no se deducen, se pagan con dinero ya tributado "
+                    "mientras la ganancia sí tributa, y el umbral sube a coste ÷ (1 − tipo)."
+                    ).format(_frec, "es" if _frec != 1 else "",
+                             r["equilibrio_apy"] * 100,
+                             _frec, "es" if _frec != 1 else "",
+                             r["equilibrio"] * 100))
     k3.metric("📊 Margen neto anual", f"{r['margen'] * 100:+,.2f} pp",
               "por cada euro prestado", delta_color="off",
               help=("Lo que queda al año tras impuestos y tras el coste del préstamo. "
@@ -175,54 +182,74 @@ def _umbral_rentabilidad(apr: float) -> None:
         _y = _coste.coste_anualizado(apr, _n) * 100
         fig.add_trace(go.Scatter(
             x=_xs, y=[_y] * len(_xs), mode="lines", name=_etq,
-            line=dict(color=_col, width=2),
-            hovertemplate=f"{_etq}: {_y:.2f}% anual<extra></extra>",
+            line=dict(color=_col, width=2), hovertemplate="%{y:.2f}%<extra></extra>",
         ))
     fig.add_trace(go.Scatter(
         x=_xs, y=[_coste.coste_anualizado(apr, m) * 100 for m in _xs],
         mode="lines", name="Sin pagar hasta el final",
-        line=dict(color="#dc2626", width=3),
-        hovertemplate="Sin pagar en %{x} meses<br>%{y:.2f}% anual<extra></extra>",
+        line=dict(color="#dc2626", width=3), hovertemplate="%{y:.2f}%<extra></extra>",
     ))
-
-    fig.add_hline(y=_bruto * 100, line=dict(color="#16a34a", width=2, dash="dash"),
-                  annotation_text=f"Rentabilidad bruta esperada {_bruto * 100:,.1f}%",
-                  annotation_position="top left")
-    if r["sobrecoste_fiscal"] > 0.0001:
-        fig.add_hline(y=r["equilibrio"] * 100, line=dict(color="#ea580c", width=2, dash="dot"),
-                      annotation_text=f"Umbral con fiscalidad {r['equilibrio'] * 100:,.2f}%",
-                      annotation_position="bottom left")
+    # La rentabilidad hay que traerla AL EJE DEL COSTE antes de compararla: lo
+    # que de verdad queda para atender intereses es la rentabilidad ya neta de
+    # impuestos. Dibujar el bruto sobre un eje de costes solo vale si no hay
+    # fiscalidad, y era lo que estaba haciendo.
+    _disp = r["renta_disponible"] * 100
+    fig.add_trace(go.Scatter(
+        x=_xs, y=[_disp] * len(_xs), mode="lines",
+        name=("Rentabilidad disponible para pagar intereses"
+              if not _deducible else "Rentabilidad bruta esperada"),
+        line=dict(color="#0f766e", width=2, dash="dash"),
+        hovertemplate="%{y:.2f}%<extra></extra>",
+    ))
     fig.update_layout(
-        height=360, margin=dict(t=30, b=10, l=10, r=10),
+        height=400, margin=dict(t=30, b=70, l=10, r=10),
         xaxis_title="Meses transcurridos desde que se pide el préstamo",
         yaxis_title="Coste efectivo anual (%)",
-        legend=dict(orientation="h", y=-0.22),
+        # La leyenda, por debajo del título del eje: con -0,22 lo tapaba.
+        legend=dict(orientation="h", y=-0.32, yanchor="top"),
+        # Con el ratón en cualquier punto se ven TODAS las líneas de esa
+        # vertical, con su marcador: comparar exigía acertar encima de cada
+        # línea una por una.
+        hovermode="x unified",
+        hoverlabel=dict(bgcolor="rgba(255,255,255,.96)", font_size=12),
     )
+    fig.update_xaxes(showspikes=True, spikemode="across", spikethickness=1,
+                     spikedash="dot", spikecolor="#94a3b8")
+    fig.update_traces(mode="lines+markers", marker=dict(size=1),
+                      hoverlabel=dict(namelength=-1))
     st.markdown("**Cómo evoluciona el coste según cada cuánto se pague**", help=(
         "El eje horizontal es el tiempo transcurrido. Las líneas de frecuencia fija son "
         "**planas**, y esa es la idea: cada pago devuelve la deuda al principal y corta "
         "la capitalización, así que el tipo no empeora por mucho que pase el tiempo.\n\n"
-        "La única que sube es la de no pagar nada, porque ahí el interés se acumula "
-        "sobre sí mismo. Donde cruza la línea de rentabilidad esperada, el préstamo "
-        "deja de dejar margen."))
+        "La única que sube es la de no pagar nada, y sube de forma **convexa**: en cinco "
+        "años se desvía menos de 0,3 pp de una recta —por eso parece recta— pero a veinte "
+        "años se dispara.\n\n"
+        "La línea discontinua es la rentabilidad **ya neta de impuestos**, que es lo que "
+        "queda de verdad para pagar intereses. Donde el coste la cruza, la operación deja "
+        "de dejar margen."))
     st.plotly_chart(fig, use_container_width=True)
 
+    # El corte se busca contra la renta DISPONIBLE, que está en el eje del
+    # coste. Compararlo con el umbral de rentabilidad bruta sería mezclar ejes.
     _corte = next((m for m in _xs
-                   if _coste.coste_anualizado(apr, m) >= r["equilibrio"]), None)
+                   if _coste.coste_anualizado(apr, m) >= r["renta_disponible"]), None)
     _msg = (f"Pagando **cada {_frec} mes{'es' if _frec != 1 else ''}** el coste se queda "
             f"plano en el **{r['coste_anualizado'] * 100:,.2f}%** anual durante todo el "
             f"plazo: {_total * 100:,.0f}% del principal en {_plazo} meses.")
     if _corte:
         st.caption(
-            _msg + f" Dejando de pagar, en cambio, el coste sube hasta superar el umbral "
-            f"del {r['equilibrio'] * 100:,.2f}% a los **{_corte} meses** — y en {_plazo} "
-            f"meses acumularía {_total_sin * 100:,.0f}%."
+            _msg + f" Dejando de pagar, en cambio, el coste sube y a los **{_corte} meses** "
+            f"ya se come la rentabilidad neta disponible "
+            f"({r['renta_disponible'] * 100:,.2f}%); en {_plazo} meses acumularía "
+            f"{_total_sin * 100:,.0f}% del principal frente al {_total * 100:,.0f}% pagando "
+            f"con la frecuencia elegida."
         )
     else:
         st.caption(
-            _msg + f" Ni dejando de pagar durante los {_plazo} meses completos se alcanza "
-            f"el umbral del {r['equilibrio'] * 100:,.2f}%: acumularía "
-            f"{_total_sin * 100:,.0f}% del principal."
+            _msg + f" Ni dejando de pagar durante los {_plazo} meses completos el coste "
+            f"alcanza la rentabilidad neta disponible ({r['renta_disponible'] * 100:,.2f}%), "
+            f"aunque acumularía {_total_sin * 100:,.0f}% del principal frente al "
+            f"{_total * 100:,.0f}% pagando con la frecuencia elegida."
         )
 
     with st.expander("Cómo se calcula, y por qué el diferencial aparente engaña"):
@@ -241,7 +268,9 @@ vez de como riesgo.
 
 **3 · Los impuestos rompen la simetría.** Si los intereses no son deducibles, se pagan
 con dinero ya tributado mientras la ganancia tributa entera. El umbral pasa de
-`APY` a `APY ÷ (1 − tipo)` = **{r['equilibrio'] * 100:.2f}%**.
+`coste` a `coste ÷ (1 − tipo)` = **{r['equilibrio'] * 100:.2f}%** en el escenario
+configurado ({r['equilibrio_apy'] * 100:.2f}% si se tomara el APY publicado como
+referencia).
 
 ---
 
