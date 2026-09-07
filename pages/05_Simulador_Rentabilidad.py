@@ -186,16 +186,25 @@ def _umbral_rentabilidad(apr: float) -> None:
     # que más mueve el resultado y que menos controla quien usa la herramienta:
     # con los tipos de hoy, deducir o no deducir es la diferencia entre aguantar
     # 20 meses sin pagar intereses o aguantar 64.
+    # OJO: el coste real del préstamo y la rentabilidad necesaria DEDUCIENDO los
+    # intereses son la misma curva, no dos. Si se pueden deducir, para empatar
+    # basta con rendir lo que cuesta el préstamo —eso es justo lo que significa
+    # deducirlos—, así que dibujarlas por separado pintaría una línea encima de
+    # otra. Va una sola, con las dos lecturas en el nombre.
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=_xs, y=[_necesaria(m, False) * 100 for m in _xs], mode="lines",
-        name="Necesaria · intereses NO deducibles",
-        line=dict(color="#dc2626", width=3), hovertemplate="%{y:.2f}%<extra></extra>",
-    ))
-    fig.add_trace(go.Scatter(
-        x=_xs, y=[_necesaria(m, True) * 100 for m in _xs], mode="lines",
-        name="Necesaria · intereses deducibles",
+        x=_xs, y=[_coste.coste_anualizado(apr, m) * 100 for m in _xs], mode="lines",
+        name="Coste real  (= necesaria si deducibles)",
         line=dict(color="#3B82F6", width=2.5), hovertemplate="%{y:.2f}%<extra></extra>",
+    ))
+    # El relleno entre ambas es el sobrecoste fiscal: lo que hay que rendir DE
+    # MÁS por no poder deducir. Es la distancia lo que importa, así que se pinta.
+    fig.add_trace(go.Scatter(
+        x=_xs, y=[_necesaria(m, False) * 100 for m in _xs], mode="lines",
+        name="Necesaria si NO deducibles",
+        line=dict(color="#dc2626", width=3),
+        fill="tonexty", fillcolor="rgba(220,38,38,.07)",
+        hovertemplate="%{y:.2f}%<extra></extra>",
     ))
     fig.add_trace(go.Scatter(
         x=_xs, y=[_bruto * 100] * len(_xs), mode="lines",
@@ -234,10 +243,13 @@ def _umbral_rentabilidad(apr: float) -> None:
                 help=(
         "El eje horizontal es la frecuencia de pago. Cuanto más se espacian los pagos, más "
         "capitaliza la deuda y más hay que rendir para no perder.\n\n"
-        "Todo está anclado al **APR histórico real del pool**: las dos curvas son ese mismo "
-        "tipo mirado con y sin deducción fiscal de los intereses. Se muestran las dos porque "
-        "es el supuesto que más mueve el resultado y el que menos controla quien usa la "
-        "herramienta.\n\n"
+        "Todo está anclado al **APR histórico real del pool**.\n\n"
+        "La línea azul es lo que el inversor **paga** de verdad. Y es a la vez lo que "
+        "necesitaría rendir si pudiera deducir los intereses: cuando se deducen, empatar "
+        "es exactamente cubrir el coste.\n\n"
+        "La roja es lo que hace falta **sin** poder deducirlos, y la banda sombreada entre "
+        "ambas es el sobrecoste fiscal: los puntos que hay que rendir de más solo por el "
+        "trato que reciben los intereses.\n\n"
         "Donde cada curva cruza la línea verde, esa forma de operar deja de compensar. El "
         "punto oscuro marca el escenario configurado arriba."))
     st.plotly_chart(fig, use_container_width=True)
