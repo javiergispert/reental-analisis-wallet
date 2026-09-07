@@ -80,6 +80,34 @@ def coste_lineal(apr: float, anos: float) -> float:
     return apr * anos
 
 
+def coste_anualizado(apr: float, meses: float) -> float:
+    """Coste efectivo ANUAL de dejar correr el préstamo `meses` entre pagos.
+
+    Cada cuánto se atienden los intereses cambia lo que se paga, porque lo que
+    no se paga capitaliza. Si se salda cada `M` meses, en un año se hacen `12/M`
+    pagos de `e^(r·M/12) − 1` sobre el principal:
+
+        coste anual = (12 / M) · (e^(r·M/12) − 1)
+
+    La función es creciente en `M`, y sus dos extremos son justo los tipos que
+    ya se manejan:
+
+        M → 0    →  el APR      (pagando en continuo, nunca capitaliza)
+        M = 12   →  el APY      (pagando una vez al año)
+        M = 120  →  23,6%       (sin pagar en diez años)
+
+    O sea que el APR y el APY no son dos convenciones rivales: son el mismo
+    coste con dos frecuencias de pago distintas, y el tipo que de verdad asume
+    el inversor está donde caiga su forma de operar.
+    """
+    if apr is None or apr <= 0:
+        return 0.0
+    if meses is None or meses <= 0:
+        return apr                      # límite de pago continuo
+    anos = meses / 12.0
+    return (math.exp(apr * anos) - 1.0) / anos
+
+
 def rentabilidad_de_equilibrio(apr: float, tipo_marginal: float = 0.0,
                                deducible: bool = False) -> float:
     """Rentabilidad BRUTA anual que debe dar lo comprado con el préstamo para
@@ -116,13 +144,21 @@ def margen_neto(rentabilidad_bruta: float, apr: float,
     return rentabilidad_bruta * (1.0 - t) - coste
 
 
-def resumen(apr: float, anos: float, rentabilidad_bruta: float | None = None,
+def resumen(apr: float, meses: float, rentabilidad_bruta: float | None = None,
             tipo_marginal: float = 0.0, deducible: bool = False) -> dict:
-    """Todo lo anterior de una vez, para que la interfaz no repita el cálculo."""
+    """Todo lo anterior de una vez, para que la interfaz no repita el cálculo.
+
+    `meses` es cada cuánto se atienden los intereses: es a la vez el plazo que
+    se deja correr la deuda y el punto de la curva de `coste_anualizado`.
+    """
+    anos = (meses or 0) / 12.0
     equilibrio = rentabilidad_de_equilibrio(apr, tipo_marginal, deducible)
     out = {
         "apr": apr,
         "apy": apy(apr),
+        "meses": meses,
+        "anos": anos,
+        "coste_anualizado": coste_anualizado(apr, meses),
         "coste_acumulado": coste_acumulado(apr, anos),
         "coste_lineal": coste_lineal(apr, anos),
         "equilibrio": equilibrio,
