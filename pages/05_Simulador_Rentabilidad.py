@@ -79,19 +79,27 @@ def _umbral_rentabilidad(apr: float) -> None:
         help="Lo que se espera que rinda al año aquello en lo que se reinvierte el "
              "préstamo. Por defecto, el 17% de SuperReentel.",
     ) / 100
-    _anos = c4.number_input("Horizonte (años)", 1, 30, 10, 1, key="um_anos",
-                            help="Solo afecta al coste acumulado si no se atienden los "
-                                 "intereses; el umbral anual no depende del plazo.")
+    _anos = c4.number_input(
+        "Años sin pagar intereses", 1, 30, 10, 1, key="um_anos",
+        help=("Cuánto tiempo se deja correr el préstamo **sin atender los intereses**, "
+              "dejando que se acumulen sobre la propia deuda.\n\n"
+              "Solo afecta al último recuadro. El coste anual y el umbral de "
+              "rentabilidad son tasas por año y no dependen del plazo: lo que cambia "
+              "con los años es cuánto se acumula, no a qué ritmo."),
+    )
 
     r = _coste.resumen(apr, _anos, rentabilidad_bruta=_bruto,
                        tipo_marginal=_t, deducible=_deducible)
 
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("💸 Coste real del préstamo", f"{r['apy'] * 100:,.2f}%",
+    k1.metric("💸 Coste real ANUAL del préstamo", f"{r['apy'] * 100:,.2f}%",
               f"APR publicado {r['apr'] * 100:,.2f}%", delta_color="off",
-              help=("El APR es el tipo que publica el contrato; el APY es lo que se paga. "
-                    "Aave acumula el interés en cada bloque sobre el saldo ya acumulado, "
-                    "así que el efectivo anual es e^APR − 1."))
+              help=("El APR es el tipo que publica el contrato; el APY es lo que se paga "
+                    "de verdad en **un año**. Aave acumula el interés en cada bloque sobre "
+                    "el saldo ya acumulado, así que el efectivo anual es e^APR − 1.\n\n"
+                    "Es una tasa anual: **no cambia** al mover los años sin pagar. Lo que "
+                    "cambia con el plazo es cuánto se acumula, y eso es el último "
+                    "recuadro — que con 1 año da exactamente esta misma cifra."))
     k2.metric("🎯 Rentabilidad bruta necesaria", f"{r['equilibrio'] * 100:,.2f}%",
               (f"+{r['sobrecoste_fiscal'] * 100:,.2f} pp por fiscalidad"
                if r["sobrecoste_fiscal"] > 0.0001 else "sin recargo fiscal"),
@@ -104,12 +112,17 @@ def _umbral_rentabilidad(apr: float) -> None:
               help=("Lo que queda al año tras impuestos y tras el coste del préstamo. "
                     "En negativo, la operación apalancada destruye valor aunque la "
                     "inversión en sí sea rentable."))
-    k4.metric(f"⏳ Coste a {_anos} años sin pagar",
-              f"{r['coste_acumulado'] * 100:,.0f}%",
-              f"la cuenta lineal daría {r['coste_lineal'] * 100:,.0f}%", delta_color="off",
-              help=("Si no se atienden los intereses, la deuda capitaliza sobre sí misma. "
-                    "La diferencia con multiplicar el APR por los años es pequeña el "
-                    "primer año y enorme a partir del quinto."))
+    # Mismos decimales que el primer recuadro a propósito: con 1 año son el MISMO
+    # número, y mostrarlos como «12,90%» y «13%» hacía dudar de si cuadraban.
+    k4.metric(f"⏳ Coste acumulado en {_anos} año{'s' if _anos != 1 else ''}",
+              f"{r['coste_acumulado'] * 100:,.2f}%",
+              f"la cuenta lineal daría {r['coste_lineal'] * 100:,.2f}%", delta_color="off",
+              help=("Cuánto se debe de más sobre el principal si no se paga nada en todo "
+                    "el plazo, porque el interés se acumula sobre la propia deuda.\n\n"
+                    "Con **1 año coincide exactamente con el coste anual** de la izquierda: "
+                    "es la misma tasa. A partir de ahí se separa, y mucho: la diferencia "
+                    "con multiplicar el APR por los años es pequeña el primer año y enorme "
+                    "a partir del quinto."))
 
     if r["sale_a_cuenta"]:
         _holgura = (_bruto - r["equilibrio"]) * 100
@@ -134,10 +147,10 @@ def _umbral_rentabilidad(apr: float) -> None:
 así que el tipo efectivo es `e^APR − 1`. Con el {r['apr'] * 100:.2f}% actual, el coste
 real es del **{r['apy'] * 100:.2f}%**.
 
-**2 · Sin atender los intereses, la deuda crece sola.** A {_anos} años el coste no es
-`APR × años` = {r['coste_lineal'] * 100:.0f}%, sino **{r['coste_acumulado'] * 100:.0f}%**
-del principal. Es la misma acumulación que determina cuándo se liquida la posición,
-mirada como gasto en vez de como riesgo.
+**2 · Sin atender los intereses, la deuda crece sola.** En {_anos} año{'s' if _anos != 1 else ''}
+el coste no es `APR × años` = {r['coste_lineal'] * 100:.2f}%, sino
+**{r['coste_acumulado'] * 100:.2f}%** del principal. Es la misma acumulación que determina
+cuándo se liquida la posición, mirada como gasto en vez de como riesgo.
 
 **3 · Los impuestos rompen la simetría.** Si los intereses no son deducibles, se pagan
 con dinero ya tributado mientras la ganancia tributa entera. El umbral pasa de
