@@ -18,6 +18,17 @@ from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import aave_lend
+import aave_snapshot as _snap
+import coste_prestamo as _coste
+import recarga as _recarga
+# Streamlit reejecuta el script pero NO reimporta lo que ya está en sys.modules:
+# tras un despliegue esta página puede convivir con una versión anterior de sus
+# módulos y una función recién añadida "no existe" aunque esté en el commit. En
+# orden de dependencia: aave_snapshot usa aave_lend.
+# ui_kpi NO se refresca aquí: la página hace `from ui_kpi import kpi_card`, y
+# recargar el módulo no cambia el nombre ya importado. Es la limitación que el
+# propio recarga.py documenta; para eso basta el reinicio del despliegue.
+_recarga.refrescar("aave_lend", "aave_snapshot", "coste_prestamo")
 from utils import fetch_all_account_txs, fetch_all_token_txs
 from reental_tokens import codigo_proyecto_atoken, es_atoken_reental, es_token_reental
 import ui_kpi
@@ -2996,6 +3007,123 @@ if aave_borrower_filtered:
             f"La relación entre ambos fija el HF mínimo alcanzable pidiendo prestado: "
             f"{_lt * 100:.0f}/{_ltv * 100:.0f} = **{_hf_min:.4f}**."
         )
+
+        # ── Lo que cuesta de verdad esta posición ─────────────────────────────
+        # Todo lo de arriba mide el RIESGO. Esto mide el COSTE, que es lo que
+        # decide si el préstamo tenía sentido. Y aquí, a diferencia del
+        # simulador, no hay que suponer nada: el contrato dice lo que se debe
+        # hoy, el histórico dice cuánto se pidió y cuándo se ha ido pagando, y
+        # de ahí sale el tipo que este inversor ha soportado realmente.
+        _fechas = [m["fecha"] for m in _mov_target if m.get("fecha")]
+        _pagos = [m["fecha"] for m in _mov_target
+                  if m["tipo"] == "Pago de deuda" and m.get("fecha")]
+        _meses_vida = None
+        if _fechas:
+            # Las fechas de los movimientos son datetime naíf en UTC (vienen de
+            # utcfromtimestamp), así que se compara con utcnow y no con una
+            # fecha con zona: restar date y datetime lanza TypeError.
+            _dias = (datetime.utcnow() - min(_fechas)).days
+            _meses_vida = _dias / 30.44 if _dias > 0 else None
+
+        if _meses_vida and _principal_target > 0:
+            st.markdown("##### 💰 Lo que cuesta de verdad esta posición")
+
+            # Los supuestos fiscales se piden ANTES de mostrar nada: el umbral
+            # depende de ellos y enseñarlo con un valor por defecto invisible
+            # invitaría a leerlo como si fuera un dato de la posición.
+            _f1, _f2 = st.columns([1.4, 1])
+            _op = [f"{e} · {t * 100:.0f}%" for e, t in _coste.TRAMOS_AHORRO]
+            _sel_t = _f1.selectbox(
+                "Tramo fiscal del inversor", _op, index=1, key="coste_tramo",
+                help="Solo se usa para el umbral de rentabilidad. No es asesoramiento "
+                     "fiscal: es un supuesto que introduces para ver la sensibilidad.")
+            _t_marg = _coste.TRAMOS_AHORRO[_op.index(_sel_t)][1]
+            _ded = _f2.checkbox(
+                "Intereses deducibles", value=False, key="coste_ded",
+                help="Si el inversor puede deducirlos, el umbral vuelve a ser el coste "
+                     "puro. Lo confirma un asesor fiscal, no esta herramienta.")
+
+            # Se le pasa el nº de repagos: con ellos el tipo no es medible y el
+            # módulo devuelve None, que es lo correcto. Antes daba un 6,6% donde
+            # el mercado está al 12,2%.
+            _tipo_imp = _coste.tipo_implicito(_principal_target, _deu, _meses_vida,
+                                              n_repagos=len(_pagos))
+            _frec_obs = _coste.frecuencia_observada(_pagos, _meses_vida)
+            # Sin tipo implícito utilizable —posición muy reciente, o repagos que
+            # dejan la deuda por debajo del principal— se cae al tipo de mercado
+            # del propio contrato con la frecuencia observada, que es la mejor
+            # estimación disponible.
+            # La media histórica real del pool, de la foto diaria que ya está en
+            # disco: no cuesta ninguna llamada y es el mismo número que usa el
+            # simulador, así que las dos páginas no se contradicen.
+            _apr_mercado = _snap.apr_borrow_historico(_snap.cargar()) or 0.12
+            _coste_ref = _tipo_imp or _coste.coste_anualizado(_apr_mercado, _frec_obs)
+            _equilibrio = _coste.rentabilidad_de_equilibrio(_coste_ref, _t_marg, _ded)
+
+            cc1, cc2, cc3, cc4 = st.columns(4)
+            cc1.markdown(kpi_card(
+                "🧾", "Intereses devengados", f"${_interes:,.2f}",
+                sublabel=f"posición abierta desde hace {_meses_vida:,.0f} meses",
+                value_color="#dc2626" if _interes > 0.01 else "#94a3b8",
+                help=("Diferencia entre lo que se debe hoy según el contrato y lo "
+                      "dispuesto neto según el histórico. Con varias disposiciones y "
+                      "repagos es una aproximación: separar principal de intereses con "
+                      "exactitud exigiría reconstruir el índice de deuda del pool.")),
+                unsafe_allow_html=True)
+            cc2.markdown(kpi_card(
+                "📈", "Tipo efectivo soportado",
+                f"{_coste_ref * 100:,.2f}%" if _coste_ref else "—",
+                sublabel=("medido de la propia posición" if _tipo_imp
+                          else "estimado: mercado + frecuencia real"),
+                help=("Sin repagos el tipo se MIDE: la deuda ha crecido como P·e^(r·t), "
+                      "así que r sale de comparar lo dispuesto con lo que se debe hoy.\n\n"
+                      "Con repagos eso deja de valer —cada pago reduce la deuda— y se "
+                      "estima con el tipo histórico real del pool aplicado a la frecuencia "
+                      "de pago observada, que sí es un dato.")),
+                unsafe_allow_html=True)
+            cc3.markdown(kpi_card(
+                "🗓️", "Cada cuánto se paga",
+                (f"{_frec_obs:,.0f} meses" if _pagos else "aún sin pagos"),
+                sublabel=(f"{len(_pagos)} pago(s) en {_meses_vida:,.0f} meses" if _pagos
+                          else "los intereses siguen capitalizando")),
+                unsafe_allow_html=True)
+            cc4.markdown(kpi_card(
+                "🎯", "Rentabilidad necesaria", f"{_equilibrio * 100:,.2f}%",
+                sublabel=("para cubrir el préstamo" if not _t_marg
+                          else f"con un marginal del {_t_marg * 100:,.0f}%")),
+                unsafe_allow_html=True)
+
+            if not _pagos:
+                st.warning(
+                    f"**No consta ningún repago en {_meses_vida:,.0f} meses.** Los intereses "
+                    f"se están acumulando sobre la propia deuda, que es lo que empuja el "
+                    f"Health Factor hacia abajo aunque el colateral no se mueva. Al ritmo "
+                    f"actual, la posición necesita rendir un **{_equilibrio * 100:,.2f}%** "
+                    f"solo para no perder dinero."
+                )
+            else:
+                st.caption(
+                    f"Se han hecho **{len(_pagos)} pago(s)** en {_meses_vida:,.0f} meses "
+                    f"—uno cada {_frec_obs:,.0f}—, y eso mantiene el coste en el "
+                    f"**{_coste_ref * 100:,.2f}%** anual. Cada pago devuelve la deuda al "
+                    f"principal y corta la capitalización."
+                )
+            # Los importes van con \$ escapado: Streamlit interpreta un par de
+            # dólares como fórmula LaTeX y partía la frase en símbolos sueltos.
+            if _tipo_imp:
+                st.caption(
+                    f"Tipo **medido**: se dispusieron \\${_principal_target:,.0f}, no ha "
+                    f"habido repagos y hoy se deben \\${_deu:,.0f}. Ese crecimiento implica "
+                    f"un {_tipo_imp * 100:,.2f}% anual."
+                )
+            else:
+                st.caption(
+                    f"Tipo **estimado**: con {len(_pagos)} repago(s) de por medio, comparar "
+                    f"lo dispuesto (\\${_principal_target:,.0f}) con lo que se debe hoy "
+                    f"(\\${_deu:,.0f}) ya no mide un tipo — cada pago reduce la deuda. Se "
+                    f"usa el tipo histórico real del pool "
+                    f"({_apr_mercado * 100:,.2f}%) aplicado a la frecuencia observada."
+                )
 
         # ── Capacidad de maniobra ─────────────────────────────────────────────
         _HF_RETIRADA = 1.05

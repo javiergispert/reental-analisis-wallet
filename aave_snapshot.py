@@ -323,6 +323,32 @@ def tipos(snap: dict, simbolo: str) -> pd.DataFrame:
     return df
 
 
+def apr_borrow_historico(snap: dict) -> float | None:
+    """Media histórica acumulada del tipo de préstamo, ponderada por volumen.
+
+    Se toma el último punto de cada serie, que es justo esa media desde el
+    despliegue del contrato, y se pondera por lo prestado de cada stablecoin:
+    USDT mueve seis veces más que USDC y promediarlas a partes iguales
+    desplazaría el dato.
+
+    Estaba dentro del simulador y ahora la necesitan dos páginas, así que sube
+    aquí en vez de copiarse.
+    """
+    tipos = (snap or {}).get("tipos") or {}
+    stables = (snap or {}).get("stables") or {}
+    num = den = 0.0
+    for sym, serie in tipos.items():
+        valores = (serie or {}).get("borrow_apr") or []
+        if not valores:
+            continue
+        peso = float((stables.get(sym) or {}).get("borrow_total") or 0)
+        if peso <= 0:
+            continue
+        num += float(valores[-1]) * peso
+        den += peso
+    return (num / den) if den > 0 else None
+
+
 def holders(snap: dict, clase: str) -> dict:
     """Saldo por dirección, sumando USDT y USDC. `clase` es 'supply' o 'borrow'."""
     out = {}

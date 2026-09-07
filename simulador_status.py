@@ -37,6 +37,8 @@ import os
 
 import streamlit as st
 
+import aave_snapshot as _snap
+
 RUTA = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                     "data", "simulador", "calculadora.html")
 
@@ -80,24 +82,11 @@ def configuracion(foto_aave: dict | None) -> dict:
     if umbral and 0.3 < umbral < 1.0:
         cfg["liqThreshold"] = round(float(umbral), 4)
 
-    # Media histórica acumulada del tipo de préstamo. Se toma el último punto de
-    # la serie, que es justo esa media desde el despliegue del contrato. Se
-    # pondera por lo prestado de cada stablecoin: USDT mueve seis veces más que
-    # USDC y promediarlas a partes iguales desplazaría el dato.
-    tipos = foto_aave.get("tipos") or {}
-    stables = foto_aave.get("stables") or {}
-    num = den = 0.0
-    for sym, serie in tipos.items():
-        valores = (serie or {}).get("borrow_apr") or []
-        if not valores:
-            continue
-        peso = float((stables.get(sym) or {}).get("borrow_total") or 0)
-        if peso <= 0:
-            continue
-        num += float(valores[-1]) * peso
-        den += peso
-    if den > 0:
-        cfg["rlApr"] = round(num / den, 4)
+    # La media histórica ponderada vive en aave_snapshot: la comparten esta
+    # página y el analizador de wallets.
+    apr_h = _snap.apr_borrow_historico(foto_aave)
+    if apr_h:
+        cfg["rlApr"] = round(apr_h, 4)
 
     return cfg
 

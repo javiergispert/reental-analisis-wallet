@@ -32,7 +32,7 @@ div[data-testid="column"], div[data-testid="stVerticalBlockBorderWrapper"] {
     letter-spacing: 0; text-transform: none; text-align: left;
     padding: 9px 11px; border-radius: 8px;
     box-shadow: 0 6px 18px rgba(15,23,42,.22);
-    white-space: normal; pointer-events: none;
+    white-space: pre-line; pointer-events: none;
 }
 </style>
 """
@@ -43,7 +43,13 @@ def kpi_card(icon, label, value, value_color="#1e293b", sublabel="", badge="", h
     explicar la fórmula sin obligar a abrir las notas metodológicas. Se usa un
     tooltip CSS propio en vez del atributo `title` del navegador porque aquel
     exige mantener el puntero quieto casi un segundo y no reacciona al clic."""
-    tip = f' data-tip="{html.escape(help, quote=True)}"' if help else ""
+    # Los saltos de línea se convierten a referencia numérica ANTES de meterlos
+    # en el atributo. Un `\n\n` literal deja una línea en blanco dentro del
+    # bloque HTML, y markdown lo interpreta como fin de bloque: la etiqueta se
+    # parte y el resto del atributo acaba impreso como texto en la página. Con
+    # `white-space: pre-line` en el globo, `&#10;` sigue mostrándose como salto.
+    tip = (f' data-tip="{html.escape(help, quote=True).replace(chr(10), "&#10;")}"'
+           if help else "")
     cursor = "cursor:help;" if help else ""
     return f"""
     <div class="kpi-card"{tip} style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;

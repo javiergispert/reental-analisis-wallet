@@ -230,3 +230,50 @@ def resumen(apr: float, frecuencia_meses: float, plazo_meses: float | None = Non
                                     tipo_marginal, deducible)
         out["sale_a_cuenta"] = rentabilidad_bruta > equilibrio
     return out
+
+
+# ── Lo que se puede MEDIR de una posición ya abierta ─────────────────────────
+# En el simulador la frecuencia de pago y el coste son supuestos que introduce
+# el usuario. En una posición real no hace falta suponerlos: el contrato dice
+# cuánto se debe hoy, el histórico dice cuánto se pidió y cuándo, y de ahí sale
+# el tipo que ese inversor ha asumido de verdad.
+
+def tipo_implicito(principal: float, deuda_actual: float, meses: float,
+                   n_repagos: int = 0) -> float | None:
+    """Tipo anual efectivo que ha soportado una posición, medido del resultado.
+
+    Si se pidió `principal` y hoy se debe `deuda_actual` tras `meses`, la deuda
+    ha crecido como `P·e^(r·t)`, así que `r = ln(D/P) / t`.
+
+    Eso vale SOLO si no ha habido repagos. Con ellos la deuda de hoy ya no es
+    `P·e^(r·t)` —cada pago la reduce— y el cociente deja de medir un tipo: da un
+    número plausible y equivocado. En una posición real con catorce pagos daba
+    un 6,6% frente al 12,2% de mercado, casi la mitad.
+
+    Por eso `n_repagos` es un parámetro y no un comentario: con repagos devuelve
+    None y obliga al llamante a estimarlo de otra forma, en vez de confiar en
+    que alguien lea la advertencia.
+    """
+    if n_repagos:
+        return None
+    if not principal or principal <= 0 or not deuda_actual or deuda_actual <= 0:
+        return None
+    if not meses or meses <= 0 or deuda_actual <= principal:
+        return None
+    return math.log(deuda_actual / principal) / (meses / 12.0)
+
+
+def frecuencia_observada(fechas_pago: list, meses_totales: float) -> float | None:
+    """Cada cuántos meses se han atendido los intereses, según el histórico.
+
+    Sin ningún pago devuelve el plazo completo: es exactamente el caso de «no
+    pagar hasta el final», que es el más caro y el que conviene detectar.
+
+    Devuelve None si no hay plazo con el que dividir.
+    """
+    if not meses_totales or meses_totales <= 0:
+        return None
+    n = len(fechas_pago or [])
+    if n == 0:
+        return meses_totales
+    return meses_totales / n
