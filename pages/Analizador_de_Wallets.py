@@ -3025,8 +3025,13 @@ if aave_borrower_filtered:
             _dias = (datetime.utcnow() - min(_fechas)).days
             _meses_vida = _dias / 30.44 if _dias > 0 else None
 
-        if _meses_vida and _principal_target > 0:
+        # Basta con que haya deuda viva. Antes se exigía además poder medir el
+        # principal y la antigüedad, y cuando el histórico no daba para eso el
+        # bloque desaparecía sin decir nada: quien tiene un préstamo abierto y
+        # no ve su coste concluye que la herramienta falla, no que faltan datos.
+        if _deu > 0:
             st.markdown("##### 💰 Lo que cuesta de verdad esta posición")
+            _medible = bool(_meses_vida and _principal_target > 0)
 
             # Los supuestos fiscales se piden ANTES de mostrar nada: el umbral
             # depende de ellos y enseñarlo con un valor por defecto invisible
@@ -3046,9 +3051,13 @@ if aave_borrower_filtered:
             # Se le pasa el nº de repagos: con ellos el tipo no es medible y el
             # módulo devuelve None, que es lo correcto. Antes daba un 6,6% donde
             # el mercado está al 12,2%.
-            _tipo_imp = _coste.tipo_implicito(_principal_target, _deu, _meses_vida,
-                                              n_repagos=len(_pagos))
-            _frec_obs = _coste.frecuencia_observada(_pagos, _meses_vida)
+            _tipo_imp = (_coste.tipo_implicito(_principal_target, _deu, _meses_vida,
+                                               n_repagos=len(_pagos))
+                         if _medible else None)
+            # Sin histórico utilizable no se conoce la frecuencia: se toma la
+            # anual, que es el APY y la convención más habitual para citar un
+            # tipo. La página avisa de que es una referencia, no una medición.
+            _frec_obs = _coste.frecuencia_observada(_pagos, _meses_vida) if _medible else 12
             # Sin tipo implícito utilizable —posición muy reciente, o repagos que
             # dejan la deuda por debajo del principal— se cae al tipo de mercado
             # del propio contrato con la frecuencia observada, que es la mejor
@@ -3063,7 +3072,8 @@ if aave_borrower_filtered:
             cc1, cc2, cc3, cc4 = st.columns(4)
             cc1.markdown(kpi_card(
                 "🧾", "Intereses devengados", f"${_interes:,.2f}",
-                sublabel=f"posición abierta desde hace {_meses_vida:,.0f} meses",
+                sublabel=(f"posición abierta desde hace {_meses_vida:,.0f} meses"
+                          if _medible else "antigüedad no determinable"),
                 value_color="#dc2626" if _interes > 0.01 else "#94a3b8",
                 help=("Diferencia entre lo que se debe hoy según el contrato y lo "
                       "dispuesto neto según el histórico. Con varias disposiciones y "
@@ -3074,7 +3084,8 @@ if aave_borrower_filtered:
                 "📈", "Tipo efectivo soportado",
                 f"{_coste_ref * 100:,.2f}%" if _coste_ref else "—",
                 sublabel=("medido de la propia posición" if _tipo_imp
-                          else "estimado: mercado + frecuencia real"),
+                          else "estimado: mercado + frecuencia real" if _medible
+                          else "referencia de mercado (APY)"),
                 help=("Sin repagos el tipo se MIDE: la deuda ha crecido como P·e^(r·t), "
                       "así que r sale de comparar lo dispuesto con lo que se debe hoy.\n\n"
                       "Con repagos eso deja de valer —cada pago reduce la deuda— y se "
@@ -3083,8 +3094,10 @@ if aave_borrower_filtered:
                 unsafe_allow_html=True)
             cc3.markdown(kpi_card(
                 "🗓️", "Cada cuánto se paga",
-                (f"{_frec_obs:,.0f} meses" if _pagos else "aún sin pagos"),
-                sublabel=(f"{len(_pagos)} pago(s) en {_meses_vida:,.0f} meses" if _pagos
+                ("—" if not _medible else
+                 f"{_frec_obs:,.0f} meses" if _pagos else "aún sin pagos"),
+                sublabel=("sin histórico con el que medirlo" if not _medible else
+                          f"{len(_pagos)} pago(s) en {_meses_vida:,.0f} meses" if _pagos
                           else "los intereses siguen capitalizando")),
                 unsafe_allow_html=True)
             cc4.markdown(kpi_card(
@@ -3093,7 +3106,15 @@ if aave_borrower_filtered:
                           else f"con un marginal del {_t_marg * 100:,.0f}%")),
                 unsafe_allow_html=True)
 
-            if not _pagos:
+            if not _medible:
+                st.info(
+                    "Hay **deuda viva** en el pool, pero el histórico de esta wallet no "
+                    "permite medir cuándo se dispuso ni cuánto se ha ido pagando —puede "
+                    "ser por el filtro de fechas, o porque los movimientos quedan fuera "
+                    "del rango analizado—. El coste que se muestra es la **referencia "
+                    "anual del mercado**, no una medición de esta posición."
+                )
+            elif not _pagos:
                 st.warning(
                     f"**No consta ningún repago en {_meses_vida:,.0f} meses.** Los intereses "
                     f"se están acumulando sobre la propia deuda, que es lo que empuja el "
@@ -3110,7 +3131,9 @@ if aave_borrower_filtered:
                 )
             # Los importes van con \$ escapado: Streamlit interpreta un par de
             # dólares como fórmula LaTeX y partía la frase en símbolos sueltos.
-            if _tipo_imp:
+            if not _medible:
+                pass
+            elif _tipo_imp:
                 st.caption(
                     f"Tipo **medido**: se dispusieron \\${_principal_target:,.0f}, no ha "
                     f"habido repagos y hoy se deben \\${_deu:,.0f}. Ese crecimiento implica "
