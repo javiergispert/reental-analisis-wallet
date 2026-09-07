@@ -108,6 +108,26 @@ def coste_anualizado(apr: float, meses: float) -> float:
     return (math.exp(apr * anos) - 1.0) / anos
 
 
+def coste_total(apr: float, plazo_meses: float, frecuencia_meses: float | None = None) -> float:
+    """Interés total pagado en todo el plazo, como fracción del principal.
+
+    Con `frecuencia_meses` se salda cada N meses, así que el principal nunca
+    crece y el coste es lineal en el plazo: `(T/N) · (e^(r·N/12) − 1)`.
+
+    Sin frecuencia —o con una igual al plazo— no se paga nada hasta el final y
+    el interés capitaliza sobre sí mismo, que es el caso caro.
+
+    Con los tipos de hoy, diez años pagando cada mes cuestan un 122% del
+    principal; los mismos diez años sin pagar nada, un 236%.
+    """
+    if apr is None or apr <= 0 or not plazo_meses or plazo_meses <= 0:
+        return 0.0
+    if not frecuencia_meses or frecuencia_meses >= plazo_meses:
+        return coste_acumulado(apr, plazo_meses / 12.0)
+    n_periodos = plazo_meses / frecuencia_meses
+    return n_periodos * (math.exp(apr * frecuencia_meses / 12.0) - 1.0)
+
+
 def rentabilidad_de_equilibrio(apr: float, tipo_marginal: float = 0.0,
                                deducible: bool = False) -> float:
     """Rentabilidad BRUTA anual que debe dar lo comprado con el préstamo para
