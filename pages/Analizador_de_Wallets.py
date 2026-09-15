@@ -4440,43 +4440,54 @@ if agg["rend_pendiente_rnt"]:
         st.dataframe(pd.DataFrame(agg["rend_pendiente_rnt"]), hide_index=True, use_container_width=True)
 
 # ── Descargables ──────────────────────────────────────────────────────────────
-st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+#
+# Va en un `fragment` por una razón de experiencia de uso: pulsar un
+# `download_button` dispara una reejecución COMPLETA del script. El fichero se
+# baja al instante —ya está en memoria— pero la página se queda pensando varios
+# segundos rehaciendo todo el análisis, y da la impresión de que algo se ha
+# colgado. Dentro de un fragmento solo se reejecuta este bloque, y los bytes
+# llegan como argumentos, así que ni siquiera se vuelven a construir.
+@st.fragment
+def _bloque_descargas(xlsx_agg: bytes, csv_fiscal: bytes, sufijo: str, multi: bool) -> None:
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+    st.caption(
+        "**Resumen agregado (XLSX)** — hojas Informe · Glosario · Resumen · Rendimientos · RNT sin valorar · "
+        "Saldos · Plusvalías (FIFO) · Lotes abiertos · Por completar, con los totales listos "
+        "para las casillas de los modelos y la lista de importes que el inversor debe completar "
+        "(compras en FIAT, recompensas de RNT sin precio histórico disponible). Sin hashes ni contratos."
+    )
+    st.download_button(
+        "⬇️ Descargar resumen agregado (XLSX)",
+        data=xlsx_agg,
+        file_name=f"reental_resumen_fiscal_{sufijo}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        type="primary",
+        use_container_width=True,
+    )
+
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+    st.caption(
+        "**CSV granular** — todos los movimientos en orden cronológico (tokens inmobiliarios, "
+        "dividendos, stablecoins, ecosistema RNT y Aave), con columna Wallet/Alias" +
+        (" y transferencias internas marcadas" if multi else "") + ". Respaldo legal para la autoridad fiscal."
+    )
+    st.download_button(
+        "⬇️ Descargar CSV granular (respaldo)",
+        data=csv_fiscal,
+        file_name=f"reental_informe_fiscal_{sufijo}.csv",
+        mime="text/csv",
+        type="primary",
+        use_container_width=True,
+    )
+
+
 _csv_filename_suffix = wallet[:8] if not es_multi_wallet else f"multi{len(wallets_analyzed)}_{wallet[:8]}"
 
-with st.spinner("Preparando resumen agregado (XLSX)…"):
-    xlsx_agg = build_aggregate_xlsx(agg)
-st.caption(
-    "**Resumen agregado (XLSX)** — hojas Informe · Glosario · Resumen · Rendimientos · RNT sin valorar · "
-    "Saldos · Plusvalías (FIFO) · Lotes abiertos · Por completar, con los totales listos "
-    "para las casillas de los modelos y la lista de importes que el inversor debe completar "
-    "(compras en FIAT, recompensas de RNT sin precio histórico disponible). Sin hashes ni contratos."
-)
-st.download_button(
-    "⬇️ Descargar resumen agregado (XLSX)",
-    data=xlsx_agg,
-    file_name=f"reental_resumen_fiscal_{_csv_filename_suffix}.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    type="primary",
-    use_container_width=True,
-)
-
-st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-with st.spinner("Preparando CSV granular…"):
+with st.spinner("Preparando documentos…"):
+    xlsx_agg   = build_aggregate_xlsx(agg)
     csv_fiscal = build_fiscal_csv()
 
-st.caption(
-    "**CSV granular** — todos los movimientos en orden cronológico (tokens inmobiliarios, "
-    "dividendos, stablecoins, ecosistema RNT y Aave), con columna Wallet/Alias" +
-    (" y transferencias internas marcadas" if es_multi_wallet else "") + ". Respaldo legal para la autoridad fiscal."
-)
-st.download_button(
-    "⬇️ Descargar CSV granular (respaldo)",
-    data=csv_fiscal,
-    file_name=f"reental_informe_fiscal_{_csv_filename_suffix}.csv",
-    mime="text/csv",
-    type="primary",
-    use_container_width=True,
-)
+_bloque_descargas(xlsx_agg, csv_fiscal, _csv_filename_suffix, es_multi_wallet)
 
 with st.expander("📖 Glosario — qué es cada cosa y cómo se interpreta fiscalmente"):
     st.markdown("**A · Qué es cada cosa**")
