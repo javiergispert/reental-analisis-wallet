@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import aave_lend
 import aave_snapshot as _snap
 import coste_prestamo as _coste
+import pool_rnt as _pool
 import recarga as _recarga
 # Streamlit reejecuta el script pero NO reimporta lo que ya está en sys.modules:
 # tras un despliegue esta página puede convivir con una versión anterior de sus
@@ -3574,6 +3575,25 @@ def get_rnt_price_on_date(date_str: str):
     el histórico no se pudo obtener — nunca se aproxima a 0 en ese caso."""
     return _rnt_price_history_usd().get(date_str[:10])
 
+@st.cache_data(show_spinner=False, ttl=86400)
+def _pool_en_fecha(fecha: str, _esquema: int = _pool.ESQUEMA) -> dict:
+    """Precio del RNT y valor de una participación del pool en esa fecha, leídos
+    del propio pool RNT/USDT. Cacheado por fecha: dos consultas la primera vez y
+    ninguna después. `_esquema` está en la firma para que un cambio de formato
+    invalide la caché, no para usarse dentro."""
+    if not API_KEY:
+        return {}
+    try:
+        bloque = _pool.bloque_de_fecha(fecha, API_KEY)
+        if not bloque:
+            return {}
+        serie = _pool.cargar()
+        return {"precio_rnt": _pool.precio_rnt(bloque, API_KEY),
+                "valor_lp": _pool.valor_lp(bloque, fecha, API_KEY, serie)}
+    except Exception:       # noqa: BLE001 — sin precio se reporta como pendiente
+        return {}
+
+
 def _income_items() -> tuple:
     """Contribuciones de rendimiento con valor determinado, como
     (fecha_str, concepto, valor_usd), y por separado las recompensas de RNT
@@ -3584,12 +3604,16 @@ def _income_items() -> tuple:
     RNT" cuyo origen es ambiguo).
 
     Un claim de staking no paga en una sola moneda: reparte RNT, participaciones
-    del pool (SLP) y, a veces, stablecoin (USDT, USDC o DAI). El RNT se valora
-    con el precio de CoinGecko de ese día y la stablecoin a la par; el SLP no
-    tiene precio público, así que NO se valora.
+    del pool (SLP) y, a veces, stablecoin (USDT, USDC o DAI).
 
-    Nada que no se pueda valorar se cuenta como $0: se reporta aparte en
-    `sin_valorar`, con su cantidad, para que se complete con el valor real."""
+    La stablecoin va a la par. El RNT se valora con CoinGecko y, cuando su plan
+    gratuito no llega —solo sirve los últimos 365 días—, con el precio que marca
+    el propio pool RNT/USDT ese día. El SLP no cotiza, pero su valor sí se puede
+    calcular: es la parte proporcional de las dos mitades del pool. Ambas cosas
+    salen de `pool_rnt`.
+
+    Lo que aun así no se pueda valorar NUNCA se cuenta como $0: se reporta
+    aparte en `sin_valorar`, con su cantidad, para completarlo a mano."""
     items, sin_valorar = [], []
     for ev in (dividends or []):
         if not _en_periodo(ev["fecha_str"]):
@@ -3616,34 +3640,43 @@ def _income_items() -> tuple:
         usdt = ev.get("usdt_delta", 0.0) or 0.0
         concepto = "Staking (recompensas)" if "staking" in ev["tipo"] else "Farming (recompensas)"
 
+        # Solo se consulta el pool si hace falta: si CoinGecko ya da precio y
+        # no hay SLP en el claim, no se gasta ni una petición.
+        del_pool = _pool_en_fecha(ev["fecha_str"][:10]) if (slp > 0 or not precio) else {}
+
         valor = usdt          # USDT / USDC / DAI, a la par del dólar
         if rnt > 0:
-            if precio:
-                valor += rnt * precio
+            precio_rnt = precio or del_pool.get("precio_rnt")
+            if precio_rnt:
+                valor += rnt * precio_rnt
             else:
                 sin_valorar.append({
                     "Fecha UTC": ev["fecha_str"], "Concepto": concepto, "Activo": "RNT",
                     "Cantidad": round(rnt, 6),
-                    "Motivo": ("Precio de RNT no disponible en CoinGecko para esta fecha: fuera de la "
-                               "ventana de 365 días del plan gratuito, o límite de peticiones agotado. "
-                               "Completar con el precio de mercado real de RNT en la fecha del cobro."),
+                    "Motivo": ("Sin precio para esta fecha ni en CoinGecko —su plan gratuito solo "
+                               "sirve los últimos 365 días— ni en el pool RNT/USDT. Completar con "
+                               "el precio de mercado del RNT en la fecha del cobro."),
                 })
-        if valor:
-            items.append((ev["fecha_str"], concepto, valor))
 
         # El SLP es la participación en el pool RNT/USDT que Reental reparte en
-        # el mismo claim. Es renta en especie, pero no cotiza: su valor es la
-        # parte proporcional de las reservas del pool ese día, y eso no se puede
-        # leer sin consultar el estado histórico del contrato. Se reporta con su
-        # cantidad para que se complete, nunca como cero.
+        # el mismo claim. No cotiza, pero no hace falta que cotice: el par es
+        # 50/50 en valor, así que una participación vale el doble del lado en
+        # USDT dividido entre las participaciones que había ese día.
         if slp > 0:
-            sin_valorar.append({
-                "Fecha UTC": ev["fecha_str"], "Concepto": concepto, "Activo": "SLP (RNT/USDT)",
-                "Cantidad": round(slp, 8),
-                "Motivo": ("Participación en el pool de liquidez RNT/USDT repartida en el mismo "
-                           "claim. No cotiza: su valor es la parte proporcional de las reservas "
-                           "de RNT y USDT del pool en la fecha del cobro. Completar con ese dato."),
-            })
+            unitario = del_pool.get("valor_lp")
+            if unitario:
+                valor += slp * unitario
+            else:
+                sin_valorar.append({
+                    "Fecha UTC": ev["fecha_str"], "Concepto": concepto, "Activo": "SLP (RNT/USDT)",
+                    "Cantidad": round(slp, 8),
+                    "Motivo": ("Participación en el pool de liquidez RNT/USDT repartida en el mismo "
+                               "claim. No se han podido leer las reservas del pool en esa fecha: "
+                               "completar con la parte proporcional de RNT y USDT que representaba."),
+                })
+
+        if valor:
+            items.append((ev["fecha_str"], concepto, valor))
     return items, sin_valorar
 
 
@@ -4020,7 +4053,7 @@ FISCAL_GLOSARIO = [
      "Tratamiento / nota": "Los intereses cobrados (retirada − depósito) son renta; el principal no."},
     {"Operación": "Claim rewards de staking / farming",
      "Naturaleza fiscal": "Rendimiento (recompensa), posiblemente en varias monedas",
-     "Tratamiento / nota": "Un mismo claim puede repartir RNT, participaciones del pool (SLP) y stablecoin. Todo ello es renta al valor de mercado en la fecha de cobro, y ese valor pasa a ser el coste de adquisición de lo recibido. El SLP no cotiza: figura en la hoja «Rendim. sin valorar» con su cantidad, para valorarlo por las reservas del pool de esa fecha."},
+     "Tratamiento / nota": "Un mismo claim puede repartir RNT, participaciones del pool (SLP) y stablecoin. Todo ello es renta al valor de mercado en la fecha de cobro, y ese valor pasa a ser el coste de adquisición de lo recibido. El SLP no cotiza en ningún mercado, pero se valora por su parte proporcional en las reservas de RNT y USDT del pool en la fecha del cobro."},
     {"Operación": "Venta de RNT al pool de Reental",
      "Naturaleza fiscal": "Disposición (ganancia/pérdida patrimonial)",
      "Tratamiento / nota": "Venta contra el pool RNT/USDT. El valor de transmisión es el USDT recibido en la misma TX (neto de la comisión del pool), por lo que es un importe exacto, no estimado."},
@@ -4472,10 +4505,9 @@ if agg["rend_sin_valorar"]:
         _por_activo[_r["Activo"]] += _r["Cantidad"]
     _detalle = " · ".join(f"{v:,.4f} {a}" for a, v in sorted(_por_activo.items()))
     st.caption(
-        f"🟠 **{len(_pend)} recompensa(s) sin valorar** ({_detalle}): el SLP no cotiza, y del RNT "
-        "puede faltar el precio histórico en CoinGecko (fuera de la ventana de 365 días del plan "
-        "gratuito, o límite de peticiones). No se han contado como $0 — revisar la hoja "
-        "«Rendim. sin valorar» del XLSX y completar con su valor real."
+        f"🟠 **{len(_pend)} recompensa(s) sin valorar** ({_detalle}): no se ha podido leer el "
+        "precio de esa fecha ni en CoinGecko ni en el pool RNT/USDT. No se han contado como $0 — "
+        "revisar la hoja «Rendim. sin valorar» del XLSX y completar con su valor real."
     )
 
 st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
