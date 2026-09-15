@@ -3583,11 +3583,14 @@ def _income_items() -> tuple:
     recompensas de staking/farming (eventos de *claim*, nunca las "Recepción de
     RNT" cuyo origen es ambiguo).
 
-    Cuando CoinGecko no devuelve precio para la fecha del claim (fuera de la
-    ventana de 365 días del plan gratuito, o límite de peticiones agotado),
-    la recompensa en RNT NUNCA se valora como $0: se reporta aparte en
-    `pendientes_rnt` para que se complete con el precio de mercado real."""
-    items, pendientes_rnt = [], []
+    Un claim de staking no paga en una sola moneda: reparte RNT, participaciones
+    del pool (SLP) y, a veces, stablecoin (USDT, USDC o DAI). El RNT se valora
+    con el precio de CoinGecko de ese día y la stablecoin a la par; el SLP no
+    tiene precio público, así que NO se valora.
+
+    Nada que no se pueda valorar se cuenta como $0: se reporta aparte en
+    `sin_valorar`, con su cantidad, para que se complete con el valor real."""
+    items, sin_valorar = [], []
     for ev in (dividends or []):
         if not _en_periodo(ev["fecha_str"]):
             continue
@@ -3609,22 +3612,39 @@ def _income_items() -> tuple:
     for ev in claim_events:
         precio = precios.get(ev["fecha_str"][:10])
         rnt  = ev.get("rnt_delta", 0.0) or 0.0
+        slp  = ev.get("slp_delta", 0.0) or 0.0
         usdt = ev.get("usdt_delta", 0.0) or 0.0
         concepto = "Staking (recompensas)" if "staking" in ev["tipo"] else "Farming (recompensas)"
-        if precio:
-            items.append((ev["fecha_str"], concepto, rnt * precio + usdt))
-            continue
-        if usdt:
-            items.append((ev["fecha_str"], concepto, usdt))
+
+        valor = usdt          # USDT / USDC / DAI, a la par del dólar
         if rnt > 0:
-            pendientes_rnt.append({
-                "Fecha UTC": ev["fecha_str"], "Concepto": concepto,
-                "Cantidad RNT": round(rnt, 6),
-                "Motivo": ("Precio de RNT no disponible en CoinGecko para esta fecha: fuera de la "
-                           "ventana de 365 días del plan gratuito, o límite de peticiones agotado. "
-                           "Completar con el precio de mercado real de RNT en la fecha del cobro."),
+            if precio:
+                valor += rnt * precio
+            else:
+                sin_valorar.append({
+                    "Fecha UTC": ev["fecha_str"], "Concepto": concepto, "Activo": "RNT",
+                    "Cantidad": round(rnt, 6),
+                    "Motivo": ("Precio de RNT no disponible en CoinGecko para esta fecha: fuera de la "
+                               "ventana de 365 días del plan gratuito, o límite de peticiones agotado. "
+                               "Completar con el precio de mercado real de RNT en la fecha del cobro."),
+                })
+        if valor:
+            items.append((ev["fecha_str"], concepto, valor))
+
+        # El SLP es la participación en el pool RNT/USDT que Reental reparte en
+        # el mismo claim. Es renta en especie, pero no cotiza: su valor es la
+        # parte proporcional de las reservas del pool ese día, y eso no se puede
+        # leer sin consultar el estado histórico del contrato. Se reporta con su
+        # cantidad para que se complete, nunca como cero.
+        if slp > 0:
+            sin_valorar.append({
+                "Fecha UTC": ev["fecha_str"], "Concepto": concepto, "Activo": "SLP (RNT/USDT)",
+                "Cantidad": round(slp, 8),
+                "Motivo": ("Participación en el pool de liquidez RNT/USDT repartida en el mismo "
+                           "claim. No cotiza: su valor es la parte proporcional de las reservas "
+                           "de RNT y USDT del pool en la fecha del cobro. Completar con ese dato."),
             })
-    return items, pendientes_rnt
+    return items, sin_valorar
 
 
 def build_capital_gains_fifo() -> dict:
@@ -3771,7 +3791,7 @@ def build_aggregate_report() -> dict:
     # ── Rendimientos por (año, concepto) ──────────────────────────────────────
     acc = defaultdict(lambda: {"usd": 0.0, "eur": 0.0})
     tot = defaultdict(lambda: {"usd": 0.0, "eur": 0.0})
-    income_items, pendientes_rnt = _income_items()
+    income_items, sin_valorar = _income_items()
     for fecha_str, concepto, usd in income_items:
         if not usd:
             continue
@@ -3835,7 +3855,7 @@ def build_aggregate_report() -> dict:
     return {
         "rend_rows": rend_rows,
         "rend_tot": dict(tot),
-        "rend_pendiente_rnt": sorted(pendientes_rnt, key=lambda r: r["Fecha UTC"]),
+        "rend_sin_valorar": sorted(sin_valorar, key=lambda r: r["Fecha UTC"]),
         "holdings_rows": sorted(holdings_rows, key=lambda r: r["Token"]),
         "holdings_tot": {"usd": round(hold_usd, 2), "eur": round(hold_eur, 2)},
         "deuda_usd": round(deuda_usd, 2),
@@ -3998,9 +4018,9 @@ FISCAL_GLOSARIO = [
     {"Operación": "Depósito / Retirada de préstamo (Aave prestamista)",
      "Naturaleza fiscal": "Rendimiento del capital (intereses)",
      "Tratamiento / nota": "Los intereses cobrados (retirada − depósito) son renta; el principal no."},
-    {"Operación": "Claim rewards de staking / farming (RNT)",
-     "Naturaleza fiscal": "Rendimiento (recompensa)",
-     "Tratamiento / nota": "Renta al valor de mercado del RNT en la fecha de cobro; ese valor es el coste de adquisición del RNT para futuras plusvalías."},
+    {"Operación": "Claim rewards de staking / farming",
+     "Naturaleza fiscal": "Rendimiento (recompensa), posiblemente en varias monedas",
+     "Tratamiento / nota": "Un mismo claim puede repartir RNT, participaciones del pool (SLP) y stablecoin. Todo ello es renta al valor de mercado en la fecha de cobro, y ese valor pasa a ser el coste de adquisición de lo recibido. El SLP no cotiza: figura en la hoja «Rendim. sin valorar» con su cantidad, para valorarlo por las reservas del pool de esa fecha."},
     {"Operación": "Venta de RNT al pool de Reental",
      "Naturaleza fiscal": "Disposición (ganancia/pérdida patrimonial)",
      "Tratamiento / nota": "Venta contra el pool RNT/USDT. El valor de transmisión es el USDT recibido en la misma TX (neto de la comisión del pool), por lo que es un importe exacto, no estimado."},
@@ -4113,7 +4133,7 @@ def _escribir_glosario(writer) -> None:
 
 def build_aggregate_xlsx(agg: dict) -> bytes:
     """Documento agregado en XLSX multi-hoja (Informe · Glosario · Resumen ·
-    Rendimientos · RNT sin valorar · Saldos · Plusvalías · Lotes abiertos ·
+    Rendimientos · Rendim. sin valorar · Saldos · Plusvalías · Lotes abiertos ·
     Por completar) para que el asesor fiscal trabaje con los totales sin hashes
     ni contratos."""
     buf = io.BytesIO()
@@ -4139,8 +4159,8 @@ def build_aggregate_xlsx(agg: dict) -> bytes:
         rend = agg["rend_rows"] or [{"Año": "", "Concepto": "(sin rendimientos en el periodo)",
                                      "Valor USD": "", "Valor EUR": ""}]
         pd.DataFrame(rend).to_excel(writer, sheet_name="Rendimientos", index=False)
-        pend_rnt = agg["rend_pendiente_rnt"] or [{"Concepto": "(ningún claim de RNT sin valorar)"}]
-        pd.DataFrame(pend_rnt).to_excel(writer, sheet_name="RNT sin valorar", index=False)
+        pend = agg["rend_sin_valorar"] or [{"Concepto": "(todas las recompensas se han podido valorar)"}]
+        pd.DataFrame(pend).to_excel(writer, sheet_name="Rendim. sin valorar", index=False)
         hold = agg["holdings_rows"] or [{"Token": "(cartera vacía a la fecha de corte)"}]
         pd.DataFrame(hold).to_excel(writer, sheet_name="Saldos", index=False)
 
@@ -4445,14 +4465,17 @@ for _i, _concepto in enumerate(_orden_conceptos):
         sublabel=f"€{_v['eur']:,.2f}",
     ), unsafe_allow_html=True)
 
-if agg["rend_pendiente_rnt"]:
-    _n_pend = len(agg["rend_pendiente_rnt"])
-    _rnt_pend_total = sum(r["Cantidad RNT"] for r in agg["rend_pendiente_rnt"])
+if agg["rend_sin_valorar"]:
+    _pend = agg["rend_sin_valorar"]
+    _por_activo = defaultdict(float)
+    for _r in _pend:
+        _por_activo[_r["Activo"]] += _r["Cantidad"]
+    _detalle = " · ".join(f"{v:,.4f} {a}" for a, v in sorted(_por_activo.items()))
     st.caption(
-        f"🟠 **{_n_pend} recompensa(s) de RNT sin valorar** ({_rnt_pend_total:,.4f} RNT en total): "
-        "el precio de RNT no estaba disponible en CoinGecko para esas fechas (fuera de la ventana "
-        "de 365 días del plan gratuito, o límite de peticiones). No se han contado como $0 — "
-        "revisar la hoja «RNT sin valorar» del XLSX y completar con el precio de mercado real."
+        f"🟠 **{len(_pend)} recompensa(s) sin valorar** ({_detalle}): el SLP no cotiza, y del RNT "
+        "puede faltar el precio histórico en CoinGecko (fuera de la ventana de 365 días del plan "
+        "gratuito, o límite de peticiones). No se han contado como $0 — revisar la hoja "
+        "«Rendim. sin valorar» del XLSX y completar con su valor real."
     )
 
 st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
@@ -4492,16 +4515,16 @@ if _cg["kpi"]["prov_n"] or _cg["kpi"]["pend_n"]:
         "en la hoja «Por completar» del XLSX."
     )
 
-_exp_cols = st.columns(3) if agg["rend_pendiente_rnt"] else st.columns(2)
+_exp_cols = st.columns(3) if agg["rend_sin_valorar"] else st.columns(2)
 if agg["rend_rows"]:
     with _exp_cols[0].expander("Ver rendimientos por año"):
         st.dataframe(pd.DataFrame(agg["rend_rows"]), hide_index=True, use_container_width=True)
 if _cg["gains"]:
     with _exp_cols[1].expander("Ver detalle de plusvalías (FIFO)"):
         st.dataframe(pd.DataFrame(_cg["gains"]), hide_index=True, use_container_width=True)
-if agg["rend_pendiente_rnt"]:
-    with _exp_cols[2].expander("Ver RNT sin valorar"):
-        st.dataframe(pd.DataFrame(agg["rend_pendiente_rnt"]), hide_index=True, use_container_width=True)
+if agg["rend_sin_valorar"]:
+    with _exp_cols[2].expander("Ver recompensas sin valorar"):
+        st.dataframe(pd.DataFrame(agg["rend_sin_valorar"]), hide_index=True, use_container_width=True)
 
 # ── Descargables ──────────────────────────────────────────────────────────────
 #
@@ -4515,10 +4538,10 @@ if agg["rend_pendiente_rnt"]:
 def _bloque_descargas(xlsx_agg: bytes, csv_fiscal: bytes, sufijo: str, multi: bool) -> None:
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
     st.caption(
-        "**Resumen agregado (XLSX)** — hojas Informe · Glosario · Resumen · Rendimientos · RNT sin valorar · "
+        "**Resumen agregado (XLSX)** — hojas Informe · Glosario · Resumen · Rendimientos · Rendim. sin valorar · "
         "Saldos · Plusvalías (FIFO) · Lotes abiertos · Por completar, con los totales listos "
         "para las casillas de los modelos y la lista de importes que el inversor debe completar "
-        "(compras en FIAT, recompensas de RNT sin precio histórico disponible). Sin hashes ni contratos."
+        "(compras en FIAT, recompensas sin precio disponible). Sin hashes ni contratos."
     )
     st.download_button(
         "⬇️ Descargar resumen agregado (XLSX)",
