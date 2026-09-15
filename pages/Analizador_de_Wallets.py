@@ -14,6 +14,7 @@ import streamlit as st
 import pandas as pd
 import requests
 import plotly.graph_objects as go
+from openpyxl.styles import Alignment, Font
 from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -3790,6 +3791,126 @@ def build_aggregate_report() -> dict:
 
 TOOL_VERSION = "1.0"
 
+# Qué es cada cosa. El informe lo lee un asesor fiscal que puede no haber
+# tratado nunca con cripto ni con Reental: sin este bloque, las otras ocho hojas
+# hablan de objetos que no tiene por qué conocer. Se describe la NATURALEZA del
+# objeto y su equivalente en el mundo tradicional; la calificación fiscal va
+# después, en FISCAL_GLOSARIO.
+GLOSARIO_CONCEPTOS = [
+    # ── El activo ────────────────────────────────────────────────────────────
+    {"Bloque": "El activo", "Concepto": "Token inmobiliario Reental",
+     "Qué es": ("Representación digital de una participación fraccionada en un inmueble concreto. "
+                "Según el proyecto, da derecho a una participación en una LLC estadounidense "
+                "propietaria del inmueble, o a los derechos de un préstamo participativo en España."),
+     "Equivalencia en el mundo tradicional": ("Participación en una sociedad patrimonial o en un préstamo, "
+                                              "con la titularidad anotada en blockchain en lugar de en un libro de socios.")},
+    {"Bloque": "El activo", "Concepto": "Precio de emisión",
+     "Qué es": ("Precio unitario al que Reental coloca el token en la emisión inicial: normalmente "
+                "100 € o 100 $ por token, según la divisa del proyecto."),
+     "Equivalencia en el mundo tradicional": "Valor de suscripción de la participación."},
+    {"Bloque": "El activo", "Concepto": "Dividendo / renta",
+     "Qué es": ("Reparto periódico —habitualmente mensual— de la renta neta del alquiler, "
+                "abonado en stablecoin."),
+     "Equivalencia en el mundo tradicional": "Dividendo o reparto de resultados."},
+    {"Bloque": "El activo", "Concepto": "Vault de Reental",
+     "Qué es": ("Monedero interno de la plataforma donde se acumulan los dividendos hasta que el "
+                "inversor los retira o los reinvierte."),
+     "Equivalencia en el mundo tradicional": "Cuenta de efectivo del bróker."},
+    {"Bloque": "El activo", "Concepto": "Reinversión desde vault",
+     "Qué es": ("Compra de tokens nuevos con el saldo acumulado en el vault, sin que el dinero "
+                "pase por el banco del inversor."),
+     "Equivalencia en el mundo tradicional": "Reinversión automática de dividendos."},
+    {"Bloque": "El activo", "Concepto": "Cierre del proyecto",
+     "Qué es": ("Venta del inmueble: se devuelve el capital más la plusvalía y los tokens se "
+                "destruyen («se queman»), por lo que desaparecen de la cartera."),
+     "Equivalencia en el mundo tradicional": "Liquidación de la sociedad y amortización de las participaciones."},
+
+    # ── El entorno ───────────────────────────────────────────────────────────
+    {"Bloque": "El entorno", "Concepto": "Wallet / dirección «0x…»",
+     "Qué es": ("Cuenta del inversor en la blockchain. La dirección es pública y cualquiera puede "
+                "consultarla; titular es quien posee la clave privada."),
+     "Equivalencia en el mundo tradicional": "Número de cuenta; la clave privada equivale a la firma."},
+    {"Bloque": "El entorno", "Concepto": "Blockchain / hash de transacción",
+     "Qué es": ("Registro público e inmutable de cada operación. El hash identifica una operación "
+                "concreta de forma única y permite verificarla por terceros."),
+     "Equivalencia en el mundo tradicional": "Extracto bancario; el hash es el número de apunte."},
+    {"Bloque": "El entorno", "Concepto": "USDT / stablecoin",
+     "Qué es": ("Token cuyo valor está referenciado 1:1 al dólar. En este informe se asume la "
+                "paridad con el USD."),
+     "Equivalencia en el mundo tradicional": "Saldo en divisa."},
+    {"Bloque": "El entorno", "Concepto": "Gas (comisión de red)",
+     "Qué es": ("Comisión que cobra la red por registrar una operación. La paga el inversor desde "
+                "su wallet, y es independiente de Reental."),
+     "Equivalencia en el mundo tradicional": "Comisión de transferencia."},
+    {"Bloque": "El entorno", "Concepto": "Mercado secundario / OTC (P2P)",
+     "Qué es": ("Compraventa de tokens ya emitidos entre particulares, fuera de la colocación "
+                "inicial de Reental."),
+     "Equivalencia en el mundo tradicional": "Compraventa entre particulares fuera del mercado primario."},
+
+    # ── RNT y sus rendimientos ───────────────────────────────────────────────
+    {"Bloque": "RNT y sus rendimientos", "Concepto": "RNT",
+     "Qué es": ("Token propio de Reental, de utilidad y gobernanza. NO representa ningún inmueble "
+                "y su precio fluctúa en mercado."),
+     "Equivalencia en el mundo tradicional": "Valor cotizado de la plataforma, no del inmueble."},
+    {"Bloque": "RNT y sus rendimientos", "Concepto": "Staking",
+     "Qué es": ("Bloquear RNT durante un plazo a cambio de una recompensa periódica. El NFT «xRNT» "
+                "que se recibe es el resguardo del depósito, y se destruye al recuperarlo."),
+     "Equivalencia en el mundo tradicional": "Depósito a plazo; el xRNT es el resguardo."},
+    {"Bloque": "RNT y sus rendimientos", "Concepto": "Farming",
+     "Qué es": ("Aportar RNT y USDT a un fondo común de liquidez a cambio de una parte de las "
+                "comisiones que genera ese fondo."),
+     "Equivalencia en el mundo tradicional": ("Aportar capital a un creador de mercado y cobrar parte "
+                                              "del diferencial.")},
+    {"Bloque": "RNT y sus rendimientos", "Concepto": "Claim de recompensas",
+     "Qué es": ("Cobro efectivo de lo devengado en staking o farming. Mientras no se reclama no hay "
+                "cobro, y es la fecha del claim la que fija el valor."),
+     "Equivalencia en el mundo tradicional": "Abono del cupón en cuenta."},
+    {"Bloque": "RNT y sus rendimientos", "Concepto": "Pool RNT/USDT",
+     "Qué es": ("Mercado automatizado de Reental: se compra y vende RNT contra un fondo común, no "
+                "contra otra persona. El importe en USDT de la propia operación es el precio exacto."),
+     "Equivalencia en el mundo tradicional": "Creador de mercado que siempre da contrapartida."},
+    {"Bloque": "RNT y sus rendimientos", "Concepto": "Airdrop",
+     "Qué es": "Entrega gratuita de tokens, normalmente con fines promocionales.",
+     "Equivalencia en el mundo tradicional": "Entrega gratuita de acciones o retribución en especie."},
+
+    # ── Préstamos (RNT Lend / Aave) ──────────────────────────────────────────
+    {"Bloque": "Préstamos (RNT Lend)", "Concepto": "RNT Lend / Aave",
+     "Qué es": ("Protocolo de préstamo automatizado donde el inversor deposita sus tokens como "
+                "garantía y toma prestada una stablecoin, sin intermediario humano."),
+     "Equivalencia en el mundo tradicional": "Póliza de crédito con pignoración de valores."},
+    {"Bloque": "Préstamos (RNT Lend)", "Concepto": "Colateral",
+     "Qué es": ("Tokens depositados en garantía. No se venden ni cambian de titular económico: "
+                "siguen generando renta para el inversor."),
+     "Equivalencia en el mundo tradicional": "Valores pignorados."},
+    {"Bloque": "Préstamos (RNT Lend)", "Concepto": "Deuda: principal e intereses",
+     "Qué es": ("El principal recibido y devuelto no es renta ni gasto; solo los intereses "
+                "devengados tienen efecto fiscal."),
+     "Equivalencia en el mundo tradicional": "Capital e intereses de un préstamo."},
+    {"Bloque": "Préstamos (RNT Lend)", "Concepto": "Health Factor y liquidación",
+     "Qué es": ("Indicador de cobertura de la garantía. Si baja de 1, el protocolo vende "
+                "automáticamente parte del colateral para cancelar deuda."),
+     "Equivalencia en el mundo tradicional": "Margen de garantía y ejecución automática."},
+
+    # ── Metodología de este informe ──────────────────────────────────────────
+    {"Bloque": "Metodología del informe", "Concepto": "FIFO",
+     "Qué es": ("Criterio de emparejamiento: al vender se considera transmitido el lote comprado "
+                "más antiguo que siga abierto."),
+     "Equivalencia en el mundo tradicional": "Método FIFO de valoración de carteras."},
+    {"Bloque": "Metodología del informe", "Concepto": "Fecha de corte",
+     "Qué es": ("Fecha a la que se congela la foto de patrimonio. Los movimientos posteriores no "
+                "entran en el informe."),
+     "Equivalencia en el mundo tradicional": "Cierre del ejercicio."},
+    {"Bloque": "Metodología del informe", "Concepto": "Estado: Calculada / Provisional / Pendiente",
+     "Qué es": ("Grado de certeza del importe: medido en la propia operación, estimado con el "
+                "precio de emisión, o a la espera de un dato que debe aportar el inversor."),
+     "Equivalencia en el mundo tradicional": "Dato definitivo, estimado o pendiente de justificante."},
+    {"Bloque": "Metodología del informe", "Concepto": "Tipo de cambio",
+     "Qué es": ("Cada importe se convierte a EUR con el cambio EUR/USD del día de la operación, "
+                "no con una media anual."),
+     "Equivalencia en el mundo tradicional": "Conversión al tipo del día de cada apunte."},
+]
+
+
 # Mapa de referencia: cómo interpretar fiscalmente cada tipo de operación.
 # Es agnóstico a la jurisdicción: describe la NATURALEZA del hecho, no el tipo
 # impositivo concreto (que depende del país del inversor).
@@ -3833,6 +3954,12 @@ FISCAL_GLOSARIO = [
     {"Operación": "Retirada de staking (unstaking)",
      "Naturaleza fiscal": "No sujeta (no es disposición)",
      "Tratamiento / nota": "Recuperar el RNT depositado y quemar el NFT xRNT no cambia la titularidad económica: no es venta. Las recompensas cobradas sí son renta y se registran aparte."},
+    {"Operación": "Cierre del proyecto (amortización de los tokens)",
+     "Naturaleza fiscal": "Disposición patrimonial (ganancia/pérdida)",
+     "Tratamiento / nota": "Reental vende el inmueble, devuelve el capital y los tokens se queman. Es una transmisión: importe recibido − coste de adquisición. Aparece como venta con destino «Protocolo liquidación proyecto»."},
+    {"Operación": "Airdrop / entrega gratuita de tokens",
+     "Naturaleza fiscal": "Adquisición sin coste (posible renta en especie)",
+     "Tratamiento / nota": "Según jurisdicción puede ser renta al valor de mercado del día de la entrega, valor que pasaría a ser el coste de adquisición. Si no se ha podido valorar, queda como «origen a determinar»."},
     {"Operación": "Recepción / Envío de RNT (no clasificado como recompensa)",
      "Naturaleza fiscal": "Origen a determinar",
      "Tratamiento / nota": "No se computa como renta automáticamente (puede ser compra, traspaso o airdrop). Revisar manualmente."},
@@ -3848,6 +3975,11 @@ def build_por_completar_rows() -> list:
         info = d["info"]
         pe = info.get("precio_emision") or 0.0
         for m in d["movements"]:
+            # El mismo corte que Plusvalías, Lotes abiertos y Saldos: sin esto,
+            # un informe cerrado a 31/12 arrastraba a esta hoja movimientos del
+            # ejercicio siguiente.
+            if use_date_filter and m["fecha"].date() > cutoff:
+                continue
             if m.get("es_transferencia_interna"):
                 continue
             tipo = m["tipo"]
@@ -3892,11 +4024,38 @@ def build_report_meta() -> list:
     ]
 
 
+def _escribir_glosario(writer) -> None:
+    """La hoja «Glosario», que son dos tablas: primero QUÉ es cada cosa y luego
+    CÓMO tributa. Va en segundo lugar, justo detrás de la portada, porque quien
+    abre el libro necesita el vocabulario antes que las cifras.
+
+    Se fijan anchos y ajuste de línea a mano: con el ancho por defecto las
+    definiciones se cortan en la primera columna y la hoja resulta ilegible."""
+    hoja = "Glosario"
+    conceptos = pd.DataFrame(GLOSARIO_CONCEPTOS)
+    conceptos.to_excel(writer, sheet_name=hoja, index=False, startrow=1)
+    fila_b = len(conceptos) + 4          # 1 título + cabecera + datos + hueco
+    pd.DataFrame(FISCAL_GLOSARIO).to_excel(writer, sheet_name=hoja, index=False,
+                                           startrow=fila_b)
+
+    ws = writer.sheets[hoja]
+    ws.cell(row=1, column=1).value = "A · QUÉ ES CADA COSA"
+    ws.cell(row=fila_b, column=1).value = "B · CÓMO TRIBUTA CADA OPERACIÓN"
+    negrita = Font(bold=True)
+    for fila in (1, fila_b):
+        ws.cell(row=fila, column=1).font = negrita
+    for col, ancho in zip("ABCD", (22, 34, 70, 55)):
+        ws.column_dimensions[col].width = ancho
+    for fila in ws.iter_rows(min_row=1, max_row=ws.max_row, max_col=4):
+        for celda in fila:
+            celda.alignment = Alignment(wrap_text=True, vertical="top")
+
+
 def build_aggregate_xlsx(agg: dict) -> bytes:
-    """Documento agregado en XLSX multi-hoja (Informe · Resumen · Rendimientos ·
-    RNT sin valorar · Saldos · Plusvalías · Lotes abiertos · Por completar ·
-    Glosario) para que el asesor fiscal trabaje con los totales sin hashes ni
-    contratos."""
+    """Documento agregado en XLSX multi-hoja (Informe · Glosario · Resumen ·
+    Rendimientos · RNT sin valorar · Saldos · Plusvalías · Lotes abiertos ·
+    Por completar) para que el asesor fiscal trabaje con los totales sin hashes
+    ni contratos."""
     buf = io.BytesIO()
     rend_tot_usd = sum(v["usd"] for v in agg["rend_tot"].values())
     rend_tot_eur = sum(v["eur"] for v in agg["rend_tot"].values())
@@ -3915,6 +4074,7 @@ def build_aggregate_xlsx(agg: dict) -> bytes:
 
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         pd.DataFrame(build_report_meta()).to_excel(writer, sheet_name="Informe", index=False)
+        _escribir_glosario(writer)
         pd.DataFrame(resumen).to_excel(writer, sheet_name="Resumen", index=False)
         rend = agg["rend_rows"] or [{"Año": "", "Concepto": "(sin rendimientos en el periodo)",
                                      "Valor USD": "", "Valor EUR": ""}]
@@ -3932,7 +4092,6 @@ def build_aggregate_xlsx(agg: dict) -> bytes:
 
         pc = build_por_completar_rows() or [{"Concepto": "(nada pendiente: todos los costes se determinaron on-chain)"}]
         pd.DataFrame(pc).to_excel(writer, sheet_name="Por completar", index=False)
-        pd.DataFrame(FISCAL_GLOSARIO).to_excel(writer, sheet_name="Glosario", index=False)
     return buf.getvalue()
 
 
@@ -4287,8 +4446,8 @@ _csv_filename_suffix = wallet[:8] if not es_multi_wallet else f"multi{len(wallet
 with st.spinner("Preparando resumen agregado (XLSX)…"):
     xlsx_agg = build_aggregate_xlsx(agg)
 st.caption(
-    "**Resumen agregado (XLSX)** — hojas Informe · Resumen · Rendimientos · RNT sin valorar · "
-    "Saldos · Plusvalías (FIFO) · Lotes abiertos · Por completar · Glosario, con los totales listos "
+    "**Resumen agregado (XLSX)** — hojas Informe · Glosario · Resumen · Rendimientos · RNT sin valorar · "
+    "Saldos · Plusvalías (FIFO) · Lotes abiertos · Por completar, con los totales listos "
     "para las casillas de los modelos y la lista de importes que el inversor debe completar "
     "(compras en FIAT, recompensas de RNT sin precio histórico disponible). Sin hashes ni contratos."
 )
@@ -4319,7 +4478,11 @@ st.download_button(
     use_container_width=True,
 )
 
-with st.expander("📖 Glosario — cómo interpretar fiscalmente cada operación"):
+with st.expander("📖 Glosario — qué es cada cosa y cómo se interpreta fiscalmente"):
+    st.markdown("**A · Qué es cada cosa**")
+    st.caption("Para quien lee el informe sin haber tratado antes con cripto ni con Reental.")
+    st.dataframe(pd.DataFrame(GLOSARIO_CONCEPTOS), hide_index=True, use_container_width=True)
+    st.markdown("**B · Cómo tributa cada operación**")
     st.dataframe(pd.DataFrame(FISCAL_GLOSARIO), hide_index=True, use_container_width=True)
     st.caption(
         "Este informe **no es asesoramiento fiscal**: describe la naturaleza de cada operación de forma "
