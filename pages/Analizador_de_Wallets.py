@@ -3503,6 +3503,45 @@ st.caption(
     "al tipo de cambio de la fecha de cada operación."
 )
 
+# ── Ejercicio fiscal ─────────────────────────────────────────────────────────
+#
+# Una declaración se presenta por un año concreto, no por el histórico entero:
+# sin esto, la hoja «Resumen» sumaba todos los ejercicios juntos y el total no
+# servía para rellenar ninguna casilla.
+#
+# El selector afecta SOLO a esta sección y a los documentos que genera; la
+# cartera de arriba sigue siendo la foto viva. Y no cuesta tiempo: lo caro es
+# traerse el histórico de la cadena, que ya está hecho y cacheado — acotar por
+# año solo quita trabajo.
+_años_datos = {m["fecha_str"][:4] for d in token_data.values() for m in d["movements"]}
+for _col in (dividends, aave_lender, aave_borrower, rnt_events):
+    _años_datos |= {ev["fecha_str"][:4] for ev in (_col or [])}
+_años_datos = sorted((a for a in _años_datos if a.isdigit()), reverse=True)
+
+_TODOS = "Todos (histórico completo)"
+_ejercicio_sel = st.selectbox(
+    "🗓️ Ejercicio fiscal del informe", [_TODOS] + _años_datos, index=0,
+    help=("Acota los documentos a un año natural: rendimientos, plusvalías y pendientes de ese "
+          "ejercicio, y la foto de patrimonio a 31 de diciembre. Los lotes de compra anteriores "
+          "se siguen usando para calcular el coste de adquisición, aunque no aparezcan como "
+          "operaciones del año. Solo afecta al informe, no a la cartera de arriba."),
+)
+ejercicio = int(_ejercicio_sel) if _ejercicio_sel != _TODOS else None
+
+# Periodo efectivo del informe. `fisc_corte` es también la fecha de la foto de
+# patrimonio; sin ejercicio se hereda el corte de la página (hoy, si no hay
+# filtro de fecha).
+fisc_inicio = date(ejercicio, 1, 1) if ejercicio else None
+fisc_corte  = date(ejercicio, 12, 31) if ejercicio else cutoff
+
+
+def _en_periodo(fecha_str: str) -> bool:
+    """¿Cae esta fecha (YYYY-MM-DD…) dentro del ejercicio del informe?"""
+    dia = fecha_str[:10]
+    if dia > fisc_corte.isoformat():
+        return False
+    return not fisc_inicio or dia >= fisc_inicio.isoformat()
+
 @st.cache_data(show_spinner=False, ttl=21600)
 def _rnt_price_history_usd() -> dict:
     """Precio diario de RNT en USD para los últimos 365 días, obtenido en UNA
@@ -3550,16 +3589,21 @@ def _income_items() -> tuple:
     `pendientes_rnt` para que se complete con el precio de mercado real."""
     items, pendientes_rnt = [], []
     for ev in (dividends or []):
+        if not _en_periodo(ev["fecha_str"]):
+            continue
         items.append((ev["fecha_str"], "Dividendos inmobiliarios", ev.get("total", 0.0)))
 
     for m in (aave_lender or []):
+        if not _en_periodo(m["fecha_str"]):
+            continue
         if m["tipo"] == "Retirada préstamo":
             interes = (m.get("stable_amount") or 0.0) - (m.get("cantidad_atoken") or 0.0)
             if interes > 0.001:
                 items.append((m["fecha_str"], "Intereses Aave (prestamista)", interes))
 
     claim_events = [ev for ev in (rnt_events or [])
-                    if ev["tipo"] in ("Claim rewards de staking", "Claim rewards de farming")]
+                    if ev["tipo"] in ("Claim rewards de staking", "Claim rewards de farming")
+                    and _en_periodo(ev["fecha_str"])]
     fechas = {ev["fecha_str"][:10] for ev in claim_events}
     precios = {d: get_rnt_price_on_date(d) for d in fechas}
     for ev in claim_events:
@@ -3602,7 +3646,11 @@ def build_capital_gains_fifo() -> dict:
         lots, lot_counter = deque(), 0
 
         for m in d["movements"]:
-            if use_date_filter and m["fecha"].date() > cutoff:
+            # Se recorre TODO el histórico anterior al corte, no solo el
+            # ejercicio: hace falta para conocer el coste de los lotes con los
+            # que se emparejan las ventas del año. El recorte por ejercicio se
+            # aplica después, sobre las ventas que se reportan.
+            if m["fecha"].date() > fisc_corte:
                 continue
             if m.get("es_transferencia_interna"):
                 continue
@@ -3700,6 +3748,8 @@ def build_capital_gains_fifo() -> dict:
                     "Fuente coste": lot["fuente"],
                 })
 
+    if fisc_inicio:
+        gains = [g for g in gains if _en_periodo(g["Fecha venta"])]
     calc_usd = sum(g["Ganancia/pérdida USD"] for g in gains
                    if g["Estado"] == "Calculada" and g["Ganancia/pérdida USD"] is not None)
     calc_eur = sum(g["Ganancia/pérdida EUR"] for g in gains
@@ -3739,12 +3789,16 @@ def build_aggregate_report() -> dict:
     ]
 
     # ── Saldos a fecha de corte (tokens en cartera) ───────────────────────────
-    snap_rate = get_eurusd_on_date(cutoff.strftime("%Y-%m-%d"))
+    snap_rate = get_eurusd_on_date(fisc_corte.strftime("%Y-%m-%d"))
     holdings_rows = []
     hold_usd, hold_eur = 0.0, 0.0
-    for c, d in activos.items():
+    # No se reutiliza `activos`: esa es la foto de la página, a la fecha de la
+    # página. El informe la necesita a SU corte (31/12 del ejercicio).
+    for c, d in token_data.items():
         info   = d["info"]
-        saldo  = d["balance_display"]
+        saldo  = round(balance_at_date(d["movements"], fisc_corte), 6)
+        if saldo <= 0.000001:
+            continue
         pe     = info.get("precio_emision") or 0.0
         divisa = info.get("divisa", "USD")
         val_native = saldo * pe
@@ -3767,7 +3821,9 @@ def build_aggregate_report() -> dict:
     # ── Deuda viva en Aave a la fecha de corte ────────────────────────────────
     prestado = devuelto = 0.0
     for m in (aave_borrower or []):
-        if use_date_filter and m["fecha"].date() > cutoff:
+        # Deuda VIVA al corte: se acumula desde el principio, no solo el
+        # ejercicio, porque un préstamo de 2023 sigue debiéndose en 2025.
+        if m["fecha"].date() > fisc_corte:
             continue
         if m["tipo"] == "Préstamo recibido":
             prestado += m.get("stable_amount") or 0.0
@@ -3975,10 +4031,7 @@ def build_por_completar_rows() -> list:
         info = d["info"]
         pe = info.get("precio_emision") or 0.0
         for m in d["movements"]:
-            # El mismo corte que Plusvalías, Lotes abiertos y Saldos: sin esto,
-            # un informe cerrado a 31/12 arrastraba a esta hoja movimientos del
-            # ejercicio siguiente.
-            if use_date_filter and m["fecha"].date() > cutoff:
+            if not _en_periodo(m["fecha_str"]):
                 continue
             if m.get("es_transferencia_interna"):
                 continue
@@ -4007,17 +4060,24 @@ def build_por_completar_rows() -> list:
 def build_report_meta() -> list:
     """Cabecera del informe: metadatos, alcance y disclaimer."""
     wallets_txt = "; ".join(f"{alias} ({addr[:8]}…{addr[-4:]})" for addr, alias in wallets_analyzed)
-    ejercicio = (f"Saldos y foto de patrimonio a fecha {cutoff.strftime('%Y-%m-%d')}"
-                 if use_date_filter else "Histórico completo (sin filtro de fecha)")
+    if fisc_inicio:
+        alcance = (f"Ejercicio {fisc_inicio.year}: operaciones del {fisc_inicio.strftime('%Y-%m-%d')} "
+                   f"al {fisc_corte.strftime('%Y-%m-%d')}, y foto de patrimonio a esa última fecha")
+    elif use_date_filter:
+        alcance = f"Histórico completo hasta {fisc_corte.strftime('%Y-%m-%d')}"
+    else:
+        alcance = "Histórico completo (todos los ejercicios)"
     return [
         {"Campo": "Informe", "Valor": "Reental — Informe fiscal agregado"},
         {"Campo": "Versión de la herramienta", "Valor": TOOL_VERSION},
         {"Campo": "Generado (UTC)", "Valor": datetime.utcnow().strftime("%Y-%m-%d %H:%M")},
         {"Campo": "Wallets analizadas", "Valor": wallets_txt},
-        {"Campo": "Alcance temporal", "Valor": ejercicio},
+        {"Campo": "Alcance temporal", "Valor": alcance},
         {"Campo": "Divisas", "Valor": "USD y EUR (tipo de cambio a la fecha de cada operación; USDT asumido a la par del USD)"},
         {"Campo": "Zona horaria", "Valor": "Todas las fechas en UTC"},
-        {"Campo": "Método de plusvalías", "Valor": "FIFO (primero en entrar, primero en salir) — ver hoja «Plusvalías»"},
+        {"Campo": "Método de plusvalías", "Valor": ("FIFO (primero en entrar, primero en salir) — ver hoja «Plusvalías». "
+                                                    "Los lotes de compra de ejercicios anteriores se usan para determinar "
+                                                    "el coste, aunque no figuren como operaciones del periodo.")},
         {"Campo": "Aviso", "Valor": ("Este informe NO es asesoramiento fiscal; las cifras deben validarse por un "
                                      "profesional. Los importes marcados como estimados o pendientes (p.ej. compras "
                                      "en FIAT) deben completarse con los datos del inversor antes de presentar impuestos.")},
@@ -4332,6 +4392,10 @@ def build_fiscal_csv() -> bytes:
             "Wallet/Alias":     m.get("wallet_alias", ""),
         })
 
+    # Recorte por ejercicio antes de valorar: así tampoco se piden tipos de
+    # cambio de fechas que no van a salir en el documento.
+    rows = [r for r in rows if _en_periodo(r.get("Fecha UTC", ""))]
+
     # Enriquecer cada fila con su valor en EUR al tipo de cambio de la fecha.
     # get_eurusd_on_date está cacheado, así que fechas repetidas no repiten API.
     for r in rows:
@@ -4392,7 +4456,7 @@ if agg["rend_pendiente_rnt"]:
     )
 
 st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-st.caption("Patrimonio a la fecha de corte (para modelos de bienes/patrimonio):")
+st.caption(f"Patrimonio a {fisc_corte.strftime('%d/%m/%Y')} (para modelos de bienes/patrimonio):")
 _scols = st.columns(3)
 _scols[0].markdown(kpi_card("💰", "Total rendimientos",
                             f"${_rend_total_usd:,.2f}", sublabel=f"€{_rend_total_eur:,.2f}"),
@@ -4481,7 +4545,24 @@ def _bloque_descargas(xlsx_agg: bytes, csv_fiscal: bytes, sufijo: str, multi: bo
     )
 
 
-_csv_filename_suffix = wallet[:8] if not es_multi_wallet else f"multi{len(wallets_analyzed)}_{wallet[:8]}"
+def _slug(txt: str) -> str:
+    """El alias, apto para un nombre de fichero: sin acentos, sin espacios y sin
+    nada que un sistema de ficheros pueda no querer."""
+    plano = unicodedata.normalize("NFKD", txt or "").encode("ascii", "ignore").decode()
+    limpio = "".join(c if c.isalnum() else "_" for c in plano)
+    while "__" in limpio:
+        limpio = limpio.replace("__", "_")
+    return limpio.strip("_")[:40]
+
+
+# Nombre del fichero: alias primero, que es lo que el usuario reconoce en su
+# carpeta de descargas; después el ejercicio y, al final, el trozo de dirección
+# que ya se usaba para distinguir wallets sin alias.
+_partes = [_slug(wallets_analyzed[0][1]) if wallets_analyzed else "",
+           str(ejercicio) if ejercicio else "historico",
+           f"multi{len(wallets_analyzed)}" if es_multi_wallet else "",
+           wallet[:8]]
+_csv_filename_suffix = "_".join(p for p in _partes if p)
 
 with st.spinner("Preparando documentos…"):
     xlsx_agg   = build_aggregate_xlsx(agg)
