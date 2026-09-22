@@ -246,6 +246,7 @@ def load_tokens() -> dict:
                         tokens[addr] = {
                             "name": name, "symbol": project_id, "label": label, "address": addr,
                             "divisa": divisa, "precio_emision": precio_emision,
+                            "emision":               _col_maestro(row, "Emisión de Tokenización", 17),
                             "tipologia_dividendo":   _col_maestro(row, "Tipología de Dividendo", 16),
                             "ubicacion":             _col_maestro(row, "Ubicación", 14),
                             "tipologia_explotacion": _col_maestro(row, "Tipología de explotación", 15),
@@ -3852,7 +3853,7 @@ def build_aggregate_report() -> dict:
 
     # ── Saldos a fecha de corte (tokens en cartera) ───────────────────────────
     cierre = fisc_corte.strftime("%Y-%m-%d")
-    eurusd = get_eurusd_on_date(cierre)          # para proyectos emitidos en euros
+    eurusd = get_eurusd_on_date(cierre)          # para proyectos denominados en euros
     tipo_div = tipo_de_cambio(cierre, DIVISA)    # a la divisa del informe
     holdings_rows = []
     hold_usd, hold_eur = 0.0, 0.0
@@ -3926,6 +3927,12 @@ GLOSARIO_CONCEPTOS = [
                 "propietaria del inmueble, o a los derechos de un préstamo participativo en España."),
      "Equivalencia en el mundo tradicional": ("Participación en una sociedad patrimonial o en un préstamo, "
                                               "con la titularidad anotada en blockchain en lugar de en un libro de socios.")},
+    {"Bloque": "El activo", "Concepto": "Emisión de tokenización",
+     "Qué es": ("Bajo qué emisión se tokenizó el inmueble: «Emisión España» o «Emisión USA». "
+                "Es lo que determina la estructura jurídica que hay detrás del token, y NO "
+                "coincide con la moneda del proyecto: hay inmuebles de la emisión estadounidense "
+                "denominados en euros."),
+     "Equivalencia en el mundo tradicional": "Jurisdicción bajo la que se constituyó la sociedad o el préstamo."},
     {"Bloque": "El activo", "Concepto": "Precio de emisión",
      "Qué es": ("Precio unitario al que Reental coloca el token en la emisión inicial: normalmente "
                 "100 € o 100 $ por token, según la divisa del proyecto."),
@@ -4238,7 +4245,8 @@ def build_patrimonio_rows() -> list:
         valor_slp = pool.get("valor_lp")
 
         def fila(bloque, concepto, detalle="", cantidad=None, unidad="",
-                 precio=None, valor_usd=None, emision="", omitir_cero=False):
+                 precio=None, valor_usd=None, emision="", divisa_proy="",
+                 omitir_cero=False):
             # Una posición que no se tenía ese año no se lista: en un informe de
             # varios ejercicios, las filas a cero triplican la hoja y esconden
             # las que sí cuentan.
@@ -4247,7 +4255,7 @@ def build_patrimonio_rows() -> list:
             valor_div = valor_usd * tipo_div if (valor_usd is not None and tipo_div) else None
             filas.append({
                 "Fecha": dia, "Bloque": bloque, "Concepto": concepto, "Detalle": detalle,
-                "Emisión": emision,
+                "Emisión de tokenización": emision, "Divisa del proyecto": divisa_proy,
                 "Cantidad": round(cantidad, 8) if cantidad is not None else None,
                 "Unidad": unidad,
                 "Precio unitario USD": round(precio, 6) if precio is not None else None,
@@ -4267,13 +4275,15 @@ def build_patrimonio_rows() -> list:
             proyectos += 1
             pe = info.get("precio_emision") or 0.0
             emitido_en_eur = info.get("divisa") == "EUR"
-            # La divisa de emisión dice desde dónde se tokenizó el inmueble:
-            # euros para las emisiones españolas, dólares para las de EE. UU.
-            emision = "España (EUR)" if emitido_en_eur else "EE. UU. (USD)"
+            # Dos cosas distintas que conviene no confundir: bajo qué emisión se
+            # tokenizó el inmueble (columna «Emisión de Tokenización» del
+            # maestro) y en qué moneda está denominado. No coinciden: hay
+            # proyectos de la emisión estadounidense denominados en euros.
             precio_usd = (pe * eurusd if eurusd else None) if emitido_en_eur else pe
             fila("Inmuebles tokenizados", info["label"], info.get("name", ""),
                  saldo, "tokens", precio_usd,
-                 saldo * precio_usd if precio_usd else None, emision)
+                 saldo * precio_usd if precio_usd else None,
+                 info.get("emision", "") or "—", info.get("divisa", ""))
         if not proyectos:
             fila("Inmuebles tokenizados", "(sin tokens de inmuebles a esta fecha)")
 
@@ -4319,7 +4329,7 @@ def build_patrimonio_rows() -> list:
                  "referencia del BCE", None, "", tipo_div, None)
         if eurusd:
             fila("Referencias", "Tipo de cambio a cierre (USD por 1 EUR)",
-                 "para los proyectos emitidos en España", None, "", eurusd, None)
+                 "para los proyectos denominados en euros", None, "", eurusd, None)
     return filas
 
 
