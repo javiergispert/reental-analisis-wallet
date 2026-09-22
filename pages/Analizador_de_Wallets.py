@@ -22,6 +22,7 @@ import aave_lend
 import aave_snapshot as _snap
 import coste_prestamo as _coste
 import pool_rnt as _pool
+import divisas as _fx
 import recarga as _recarga
 # Streamlit reejecuta el script pero NO reimporta lo que ya está en sys.modules:
 # tras un despliegue esta página puede convivir con una versión anterior de sus
@@ -1532,68 +1533,58 @@ def get_rnt_price_usdt() -> float:
         return 0.0
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
+# Los tipos de cambio salen del Banco Central Europeo (vía Frankfurter), no de
+# CoinGecko: su plan gratuito solo cubre 365 días y, para una fecha anterior,
+# lo que había aplicaba el tipo de HOY sin avisar. En un informe fiscal eso es
+# inaceptable: un dividendo de 2023 no se convierte al cambio de 2026.
+FX_DESDE = "2020-01-01"
+
+
 @st.cache_data(show_spinner=False, ttl=21600)
-def _eurusd_history() -> dict:
-    """Tipo de cambio EUR/USD diario de los últimos 365 días, en UNA sola
-    llamada (`market_chart/range` de Tether en EUR, invertido) en vez de una
-    petición por fecha — el mismo problema de rate-limit que en el precio de
-    RNT: consultar fecha a fecha agota el límite del plan gratuito de
-    CoinGecko a partir de la 6ª-7ª llamada seguida. Devuelve {"YYYY-MM-DD": tipo}."""
-    try:
-        hoy = datetime.utcnow()
-        desde = hoy - timedelta(days=364)
-        r = requests.get(
-            "https://api.coingecko.com/api/v3/coins/tether/market_chart/range",
-            params={"vs_currency": "eur", "from": int(desde.timestamp()), "to": int(hoy.timestamp())},
-            timeout=20,
-        )
-        r.raise_for_status()
-        # Tether (USDT) en EUR nos da 1/EURUSD → invertimos
-        return {
-            datetime.utcfromtimestamp(ts / 1000).strftime("%Y-%m-%d"): round(1.0 / float(p), 4)
-            for ts, p in r.json().get("prices", []) if p
-        }
-    except Exception:
-        return {}
+def _tabla_fx(divisa: str, _hasta: str) -> dict:
+    """Serie diaria completa de una divisa, en una sola llamada. `_hasta` es
+    la fecha de hoy: está en la firma para que la caché caduque cada día."""
+    return _fx.serie(divisa, FX_DESDE, _hasta)
 
 
-def get_eurusd_on_date(date_str: str) -> float:
-    """Tipo de cambio EUR/USD (USD por 1 EUR) para una fecha dada (YYYY-MM-DD).
-    Si la fecha excede la ventana de 365 días de CoinGecko o el histórico no se
-    pudo obtener, usa como último recurso el tipo de cambio ACTUAL vía
-    Frankfurter/BCE — una aproximación, no el tipo exacto de esa fecha."""
-    rate = _eurusd_history().get(date_str[:10])
-    if rate:
-        return rate
-    try:
-        r2 = requests.get(
-            "https://api.frankfurter.app/latest",
-            params={"from": "EUR", "to": "USD"},
-            timeout=10,
-        )
-        return float(r2.json()["rates"]["USD"])
-    except Exception:
-        return None
+def _fx_hoy() -> str:
+    return date.today().isoformat()
+
+
+def tipo_de_cambio(date_str: str, divisa: str):
+    """Unidades de `divisa` por 1 USD en esa fecha (o el último día hábil
+    anterior). None si no hay referencia."""
+    if divisa == "USD":
+        return 1.0
+    return _fx.tipo_en(date_str, _tabla_fx(divisa, _fx_hoy()))
+
+
+def get_eurusd_on_date(date_str: str):
+    """USD por 1 EUR. Es el convenio que usa la valoración de los proyectos
+    emitidos en euros —una propiedad del activo—, distinto de la divisa en la
+    que se pide el informe."""
+    t = tipo_de_cambio(date_str, "EUR")
+    return round(1.0 / t, 6) if t else None
 
 
 def fiat_values(valor_usd, date_str):
-    """Convierte un importe en USD a (usd, eur, tipo_eur_usd) a la fecha dada.
+    """Convierte un importe en USD a (usd, importe en la divisa del informe,
+    tipo) a la fecha dada.
 
-    `date_str` puede ser 'YYYY-MM-DD' o 'YYYY-MM-DD HH:MM' (se recorta a los 10
-    primeros caracteres). El tipo devuelto es USD por 1 EUR (p.ej. 1.1422), así
-    que EUR = USD / tipo. Si no hay importe o no se obtiene el tipo, el EUR y el
-    tipo se devuelven como cadena vacía para no falsear el informe."""
+    El tipo son unidades de la divisa por 1 USD, así que convertir es
+    multiplicar. Si no hay importe o no hay referencia de cambio para esa
+    fecha, la conversión y el tipo se devuelven en blanco: una celda vacía es
+    honesta, un número aproximado no."""
     if valor_usd is None or valor_usd == "":
         return valor_usd, "", ""
     try:
         usd = float(valor_usd)
     except (TypeError, ValueError):
         return valor_usd, "", ""
-    rate = get_eurusd_on_date(date_str[:10]) if date_str else None
-    if not rate:
+    tipo = tipo_de_cambio(date_str[:10], DIVISA) if date_str else None
+    if not tipo:
         return round(usd, 2), "", ""
-    return round(usd, 2), round(usd / rate, 2), rate
+    return round(usd, 2), round(usd * tipo, 2), tipo
 
 
 # ── UI ───────────────────────────────────────────────────────────────────────
@@ -3500,8 +3491,8 @@ st.subheader("📄 Informe fiscal")
 st.caption(
     "Dos documentos complementarios para tu asesor fiscal: un **resumen agregado** con los "
     "totales por naturaleza fiscal (para rellenar las casillas de los modelos) y un **CSV "
-    "cronológico y granular** como respaldo. Todos los importes se valoran en USD y en EUR "
-    "al tipo de cambio de la fecha de cada operación."
+    "cronológico y granular** como respaldo. Todos los importes se valoran en USD y en la divisa "
+    "que elijas, al tipo de cambio de la fecha de cada operación."
 )
 
 # ── Ejercicio fiscal ─────────────────────────────────────────────────────────
@@ -3528,6 +3519,24 @@ _ejercicio_sel = st.selectbox(
           "operaciones del año. Solo afecta al informe, no a la cartera de arriba."),
 )
 ejercicio = int(_ejercicio_sel) if _ejercicio_sel != _TODOS else None
+
+# Divisa del informe. Todo se mide en USD por dentro —las operaciones ocurren
+# contra stablecoins— y se convierte a la salida, para que cada inversor
+# presente en la moneda de su jurisdicción sin recalcular nada.
+_ORDEN = ["EUR", "USD", "GBP", "CHF", "MXN", "BRL"]
+_RESTO = sorted(d for d in _fx.MONEDAS if d not in _ORDEN)
+DIVISA = st.selectbox(
+    "💱 Divisa del informe", _ORDEN + _RESTO, index=0,
+    format_func=lambda d: f"{d} — {_fx.MONEDAS[d]}",
+    help=("Los importes se convierten con la referencia diaria del Banco Central Europeo "
+          "de la fecha de cada operación (el último día hábil anterior si cayó en festivo). "
+          "El USD siempre se muestra, porque es la divisa en la que ocurren las operaciones."),
+)
+
+
+def _imp(valor) -> str:
+    """Un importe en la divisa del informe, o una raya si no hay conversión."""
+    return f"{valor:,.2f} {DIVISA}" if valor not in ("", None) else "—"
 
 # Periodo efectivo del informe. `fisc_corte` es también la fecha de la foto de
 # patrimonio; sin ejercicio se hereda el corte de la página (hoy, si no hay
@@ -3758,10 +3767,10 @@ def build_capital_gains_fifo() -> dict:
                         "Token": label, "id_lote": lot["id"],
                         "Fecha compra": lot["fecha"], "Fecha venta": fecha_venta,
                         "Cantidad": round(take, 6),
-                        "Coste adq. USD": round(coste_usd, 2), "Coste adq. EUR": coste_eur,
+                        "Coste adq. USD": round(coste_usd, 2), f"Coste adq. {DIVISA}": coste_eur,
                         "Transmisión USD": round(trans_usd, 2) if proceeds_known else None,
-                        "Transmisión EUR": trans_eur,
-                        "Ganancia/pérdida USD": gan_usd, "Ganancia/pérdida EUR": gan_eur,
+                        f"Transmisión {DIVISA}": trans_eur,
+                        "Ganancia/pérdida USD": gan_usd, f"Ganancia/pérdida {DIVISA}": gan_eur,
                         "Fuente coste": lot["fuente"], "Estado": estado,
                     })
                     lot["qty"] -= take
@@ -3781,10 +3790,10 @@ def build_capital_gains_fifo() -> dict:
                         "Token": label, "id_lote": "(sin lote)",
                         "Fecha compra": None, "Fecha venta": fecha_venta,
                         "Cantidad": round(qty_sell, 6),
-                        "Coste adq. USD": None, "Coste adq. EUR": None,
+                        "Coste adq. USD": None, f"Coste adq. {DIVISA}": None,
                         "Transmisión USD": round(trans_usd, 2) if proceeds_known else None,
-                        "Transmisión EUR": trans_eur,
-                        "Ganancia/pérdida USD": None, "Ganancia/pérdida EUR": None,
+                        f"Transmisión {DIVISA}": trans_eur,
+                        "Ganancia/pérdida USD": None, f"Ganancia/pérdida {DIVISA}": None,
                         "Fuente coste": "N/D", "Estado": "PENDIENTE — sin coste de adquisición registrado",
                     })
                     qty_sell = 0.0
@@ -3797,7 +3806,7 @@ def build_capital_gains_fifo() -> dict:
                     "Token": label, "id_lote": lot["id"], "Fecha compra": lot["fecha"],
                     "Cantidad": round(lot["qty"], 6),
                     "Coste USD": round(coste_usd, 2),
-                    "Coste EUR": coste_eur if coste_eur != "" else None,
+                    f"Coste {DIVISA}": coste_eur if coste_eur != "" else None,
                     "Fuente coste": lot["fuente"],
                 })
 
@@ -3805,15 +3814,15 @@ def build_capital_gains_fifo() -> dict:
         gains = [g for g in gains if _en_periodo(g["Fecha venta"])]
     calc_usd = sum(g["Ganancia/pérdida USD"] for g in gains
                    if g["Estado"] == "Calculada" and g["Ganancia/pérdida USD"] is not None)
-    calc_eur = sum(g["Ganancia/pérdida EUR"] for g in gains
-                   if g["Estado"] == "Calculada" and g["Ganancia/pérdida EUR"] is not None)
+    calc_div = sum(g[f"Ganancia/pérdida {DIVISA}"] for g in gains
+                   if g["Estado"] == "Calculada" and g[f"Ganancia/pérdida {DIVISA}"] is not None)
     prov_n = sum(1 for g in gains if g["Estado"].startswith("Provisional"))
     pend_n = sum(1 for g in gains if g["Estado"].startswith("PENDIENTE"))
     gains.sort(key=lambda g: g["Fecha venta"])
 
     return {
         "gains": gains, "lots_abiertos": sorted(lots_abiertos, key=lambda r: r["Token"]),
-        "kpi": {"calc_usd": round(calc_usd, 2), "calc_eur": round(calc_eur, 2),
+        "kpi": {"calc_usd": round(calc_usd, 2), "calc_div": round(calc_div, 2),
                 "prov_n": prov_n, "pend_n": pend_n},
     }
 
@@ -3822,27 +3831,29 @@ def build_aggregate_report() -> dict:
     """Totales agregados por naturaleza fiscal, en USD y EUR (convertidos a la
     fecha de cada operación), más la foto de saldos y deuda a la fecha de corte."""
     # ── Rendimientos por (año, concepto) ──────────────────────────────────────
-    acc = defaultdict(lambda: {"usd": 0.0, "eur": 0.0})
-    tot = defaultdict(lambda: {"usd": 0.0, "eur": 0.0})
+    acc = defaultdict(lambda: {"usd": 0.0, "div": 0.0})
+    tot = defaultdict(lambda: {"usd": 0.0, "div": 0.0})
     income_items, sin_valorar = _income_items()
     for fecha_str, concepto, usd in income_items:
         if not usd:
             continue
         año = fecha_str[:4]
-        _, eur, _ = fiat_values(usd, fecha_str)
+        _, conv, _ = fiat_values(usd, fecha_str)
         for bucket in (acc[(año, concepto)], tot[concepto]):
             bucket["usd"] += usd
-            if eur != "":
-                bucket["eur"] += eur
+            if conv != "":
+                bucket["div"] += conv
 
     rend_rows = [
         {"Año": año, "Concepto": concepto,
-         "Valor USD": round(v["usd"], 2), "Valor EUR": round(v["eur"], 2)}
+         "Valor USD": round(v["usd"], 2), f"Valor {DIVISA}": round(v["div"], 2)}
         for (año, concepto), v in sorted(acc.items())
     ]
 
     # ── Saldos a fecha de corte (tokens en cartera) ───────────────────────────
-    snap_rate = get_eurusd_on_date(fisc_corte.strftime("%Y-%m-%d"))
+    cierre = fisc_corte.strftime("%Y-%m-%d")
+    eurusd = get_eurusd_on_date(cierre)          # para proyectos emitidos en euros
+    tipo_div = tipo_de_cambio(cierre, DIVISA)    # a la divisa del informe
     holdings_rows = []
     hold_usd, hold_eur = 0.0, 0.0
     # No se reutiliza `activos`: esa es la foto de la página, a la fecha de la
@@ -3855,21 +3866,23 @@ def build_aggregate_report() -> dict:
         pe     = info.get("precio_emision") or 0.0
         divisa = info.get("divisa", "USD")
         val_native = saldo * pe
+        # El precio de emisión está en la divisa del PROYECTO (euros si se
+        # tokenizó desde España, dólares si desde EE. UU.). Primero se lleva
+        # todo a USD, que es la unidad interna, y de ahí a la del informe.
         if divisa == "EUR":
-            v_eur = val_native
-            v_usd = val_native * snap_rate if snap_rate else ""
+            v_usd = val_native * eurusd if eurusd else ""
         else:
             v_usd = val_native
-            v_eur = val_native / snap_rate if snap_rate else ""
+        v_div = v_usd * tipo_div if (v_usd != "" and tipo_div) else ""
         holdings_rows.append({
             "Token": info["label"], "Nombre": info["name"],
             "Saldo": round(saldo, 6), "Divisa emisión": divisa,
             "Precio emisión": pe,
             "Valor USD": round(v_usd, 2) if v_usd != "" else None,
-            "Valor EUR": round(v_eur, 2) if v_eur != "" else None,
+            f"Valor {DIVISA}": round(v_div, 2) if v_div != "" else None,
         })
         hold_usd += v_usd if v_usd != "" else 0.0
-        hold_eur += v_eur if v_eur != "" else 0.0
+        hold_eur += v_div if v_div != "" else 0.0
 
     # ── Deuda viva en Aave a la fecha de corte ────────────────────────────────
     prestado = devuelto = 0.0
@@ -3883,17 +3896,17 @@ def build_aggregate_report() -> dict:
         elif m["tipo"] == "Pago de deuda":
             devuelto += m.get("stable_amount") or 0.0
     deuda_usd = max(0.0, prestado - devuelto)
-    deuda_eur = deuda_usd / snap_rate if snap_rate else ""
+    deuda_div = deuda_usd * tipo_div if tipo_div else ""
 
     return {
         "rend_rows": rend_rows,
         "rend_tot": dict(tot),
         "rend_sin_valorar": sorted(sin_valorar, key=lambda r: r["Fecha UTC"]),
         "holdings_rows": sorted(holdings_rows, key=lambda r: r["Token"]),
-        "holdings_tot": {"usd": round(hold_usd, 2), "eur": round(hold_eur, 2)},
+        "holdings_tot": {"usd": round(hold_usd, 2), "div": round(hold_eur, 2)},
         "deuda_usd": round(deuda_usd, 2),
-        "deuda_eur": round(deuda_eur, 2) if deuda_eur != "" else "",
-        "snap_rate": snap_rate,
+        "deuda_div": round(deuda_div, 2) if deuda_div != "" else "",
+        "tipo_div": tipo_div,
         "capital_gains": build_capital_gains_fifo(),
     }
 
@@ -4014,8 +4027,9 @@ GLOSARIO_CONCEPTOS = [
                 "precio de emisión, o a la espera de un dato que debe aportar el inversor."),
      "Equivalencia en el mundo tradicional": "Dato definitivo, estimado o pendiente de justificante."},
     {"Bloque": "Metodología del informe", "Concepto": "Tipo de cambio",
-     "Qué es": ("Cada importe se convierte a EUR con el cambio EUR/USD del día de la operación, "
-                "no con una media anual."),
+     "Qué es": ("Cada importe se convierte con la referencia del Banco Central Europeo del día de "
+                "la operación, no con una media anual. Si ese día no cotizó, se usa el último día "
+                "hábil anterior."),
      "Equivalencia en el mundo tradicional": "Conversión al tipo del día de cada apunte."},
 ]
 
@@ -4126,7 +4140,10 @@ def build_report_meta() -> list:
         {"Campo": "Generado (UTC)", "Valor": datetime.utcnow().strftime("%Y-%m-%d %H:%M")},
         {"Campo": "Wallets analizadas", "Valor": wallets_txt},
         {"Campo": "Alcance temporal", "Valor": alcance},
-        {"Campo": "Divisas", "Valor": "USD y EUR (tipo de cambio a la fecha de cada operación; USDT asumido a la par del USD)"},
+        {"Campo": "Divisas", "Valor": (f"USD y {DIVISA} ({_fx.MONEDAS.get(DIVISA, DIVISA)}). Conversión con la "
+                                       "referencia diaria del Banco Central Europeo de la fecha de cada operación "
+                                       "—el último día hábil anterior si cayó en festivo—. USDT, USDC y DAI se "
+                                       "asumen a la par del USD.")},
         {"Campo": "Zona horaria", "Valor": "Todas las fechas en UTC"},
         {"Campo": "Método de plusvalías", "Valor": ("FIFO (primero en entrar, primero en salir) — ver hoja «Plusvalías». "
                                                     "Los lotes de compra de ejercicios anteriores se usan para determinar "
@@ -4171,18 +4188,20 @@ def build_aggregate_xlsx(agg: dict) -> bytes:
     ni contratos."""
     buf = io.BytesIO()
     rend_tot_usd = sum(v["usd"] for v in agg["rend_tot"].values())
-    rend_tot_eur = sum(v["eur"] for v in agg["rend_tot"].values())
+    rend_tot_div = sum(v["div"] for v in agg["rend_tot"].values())
 
     resumen = [
-        {"Bloque": f"Rendimientos — {k}", "Valor USD": round(v["usd"], 2), "Valor EUR": round(v["eur"], 2)}
+        {"Bloque": f"Rendimientos — {k}", "Valor USD": round(v["usd"], 2),
+         f"Valor {DIVISA}": round(v["div"], 2)}
         for k, v in agg["rend_tot"].items()
     ]
     resumen += [
-        {"Bloque": "Rendimientos — TOTAL", "Valor USD": round(rend_tot_usd, 2), "Valor EUR": round(rend_tot_eur, 2)},
+        {"Bloque": "Rendimientos — TOTAL", "Valor USD": round(rend_tot_usd, 2),
+         f"Valor {DIVISA}": round(rend_tot_div, 2)},
         {"Bloque": "Patrimonio — Valor tokens en cartera",
-         "Valor USD": agg["holdings_tot"]["usd"], "Valor EUR": agg["holdings_tot"]["eur"]},
+         "Valor USD": agg["holdings_tot"]["usd"], f"Valor {DIVISA}": agg["holdings_tot"]["div"]},
         {"Bloque": "Patrimonio — Deuda viva en Aave",
-         "Valor USD": agg["deuda_usd"], "Valor EUR": agg["deuda_eur"]},
+         "Valor USD": agg["deuda_usd"], f"Valor {DIVISA}": agg["deuda_div"]},
     ]
 
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -4190,7 +4209,7 @@ def build_aggregate_xlsx(agg: dict) -> bytes:
         _escribir_glosario(writer)
         pd.DataFrame(resumen).to_excel(writer, sheet_name="Resumen", index=False)
         rend = agg["rend_rows"] or [{"Año": "", "Concepto": "(sin rendimientos en el periodo)",
-                                     "Valor USD": "", "Valor EUR": ""}]
+                                     "Valor USD": "", f"Valor {DIVISA}": ""}]
         pd.DataFrame(rend).to_excel(writer, sheet_name="Rendimientos", index=False)
         pend = agg["rend_sin_valorar"] or [{"Concepto": "(todas las recompensas se han podido valorar)"}]
         pd.DataFrame(pend).to_excel(writer, sheet_name="Rendim. sin valorar", index=False)
@@ -4449,24 +4468,26 @@ def build_fiscal_csv() -> bytes:
     # cambio de fechas que no van a salir en el documento.
     rows = [r for r in rows if _en_periodo(r.get("Fecha UTC", ""))]
 
-    # Enriquecer cada fila con su valor en EUR al tipo de cambio de la fecha.
-    # get_eurusd_on_date está cacheado, así que fechas repetidas no repiten API.
+    # Enriquecer cada fila con su valor en la divisa del informe al tipo de la
+    # fecha. La serie de tipos se descarga entera una vez, así que repetir
+    # fechas no cuesta nada.
+    col_val, col_tipo = f"Valor {DIVISA}", f"{DIVISA} por 1 USD"
     for r in rows:
-        _, eur, rate = fiat_values(r.get("Valor USD", ""), r.get("Fecha UTC", ""))
-        r["Valor EUR"]    = eur
-        r["Tipo EUR/USD"] = rate
+        _, conv, tipo = fiat_values(r.get("Valor USD", ""), r.get("Fecha UTC", ""))
+        r[col_val]  = conv
+        r[col_tipo] = tipo
 
     # Ordenar todo cronológicamente
     rows.sort(key=lambda r: r["Fecha UTC"])
     df = pd.DataFrame(rows)
 
-    # Colocar las columnas EUR justo detrás de "Valor USD"
+    # Colocar la conversión justo detrás de "Valor USD"
     cols = list(df.columns)
-    if "Valor USD" in cols and "Valor EUR" in cols:
-        for c in ("Valor EUR", "Tipo EUR/USD"):
+    if "Valor USD" in cols and col_val in cols:
+        for c in (col_val, col_tipo):
             cols.remove(c)
         i = cols.index("Valor USD") + 1
-        cols[i:i] = ["Valor EUR", "Tipo EUR/USD"]
+        cols[i:i] = [col_val, col_tipo]
         df = df[cols]
 
     return df.to_csv(index=False).encode("utf-8")
@@ -4486,16 +4507,16 @@ _iconos = {
     "Staking (recompensas)": "🔒", "Farming (recompensas)": "🌾",
 }
 _rend_total_usd = sum(v["usd"] for v in agg["rend_tot"].values())
-_rend_total_eur = sum(v["eur"] for v in agg["rend_tot"].values())
+_rend_total_div = sum(v["div"] for v in agg["rend_tot"].values())
 
 st.caption("Rendimientos (rentas del ejercicio), por naturaleza fiscal:")
 _rcols = st.columns(4)
 for _i, _concepto in enumerate(_orden_conceptos):
-    _v = agg["rend_tot"].get(_concepto, {"usd": 0.0, "eur": 0.0})
+    _v = agg["rend_tot"].get(_concepto, {"usd": 0.0, "div": 0.0})
     _rcols[_i].markdown(kpi_card(
         _iconos[_concepto], _concepto,
         f"${_v['usd']:,.2f}",
-        sublabel=f"€{_v['eur']:,.2f}",
+        sublabel=_imp(_v["div"]),
     ), unsafe_allow_html=True)
 
 if agg["rend_sin_valorar"]:
@@ -4514,14 +4535,14 @@ st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 st.caption(f"Patrimonio a {fisc_corte.strftime('%d/%m/%Y')} (para modelos de bienes/patrimonio):")
 _scols = st.columns(3)
 _scols[0].markdown(kpi_card("💰", "Total rendimientos",
-                            f"${_rend_total_usd:,.2f}", sublabel=f"€{_rend_total_eur:,.2f}"),
+                            f"${_rend_total_usd:,.2f}", sublabel=_imp(_rend_total_div)),
                    unsafe_allow_html=True)
 _scols[1].markdown(kpi_card("🏘️", "Valor tokens en cartera",
-                            f"${agg['holdings_tot']['usd']:,.2f}", sublabel=f"€{agg['holdings_tot']['eur']:,.2f}"),
+                            f"${agg['holdings_tot']['usd']:,.2f}", sublabel=_imp(agg["holdings_tot"]["div"])),
                    unsafe_allow_html=True)
-_deuda_eur_lbl = f"€{agg['deuda_eur']:,.2f}" if agg["deuda_eur"] != "" else "—"
+_deuda_div_lbl = _imp(agg["deuda_div"])
 _scols[2].markdown(kpi_card("⚠️", "Deuda viva en Aave",
-                            f"${agg['deuda_usd']:,.2f}", sublabel=_deuda_eur_lbl,
+                            f"${agg['deuda_usd']:,.2f}", sublabel=_deuda_div_lbl,
                             value_color="#dc2626" if agg["deuda_usd"] > 0.01 else "#16a34a"),
                    unsafe_allow_html=True)
 
@@ -4530,7 +4551,7 @@ st.caption("Ganancias patrimoniales por ventas de tokens (método FIFO):")
 _cg = agg["capital_gains"]
 _gcols = st.columns(3)
 _gcols[0].markdown(kpi_card("📈", "Ganancia patrimonial calculable",
-                            f"${_cg['kpi']['calc_usd']:,.2f}", sublabel=f"€{_cg['kpi']['calc_eur']:,.2f}",
+                            f"${_cg['kpi']['calc_usd']:,.2f}", sublabel=_imp(_cg["kpi"]["calc_div"]),
                             value_color="#16a34a" if _cg['kpi']['calc_usd'] >= 0 else "#dc2626"),
                    unsafe_allow_html=True)
 _gcols[1].markdown(kpi_card("🟠", "Operaciones provisionales",
