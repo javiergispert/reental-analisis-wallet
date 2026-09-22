@@ -4014,6 +4014,17 @@ GLOSARIO_CONCEPTOS = [
      "Equivalencia en el mundo tradicional": "Margen de garantía y ejecución automática."},
 
     # ── Metodología de este informe ──────────────────────────────────────────
+    {"Bloque": "Metodología del informe", "Concepto": "Patrimonio a cierre",
+     "Qué es": ("Foto de lo que se tenía el último día del ejercicio: unidades primero "
+                "—tokens de cada inmueble, RNT en cada una de sus formas, principal de cada "
+                "préstamo— y su valoración al lado, con el precio empleado."),
+     "Equivalencia en el mundo tradicional": "Inventario de bienes y derechos a 31 de diciembre."},
+    {"Bloque": "Metodología del informe", "Concepto": "Intereses devengados no cobrados / no pagados",
+     "Qué es": ("Intereses que ya han corrido pero que nadie ha ingresado ni abonado todavía: "
+                "en estos préstamos no hay recibo mensual, se liquidan al cerrar la posición. "
+                "No están en ninguna transacción, así que se estiman capitalizando el saldo vivo "
+                "al tipo medio del pool, y la hoja dice que son una estimación."),
+     "Equivalencia en el mundo tradicional": "Intereses devengados y no vencidos de un préstamo."},
     {"Bloque": "Metodología del informe", "Concepto": "FIFO",
      "Qué es": ("Criterio de emparejamiento: al vender se considera transmitido el lote comprado "
                 "más antiguo que siga abierto."),
@@ -4124,6 +4135,194 @@ def build_por_completar_rows() -> list:
     return rows
 
 
+def _cierres_del_informe() -> list:
+    """Las fechas a las que se hace la foto de patrimonio.
+
+    Con un ejercicio elegido, el 31 de diciembre de ese año. Con el histórico
+    completo, el cierre de CADA año con actividad, que es lo que permite ver la
+    evolución del patrimonio ejercicio a ejercicio. El año en curso se corta en
+    la fecha del informe, no en un 31 de diciembre que todavía no ha llegado.
+    """
+    if fisc_inicio:
+        return [fisc_corte]
+    años = sorted({int(a) for a in _años_datos})
+    cierres = []
+    for a in años:
+        fin = date(a, 12, 31)
+        cierres.append(min(fin, fisc_corte))
+    return [c for c in cierres if c <= fisc_corte]
+
+
+def _saldos_rnt_a(cierre: date) -> dict:
+    """Las cuatro formas que toma el RNT a una fecha: líquido, bloqueado en
+    staking, aportado al pool y depositado en farming.
+
+    Se reproduce el mismo recorrido que la tabla del ecosistema, porque la
+    posición no es un saldo de tokens: el frmRNT es un recibo del LP y hay que
+    traducirlo a participaciones con la proporción real de los depósitos."""
+    b = {"rnt": 0.0, "xrnt": 0.0, "slp": 0.0, "frmrnt": 0.0}
+    dep_slp = dep_frm = 0.0
+    tope = cierre.isoformat()
+    for ev in (rnt_events or []):
+        if ev["fecha_str"][:10] > tope:
+            continue
+        b["rnt"]    += ev.get("rnt_delta", 0.0) or 0.0
+        b["xrnt"]   += ev.get("xrnt_staked_delta", 0.0) or 0.0
+        b["slp"]    += ev.get("slp_delta", 0.0) or 0.0
+        b["frmrnt"] += ev.get("frmrnt_delta", 0.0) or 0.0
+        if ev["tipo"] == "Depositar LP en farming" and ev["frmrnt_delta"] > 0:
+            dep_slp += abs(ev["slp_delta"])
+            dep_frm += ev["frmrnt_delta"]
+    # El frmRNT suele emitirse 1:1 contra el SLP, pero se deriva la proporción
+    # real en vez de darla por supuesta.
+    b["slp_farm"] = (b["frmrnt"] * dep_slp / dep_frm) if dep_frm > 0 else b["frmrnt"]
+    return b
+
+
+def _apr_a(cierre: date, campo: str) -> float | None:
+    """Tipo medio del pool hasta esa fecha, de la foto diaria del mercado."""
+    try:
+        serie = _snap.tipos(_snap.cargar(), "USDT")
+        if serie.empty or campo not in serie.columns:
+            return None
+        previos = serie[serie["fecha"] <= pd.Timestamp(cierre)]
+        if previos.empty:
+            return None
+        return float(previos.iloc[-1][campo])
+    except Exception:       # noqa: BLE001
+        return None
+
+
+def _posicion_aave_a(cierre: date, movimientos: list, entra: str, apr) -> tuple:
+    """(principal vivo, intereses devengados) a una fecha.
+
+    El principal sale de los movimientos, que son exactos. Los intereses se
+    devengan de forma continua y no se pagan hasta que se cierra la posición,
+    así que no están en ninguna transacción: se calculan capitalizando el saldo
+    vivo entre movimiento y movimiento al tipo medio del pool. Es una
+    estimación, y en el informe se dice que lo es."""
+    saldo = intereses = 0.0
+    previa = None
+    for m in sorted(movimientos, key=lambda x: x["fecha"]):
+        dia = m["fecha"].date()
+        if dia > cierre:
+            break
+        if previa is not None and saldo > 0 and apr:
+            años = (dia - previa).days / 365.0
+            intereses += (saldo + intereses) * _coste.coste_acumulado(apr, años)
+        importe = m.get("stable_amount") or 0.0
+        saldo += importe if m["tipo"] == entra else -importe
+        saldo = max(0.0, saldo)
+        previa = dia
+    if previa is not None and saldo > 0 and apr:
+        años = (cierre - previa).days / 365.0
+        intereses += (saldo + intereses) * _coste.coste_acumulado(apr, años)
+    return round(saldo, 2), (round(intereses, 2) if saldo > 0 else 0.0)
+
+
+def build_patrimonio_rows() -> list:
+    """Foto de patrimonio a cierre: qué tenía el inversor y cuánto valía.
+
+    Es la parte que piden las declaraciones de bienes —cada jurisdicción con su
+    modelo—, y por eso se da en unidades ANTES que en dinero: el número de
+    tokens de cada proyecto, los RNT en cada una de sus formas, el principal de
+    cada préstamo. La valoración va al lado, con el precio que se usó, para que
+    quien presente pueda rehacerla con el criterio de su país."""
+    filas = []
+    for cierre in _cierres_del_informe():
+        dia = cierre.isoformat()
+        tipo_div = tipo_de_cambio(dia, DIVISA)
+        eurusd = get_eurusd_on_date(dia)
+        pool = _pool_en_fecha(dia)
+        precio_rnt = pool.get("precio_rnt")
+        valor_slp = pool.get("valor_lp")
+
+        def fila(bloque, concepto, detalle="", cantidad=None, unidad="",
+                 precio=None, valor_usd=None, emision="", omitir_cero=False):
+            # Una posición que no se tenía ese año no se lista: en un informe de
+            # varios ejercicios, las filas a cero triplican la hoja y esconden
+            # las que sí cuentan.
+            if omitir_cero and not cantidad:
+                return
+            valor_div = valor_usd * tipo_div if (valor_usd is not None and tipo_div) else None
+            filas.append({
+                "Fecha": dia, "Bloque": bloque, "Concepto": concepto, "Detalle": detalle,
+                "Emisión": emision,
+                "Cantidad": round(cantidad, 8) if cantidad is not None else None,
+                "Unidad": unidad,
+                "Precio unitario USD": round(precio, 6) if precio is not None else None,
+                "Valor USD": round(valor_usd, 2) if valor_usd is not None else None,
+                f"Valor {DIVISA}": round(valor_div, 2) if valor_div is not None else None,
+            })
+
+        # ── Inmuebles tokenizados ────────────────────────────────────────────
+        proyectos = 0
+        for d in token_data.values():
+            info = d["info"]
+            if info.get("is_aave"):
+                continue
+            saldo = round(balance_at_date(d["movements"], cierre), 6)
+            if saldo <= 0.000001:
+                continue
+            proyectos += 1
+            pe = info.get("precio_emision") or 0.0
+            emitido_en_eur = info.get("divisa") == "EUR"
+            # La divisa de emisión dice desde dónde se tokenizó el inmueble:
+            # euros para las emisiones españolas, dólares para las de EE. UU.
+            emision = "España (EUR)" if emitido_en_eur else "EE. UU. (USD)"
+            precio_usd = (pe * eurusd if eurusd else None) if emitido_en_eur else pe
+            fila("Inmuebles tokenizados", info["label"], info.get("name", ""),
+                 saldo, "tokens", precio_usd,
+                 saldo * precio_usd if precio_usd else None, emision)
+        if not proyectos:
+            fila("Inmuebles tokenizados", "(sin tokens de inmuebles a esta fecha)")
+
+        # ── Ecosistema RNT ───────────────────────────────────────────────────
+        b = _saldos_rnt_a(cierre)
+        b = {k: (0.0 if abs(v) < 1e-12 else v) for k, v in b.items()}
+        fila("Ecosistema RNT", "RNT líquido en la wallet", "", b["rnt"], "RNT",
+             precio_rnt, b["rnt"] * precio_rnt if precio_rnt else None, omitir_cero=True)
+        fila("Ecosistema RNT", "RNT bloqueado en staking", "respaldado por NFT xRNT",
+             b["xrnt"], "RNT", precio_rnt, b["xrnt"] * precio_rnt if precio_rnt else None,
+             omitir_cero=True)
+        fila("Ecosistema RNT", "Participaciones del pool sin depositar", "SLP en la wallet",
+             b["slp"], "SLP", valor_slp, b["slp"] * valor_slp if valor_slp else None,
+             omitir_cero=True)
+        fila("Ecosistema RNT", "Posición de farming", "SLP depositado, recibo frmRNT",
+             b["slp_farm"], "SLP", valor_slp,
+             b["slp_farm"] * valor_slp if valor_slp else None, omitir_cero=True)
+        if precio_rnt:
+            fila("Ecosistema RNT", "Precio del RNT a cierre", "pool RNT/USDT",
+                 None, "", precio_rnt, None)
+
+        # ── Préstamos ────────────────────────────────────────────────────────
+        apr_sup = _apr_a(cierre, "supply_apr")
+        apr_bor = _apr_a(cierre, "borrow_apr")
+        pre, int_pre = _posicion_aave_a(cierre, aave_lender or [], "Depósito préstamo", apr_sup)
+        deu, int_deu = _posicion_aave_a(cierre, aave_borrower or [], "Préstamo recibido", apr_bor)
+        nota_sup = f"tipo medio del pool {apr_sup * 100:,.2f}%" if apr_sup else "sin tipo de referencia"
+        nota_bor = f"tipo medio del pool {apr_bor * 100:,.2f}%" if apr_bor else "sin tipo de referencia"
+        fila("Préstamos (RNT Lend)", "Como prestamista — principal depositado",
+             "", pre, "USD", 1.0, pre, omitir_cero=True)
+        fila("Préstamos (RNT Lend)", "Como prestamista — intereses devengados no cobrados",
+             f"estimación: {nota_sup}", int_pre, "USD", 1.0, int_pre, omitir_cero=True)
+        fila("Préstamos (RNT Lend)", "Como prestatario — principal pendiente",
+             "", deu, "USD", 1.0, deu, omitir_cero=True)
+        fila("Préstamos (RNT Lend)", "Como prestatario — intereses devengados no pagados",
+             f"estimación: {nota_bor}", int_deu, "USD", 1.0, int_deu, omitir_cero=True)
+        if not (pre or deu):
+            fila("Préstamos (RNT Lend)", "(sin posición viva a esta fecha)")
+
+        # ── Referencias de conversión ────────────────────────────────────────
+        if tipo_div and DIVISA != "USD":
+            fila("Referencias", f"Tipo de cambio a cierre ({DIVISA} por 1 USD)",
+                 "referencia del BCE", None, "", tipo_div, None)
+        if eurusd:
+            fila("Referencias", "Tipo de cambio a cierre (USD por 1 EUR)",
+                 "para los proyectos emitidos en España", None, "", eurusd, None)
+    return filas
+
+
 def build_report_meta() -> list:
     """Cabecera del informe: metadatos, alcance y disclaimer."""
     wallets_txt = "; ".join(f"{alias} ({addr[:8]}…{addr[-4:]})" for addr, alias in wallets_analyzed)
@@ -4183,9 +4382,9 @@ def _escribir_glosario(writer) -> None:
 
 def build_aggregate_xlsx(agg: dict) -> bytes:
     """Documento agregado en XLSX multi-hoja (Informe · Glosario · Resumen ·
-    Rendimientos · Rendim. sin valorar · Saldos · Plusvalías · Lotes abiertos ·
-    Por completar) para que el asesor fiscal trabaje con los totales sin hashes
-    ni contratos."""
+    Rendimientos · Rendim. sin valorar · Saldos · Patrimonio a cierre ·
+    Plusvalías · Lotes abiertos · Por completar) para que el asesor fiscal
+    trabaje con los totales sin hashes ni contratos."""
     buf = io.BytesIO()
     rend_tot_usd = sum(v["usd"] for v in agg["rend_tot"].values())
     rend_tot_div = sum(v["div"] for v in agg["rend_tot"].values())
@@ -4215,6 +4414,9 @@ def build_aggregate_xlsx(agg: dict) -> bytes:
         pd.DataFrame(pend).to_excel(writer, sheet_name="Rendim. sin valorar", index=False)
         hold = agg["holdings_rows"] or [{"Token": "(cartera vacía a la fecha de corte)"}]
         pd.DataFrame(hold).to_excel(writer, sheet_name="Saldos", index=False)
+
+        patr = build_patrimonio_rows() or [{"Concepto": "(sin posiciones a la fecha de cierre)"}]
+        pd.DataFrame(patr).to_excel(writer, sheet_name="Patrimonio a cierre", index=False)
 
         cg = agg["capital_gains"]
         gains = cg["gains"] or [{"Estado": "(sin ventas en el periodo)"}]
@@ -4592,7 +4794,7 @@ def _bloque_descargas(xlsx_agg: bytes, csv_fiscal: bytes, sufijo: str, multi: bo
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
     st.caption(
         "**Resumen agregado (XLSX)** — hojas Informe · Glosario · Resumen · Rendimientos · Rendim. sin valorar · "
-        "Saldos · Plusvalías (FIFO) · Lotes abiertos · Por completar, con los totales listos "
+        "Saldos · Patrimonio a cierre · Plusvalías (FIFO) · Lotes abiertos · Por completar, con los totales listos "
         "para las casillas de los modelos y la lista de importes que el inversor debe completar "
         "(compras en FIAT, recompensas sin precio disponible). Sin hashes ni contratos."
     )
