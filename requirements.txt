@@ -1,11 +1,25 @@
-streamlit>=1.32.0
-pandas>=2.0.0
-requests>=2.31.0
-openpyxl>=3.1.0
-python-dateutil>=2.8.0
-python-dotenv>=1.0.0
-plotly>=5.18.0
-gspread>=6.0.0
-google-auth>=2.0.0
-reportlab>=4.0.0
+# Se fija el techo de cada dependencia, no la versión exacta.
+#
+# Sin techo, un despliegue futuro puede traerse una versión mayor con cambios
+# que rompen sin que nadie lo haya pedido. Con la versión clavada, en cambio, se
+# renuncia a las correcciones de seguridad y se corre el riesgo de que Streamlit
+# Cloud —que usa Python 3.10, no el 3.9 del entorno local— no encuentre
+# exactamente esa build. El rango es el término medio.
+#
+# Las versiones comentadas son las verificadas en producción a 23/09/2026.
+
+streamlit>=1.32,<2          # 1.50.0
+pandas>=2.0,<3              # 2.3.3
+requests>=2.31,<3           # 2.32.5
+openpyxl>=3.1,<4            # 3.1.5  — hojas del informe fiscal
+python-dateutil>=2.8,<3     # 2.9.0
+python-dotenv>=1.0,<2       # 1.2.1
+plotly>=5.18,<7             # 6.9.0  — gráficos en pantalla y en PDF
+gspread>=6.0,<7             # 6.2.1  — almacén OTC sobre Google Sheets
+google-auth>=2.0,<3         # 2.50.0
+reportlab>=4.0,<6           # 5.0.0  — los tres documentos PDF
+
+# Kaleido va clavado a propósito: exporta los gráficos de plotly a imagen para
+# los PDF y la serie 1.x cambió de motor (pasa por Chrome) y rompe en entornos
+# sin navegador, como el contenedor de Streamlit Cloud.
 kaleido==0.2.1
