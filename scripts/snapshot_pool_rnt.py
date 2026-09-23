@@ -41,6 +41,25 @@ def main() -> int:
         print("Serie vacía: no se guarda nada", file=sys.stderr)
         return 1
 
+    # Contraste contra el contrato antes de escribir nada.
+    #
+    # La serie se reconstruye sumando eventos, y cualquier evento que se pierda
+    # por el camino —un límite de peticiones, una página truncada— deja un
+    # supply corto que NO se nota: el fichero parece bueno y el valor de cada
+    # participación sale inflado, porque se divide por él. Comparar con lo que
+    # dice el contrato convierte ese fallo silencioso en uno ruidoso.
+    ultima = max(datos["serie"])
+    reconstruido = datos["serie"][ultima]
+    on_chain = pool_rnt.supply_on_chain(clave)
+    if on_chain is None:
+        print("Aviso: no se pudo contrastar con el contrato; se guarda igual.", file=sys.stderr)
+    elif abs(on_chain - reconstruido) > 1e-6:
+        print(f"La serie reconstruida ({reconstruido:.9f}) no cuadra con el contrato "
+              f"({on_chain:.9f}): faltan {on_chain - reconstruido:+.9f} SLP. "
+              f"No se guarda. Reintenta, y si persiste rehaz el recorrido con --completo.",
+              file=sys.stderr)
+        return 1
+
     pool_rnt.guardar(datos)
     ultima = max(datos["serie"])
     print(f"Serie del pool RNT/USDT: {len(datos['serie'])} días, "

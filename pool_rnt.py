@@ -65,12 +65,32 @@ def _consulta(api_key: str, **kw) -> dict:
     return requests.get(BASE, params=params, timeout=45).json()
 
 
+class ConsultaFallida(RuntimeError):
+    """La cadena no contestó. Distinto de «no hay eventos»."""
+
+
 def _logs(api_key: str, desde: int, **extra) -> list:
-    """Una página de eventos del par a partir de `desde` (1.000 como máximo)."""
-    j = _consulta(api_key, module="logs", action="getLogs", address=PAR,
-                  fromBlock=desde, toBlock="latest", page=1, offset=1000, **extra)
-    res = j.get("result")
-    return res if isinstance(res, list) else []
+    """Una página de eventos del par a partir de `desde` (1.000 como máximo).
+
+    Si la API no devuelve una lista, se levanta una excepción en vez de
+    devolver vacío. Devolver vacío era indistinguible de «ya no hay más
+    eventos»: un límite de peticiones alcanzado a media serie cortaba el
+    recorrido y el resultado se guardaba como si estuviera completo. Y un
+    supply corto INFLA el valor de cada participación, porque se divide por él.
+    """
+    motivo = ""
+    for intento in range(4):
+        j = _consulta(api_key, module="logs", action="getLogs", address=PAR,
+                      fromBlock=desde, toBlock="latest", page=1, offset=1000, **extra)
+        res = j.get("result")
+        if isinstance(res, list):
+            return res
+        # Etherscan pone el motivo en `result` cuando no tiene resultados que dar.
+        motivo = str(j.get("message") or res or "respuesta inesperada")
+        # El límite de peticiones es pasajero y no debe tumbar el pase diario:
+        # se espera cada vez más antes de volver a intentarlo.
+        time.sleep(1.5 * (intento + 1))
+    raise ConsultaFallida(motivo)
 
 
 # ─── Serie de supply ─────────────────────────────────────────────────────────
@@ -98,12 +118,26 @@ def construir(api_key: str, previo: dict | None = None, pausa: float = 0.22) -> 
     saldo = int(previo.get("saldo_bruto") or 0)
     desde = int(previo.get("ultimo_bloque") or BLOQUE_ORIGEN)
 
+    # Se reanuda en el bloque SIGUIENTE al último guardado, no en él.
+    #
+    # El saldo que viene de `previo` ya incluye todo lo de ese bloque —dentro de
+    # un pase, la paginación vuelve sobre el último bloque hasta agotarlo—, así
+    # que arrancar ahí lo contaba dos veces. El signo del error dependía de lo
+    # que hubiera en ese bloque: una quema repetida dejaba el supply BAJO y, como
+    # el valor de una participación se obtiene dividiendo por él, las posiciones
+    # en SLP salían infladas.
+    # Se reanuda en el bloque SIGUIENTE al último guardado, no en él: el saldo
+    # que viene de `previo` ya incluye todo lo de ese bloque, así que arrancar
+    # ahí lo aplicaba dos veces. Medido sobre el bloque 93833625, que tenía una
+    # emisión y una quema: el pase incremental salía 0,0156 SLP corto.
+    arranque = desde + 1 if previo.get("ultimo_bloque") else desde
+
     eventos: dict[tuple, tuple] = {}     # (bloque, logIndex) -> (ts, signo·valor)
     for filtro, signo in (({"topic0": TOPIC_TRANSFER, "topic1": TOPIC_CERO,
                             "topic0_1_opr": "and"}, +1),
                           ({"topic0": TOPIC_TRANSFER, "topic2": TOPIC_CERO,
                             "topic0_2_opr": "and"}, -1)):
-        cursor = desde
+        cursor = arranque
         while True:
             pagina = _logs(api_key, cursor, **filtro)
             if not pagina:
@@ -116,9 +150,12 @@ def construir(api_key: str, previo: dict | None = None, pausa: float = 0.22) -> 
                 eventos[(blq, int(l["logIndex"], 16), signo)] = (
                     int(l["timeStamp"], 16), signo * int(l["data"], 16))
             ultimo = int(pagina[-1]["blockNumber"], 16)
-            if len(pagina) < 1000 or ultimo <= cursor:
+            if len(pagina) < 1000:
                 break
-            cursor = ultimo
+            # Si los 1.000 eventos caben en un solo bloque, repetir desde él no
+            # avanzaría nunca. Se salta al siguiente: los de ese bloque ya están
+            # todos en esta página, que es la que ha llenado.
+            cursor = ultimo + 1 if ultimo <= cursor else ultimo
             time.sleep(pausa)
 
     tope = desde
@@ -130,6 +167,22 @@ def construir(api_key: str, previo: dict | None = None, pausa: float = 0.22) -> 
     return {"esquema": ESQUEMA, "serie": serie, "saldo_bruto": saldo,
             "ultimo_bloque": tope,
             "actualizado": datetime.utcnow().strftime("%Y-%m-%d %H:%M")}
+
+
+def supply_on_chain(api_key: str) -> float | None:
+    """Participaciones en circulación ahora mismo, leídas del contrato.
+
+    Sirve de contraste: la serie se reconstruye sumando eventos y esta cifra
+    dice si esa suma cuadra. Para el presente `eth_call` sí es fiable; lo que
+    el nodo público no honra es la etiqueta de un bloque pasado.
+    """
+    try:
+        j = _consulta(api_key, module="proxy", action="eth_call", to=PAR,
+                      data="0x18160ddd", tag="latest")       # totalSupply()
+        res = str(j.get("result") or "")
+        return int(res, 16) / 10 ** DEC_SLP if res.startswith("0x") else None
+    except Exception:       # noqa: BLE001
+        return None
 
 
 def supply_en(fecha: str, datos: dict) -> float | None:

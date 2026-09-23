@@ -42,7 +42,7 @@ No hay suite de tests. Lo que funciona:
   conocida. El motor de propuestas se validó reproduciendo una propuesta real
   del equipo: cuadraba al céntimo en importes y dentro del 0,5 % en escenarios.
 - **La aplicación de verdad**: `streamlit run app.py` y recorrer el flujo. Varios
-  fallos solo aparecen ahí (ver trampa 6).
+  fallos solo aparecen ahí (ver trampa 7).
 - Si tocas una página que escribe datos —OTC—, pruébala sin llegar a guardar.
 
 ---
@@ -111,13 +111,29 @@ cuando se usan se dice. **No vuelvas a introducir una segunda fuente para un
 dato que ya tiene la suya**: las dos cifras divergen y acaban en documentos
 distintos para la misma operación.
 
-### 5. Las reservas se pisan entre sí
+### 5. Un fallo de red que parece «no hay datos»
+
+Una función que devuelve lista vacía tanto si no hay resultados como si la API
+falló es una bomba de relojería. `pool_rnt._logs` lo hacía: un límite de
+peticiones a media reconstrucción cortaba el recorrido y la serie se guardaba
+**como si estuviera completa**. Un supply corto no se nota a simple vista y
+además INFLA el valor de cada participación, porque se divide por él.
+
+Ahora levanta `ConsultaFallida` tras reintentar con espera creciente, y
+`scripts/snapshot_pool_rnt.py` **contrasta la serie reconstruida contra el
+`totalSupply` del contrato antes de escribir**: si no cuadra, no guarda.
+
+La regla general: cuando reconstruyas un estado sumando eventos, busca una
+cifra independiente contra la que contrastarlo y compárala antes de dar el
+resultado por bueno.
+
+### 6. Las reservas se pisan entre sí
 
 Hay un incidente documentado de pérdida de reservas (22/07/2026) por guardar la
 copia leída al pintar la página. **Releer la lista fresca justo antes de
 escribir**: `_store.read_list(TAB, fresh=True)` y añadir encima.
 
-### 6. Streamlit: cuatro cosas que no son evidentes
+### 7. Streamlit: cuatro cosas que no son evidentes
 
 - **`st.cache_data` indexa por los argumentos, no por el cuerpo de la función.**
   Si cambias la forma del diccionario que devuelve, la caché vieja sigue
@@ -135,7 +151,7 @@ escribir**: `_store.read_list(TAB, fresh=True)` y añadir encima.
   pasó de `(proyecto, tokens)` a `(proyecto, tokens, actuales)` y quedó un sitio
   desempaquetando dos. Accede por índice.
 
-### 7. Criterios de cálculo que no son obvios
+### 8. Criterios de cálculo que no son obvios
 
 - **La cartera se pondera por importe invertido, no por número de tokens.** Un
   token de 100 € y otro de 100 $ no son la misma inversión; hoy el europeo pesa
@@ -172,8 +188,11 @@ Cosas decididas a medias o sabidas y no hechas:
   renta**. Hasta saber qué son, quedan fuera.
 - **El SLP repartido en los claims de staking** ya se valora (parte proporcional
   de las reservas del pool), pero conviene contrastarlo con Reental.
-- **`data/pool_rnt/supply.json` no tiene workflow**: se actualiza a mano con
-  `scripts/snapshot_pool_rnt.py`.
+- **`data/pool_rnt/supply.json` no tiene workflow todavía**: el fichero YAML
+  está escrito y pendiente de subir desde la web de GitHub (un token personal no
+  puede crear workflows). Mientras tanto se actualiza a mano con
+  `scripts/snapshot_pool_rnt.py`, y conviene no olvidarlo: en ocho días sin
+  actualizar, el supply se quedó un 5 % corto.
 - **`requirements.txt` sin versiones fijadas** salvo `kaleido`.
 - **Redundancia de estilos de PDF**: tres páginas repiten paleta, estilos y tabla
   estándar (~150 líneas ×3).
