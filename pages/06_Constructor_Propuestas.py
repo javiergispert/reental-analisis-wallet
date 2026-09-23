@@ -124,7 +124,10 @@ modo = c3.selectbox("Punto de partida", ["Inversor nuevo", "Ampliación sobre un
 
 # La ampliación se apoya en lo que ya analizó el Analizador de Wallets: lo deja
 # en sesión, así que no hace falta volver a consultar la cadena.
-cartera_actual, rnt_actual, alias_wallet = {}, 0.0, ""
+# `hay_cartera_previa` no es lo mismo que haber elegido el modo: si el
+# analizador no ha corrido, no sabemos qué tiene y no podemos afirmar que
+# tenga cero. Sin ese dato la propuesta se comporta como una de alta.
+cartera_actual, rnt_actual, alias_wallet, hay_cartera_previa = {}, 0.0, "", False
 if modo == "Ampliación sobre una wallet":
     token_data = st.session_state.get("token_data") or {}
     if not token_data:
@@ -138,6 +141,7 @@ if modo == "Ampliación sobre una wallet":
             info, saldo = d["info"], round(d.get("balance", 0.0), 6)
             if saldo > 1e-6 and not info.get("is_aave"):
                 cartera_actual[info.get("label", "")] = saldo
+        hay_cartera_previa = True
         pos = st.session_state.get("posicion_rnt") or {}
         rnt_actual = float(pos.get("total") or 0.0)
         _detalle_rnt = ""
@@ -300,10 +304,15 @@ if elegidos:
                             f"faltan {a_comprar - otc['total']:,.0f}]")
             elif a_comprar > 0:
                 col.caption(f":green[🏷️ {otc['total']:,.0f} disponibles en OTC]")
-        seleccion.append((p, tokens, actuales) if modo == "Ampliación sobre una wallet"
+        # Un proyecto que la wallet no tiene entra con 0, no con None: dentro de
+        # una ampliación sí sabemos que hoy no lo posee.
+        seleccion.append((p, tokens, actuales or 0.0) if hay_cartera_previa
                          else (p, tokens))
 
-if not seleccion or all(t <= 0 for _, t in seleccion):
+# Se accede por índice en vez de desempaquetar: en modo ampliación cada entrada
+# lleva una tercera posición con lo que el inversor ya tiene, y desempaquetar
+# ata esta comprobación a la forma exacta de la tupla.
+if not seleccion or all((item[1] or 0) <= 0 for item in seleccion):
     st.info("Elige al menos un proyecto y asígnale tokens para ver la propuesta.")
     st.stop()
 
