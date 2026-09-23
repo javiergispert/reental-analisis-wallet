@@ -19,13 +19,14 @@ import requests
 import io
 from datetime import datetime, timezone
 
-from utils import fetch_all_account_txs, fetch_all_token_txs, load_master_projects, strip_accents
+from utils import fetch_all_token_txs, load_master_projects, strip_accents
 from reental_tokens import codigo_proyecto_atoken
 # Primitivas on-chain compartidas: limitan el ritmo, reintentan y validan que la
 # respuesta sea hexadecimal. Reimplementarlas aquí fue lo que hizo que un error
 # de la API se convirtiera en "saldo desconocido".
 import aave_lend as _al
 import otc_saldos as _saldos
+import otc_inventario as _inv
 # Avisos de protocolo: los pasos que hay que dar FUERA de la herramienta y en
 # orden. El texto vive en el módulo, no aquí.
 import otc_protocolos as _protocolos
@@ -123,125 +124,16 @@ known_addresses = set(project_by_addr.keys())
 
 @st.cache_data(show_spinner=False, ttl=CACHE_TTL_SECS)
 def fetch_otc_balances(wallet: str, api_key: str) -> tuple:
-    """
-    Devuelve (balances_dict, last_txs_dict, fetch_ts):
-      - balances_dict  {contract_addr: {"nombre", "id", "saldo", "divisa", ...}}
-        Los saldos de aTokens Aave se consolidan sobre la dirección del token subyacente.
-      - last_txs_dict  {contract_addr: [{"hash", "to", "value", "ts"}]}
-      - fetch_ts       datetime UTC
-    """
-    # Etherscan limita tokentx a 1000 resultados por llamada: hay que paginar
-    # o los saldos se calculan solo con los transfers más antiguos.
-    txs = fetch_all_token_txs(wallet, api_key)
-
-    # nombre_proyecto_lower → token_address  (para resolver aTokens por nombre)
-    nombre_to_addr = {
-        row["nombre"].lower(): addr
-        for addr, row in project_by_addr.items()
-    }
-
-    raw_balances = {}  # addr → float  (puede ser aToken o token real)
-    atoken_map   = {}  # atoken_addr → underlying_addr  (se rellena al encontrar aTokens)
-    last_txs     = {}  # underlying_addr → list of outgoing tx dicts
-
-    for tx in txs:
-        contract  = tx["contractAddress"].lower()
-        sym       = tx.get("tokenSymbol", "")
-        name      = tx.get("tokenName", "")
-        dec       = int(tx.get("tokenDecimal") or 18)
-        value     = int(tx["value"]) / (10 ** dec)
-        ts        = int(tx.get("timeStamp", 0))
-        to_addr   = tx["to"].lower()
-        from_addr = tx["from"].lower()
-
-        # Detectar si es aToken de Reental en Aave. La grafía varía entre
-        # proyectos (aMatReental-CME-1 vs aMatREENTAL-CAR-2), así que el
-        # reconocimiento no distingue mayúsculas.
-        suffix = codigo_proyecto_atoken(sym, name)
-        is_atoken = bool(suffix)
-        if is_atoken and contract not in atoken_map:
-            suffix_lower = suffix.lower()
-
-            underlying = None
-            # 1) Buscar directamente por ID (clave ya en minúsculas)
-            if suffix_lower in project_by_id:
-                underlying = project_by_id[suffix_lower].get("token_address")
-            # 2) Buscar por coincidencia en nombre de proyecto
-            if not underlying:
-                for n, a in nombre_to_addr.items():
-                    if suffix_lower in n:
-                        underlying = a
-                        break
-            if underlying:
-                atoken_map[contract] = underlying.lower()
-
-        # Resolver dirección efectiva (aToken → subyacente si es posible)
-        effective_addr = atoken_map.get(contract, contract if contract in known_addresses else None)
-        if effective_addr is None:
-            continue
-
-        is_in  = to_addr == wallet and from_addr != wallet
-        is_out = from_addr == wallet and to_addr != wallet
-        if is_in:
-            raw_balances[effective_addr] = raw_balances.get(effective_addr, 0.0) + value
-        elif is_out:
-            raw_balances[effective_addr] = raw_balances.get(effective_addr, 0.0) - value
-            # Solo registrar TX salientes de tokens reales (no aTokens) para detección de envíos
-            if contract in known_addresses:
-                entry = {"hash": tx["hash"], "to": to_addr, "value": value, "ts": ts}
-                last_txs.setdefault(effective_addr, []).append(entry)
-        # auto-transferencias (from == to == wallet): se ignoran, saldo neto = 0
-
-    # Montar resultado enriquecido
-    result = {}
-    for addr, saldo in raw_balances.items():
-        if saldo < 0.001:
-            continue
-        proj = project_by_addr.get(addr, {})
-        fecha_fin = proj.get("fecha_fin")
-        result[addr] = {
-            "nombre":         proj.get("nombre", addr[:12] + "…"),
-            "id":             proj.get("id", "—"),
-            "saldo":          round(saldo, 6),
-            "divisa":         proj.get("divisa", "EUR"),
-            "precio_emision": proj.get("precio_emision") or 0,
-            "ubicacion":      proj.get("ubicacion", "—"),
-            "estado":         proj.get("estado", "—"),
-            "fecha_fin":      fecha_fin.strftime("%Y/%m") if fecha_fin else "—",
-            "tipo_renta":     proj.get("tipo_renta", "—"),
-        }
-
-    return result, last_txs, datetime.now(timezone.utc)
+    """Saldos de la wallet de custodia. El cálculo vive en `otc_inventario`,
+    que lo comparte con el constructor de propuestas: dos páginas no pueden
+    tener dos ideas distintas de cuántos tokens hay disponibles."""
+    return _inv.balances_de_wallet(wallet, api_key, project_by_addr, project_by_id)
 
 
-@st.cache_data(show_spinner=False, ttl=CACHE_TTL_SECS)
 def fetch_token_balance(wallet: str, token_address: str, api_key: str) -> float:
-    """Tokens del proyecto que el inversor tiene sueltos en su wallet.
-
-    Se apoya en `fetch_all_account_txs`, que pagina: la consulta directa a
-    Etherscan se corta a 10.000 resultados y en una wallet con mucho histórico
-    devolvía un saldo incompleto.
-    """
-    wallet = wallet.lower()
-    token  = token_address.lower()
-    try:
-        txs = fetch_all_account_txs(wallet, api_key, action="tokentx",
-                                    contractaddress=token)
-    except Exception:
-        return -1.0   # -1 indica error de consulta, NO saldo cero
-    if txs is None:
-        return -1.0
-    bal = 0.0
-    for tx in txs:
-        dec   = int(tx.get("tokenDecimal") or 18)
-        value = int(tx["value"]) / (10 ** dec)
-        to_   = tx["to"].lower()
-        from_ = tx["from"].lower()
-        if to_ == wallet and from_ != wallet:
-            bal += value
-        elif from_ == wallet and to_ != wallet:
-            bal -= value
-    return round(bal, 6)
+    """Tokens sueltos del inversor. Vive en `otc_inventario` porque el
+    constructor de propuestas comprueba lo mismo antes de reservar."""
+    return _inv.saldo_en_wallet(wallet, token_address, api_key)
 
 
 def saldo_efectivo(wallet: str, token_address: str, api_key: str) -> dict:
@@ -346,28 +238,9 @@ if _detectar_envios(reservas):
 # ── Calcular saldos reservados y disponibles ──────────────────────────────────
 
 def calcular_disponibles(balances: dict, reservas: list) -> dict:
-    """Devuelve {contract_addr: tokens_reservados} solo para reservas activas."""
-    reservado = {}
-    for r in reservas:
-        if r.get("estado") in ("completada", "cancelada"):
-            continue
-        # Las reservas contra ofertas de TERCEROS salen de la wallet del
-        # inversor, no del inventario de Reental. Contarlas aquí hacía que el
-        # stock propio apareciera mermado por tokens que nunca fueron suyos.
-        # Las reservas antiguas no llevan `tipo_origen` y son todas de Reental.
-        if r.get("tipo_origen") == "tercero":
-            continue
-        addr = r.get("token_address", "").lower()
-        reservado[addr] = reservado.get(addr, 0.0) + float(r.get("n_tokens", 0))
-    result = {}
-    for addr, data in balances.items():
-        res = reservado.get(addr, 0.0)
-        result[addr] = {
-            **data,
-            "reservado":   res,
-            "disponible":  max(0.0, data["saldo"] - res),
-        }
-    return result
+    """Stock propio menos lo comprometido. La lógica vive en `otc_inventario`."""
+    return _inv.disponibles_reental(balances, reservas)
+
 
 def estado_oferta(o: dict) -> dict:
     """Estado real de una oferta de tercero. La lógica vive en `otc_saldos`."""
