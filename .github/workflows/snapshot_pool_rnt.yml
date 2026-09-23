@@ -1,0 +1,57 @@
+name: Serie diaria del pool RNT/USDT
+
+# Mantiene al día data/pool_rnt/supply.json, la serie de participaciones en
+# circulación del pool. Hace falta para valorar el SLP que Reental reparte en
+# los claims de staking y para el precio histórico del RNT, que no se pueden
+# leer de otra manera: el nodo público ignora la etiqueta de bloque en
+# `eth_call` y devuelve el estado de hoy sin avisar.
+#
+# El pase incremental solo recorre los eventos nuevos, así que son segundos. El
+# recorrido completo desde el origen del pool son ~24 consultas y unos 40 s.
+
+on:
+  schedule:
+    # 05:00 UTC, media hora después de la foto de Aave para no solapar la cuota
+    # de Etherscan entre los dos pases.
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: snapshot-pool-rnt
+  cancel-in-progress: false
+
+permissions:
+  contents: write           # necesario para commitear la serie
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Actualizar la serie
+        env:
+          ETHERSCAN_API_KEY: ${{ secrets.ETHERSCAN_API_KEY }}
+        run: python3 scripts/snapshot_pool_rnt.py
+
+      - name: Commitear si ha cambiado
+        run: |
+          if git diff --quiet -- data/pool_rnt/supply.json; then
+            echo "Sin movimientos en el pool: no se commitea."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/pool_rnt/supply.json
+          git commit -m "Serie del pool RNT/USDT: $(date -u '+%Y-%m-%d %H:%M UTC')"
+          git push
