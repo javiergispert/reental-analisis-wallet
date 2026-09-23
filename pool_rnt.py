@@ -164,9 +164,20 @@ def construir(api_key: str, previo: dict | None = None, pausa: float = 0.22) -> 
         serie[datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d")] = saldo / 10 ** DEC_SLP
         tope = max(tope, blq)
 
+    # El sello solo se mueve si los datos se han movido.
+    #
+    # Sellar cada pase hacía que el fichero cambiara SIEMPRE aunque el pool no
+    # se hubiera tocado, y eso anula el «commitea solo si ha cambiado» del pase
+    # diario: un commit al día para siempre por una marca de tiempo que no lee
+    # nadie. Así `actualizado` significa lo útil —cuándo cambió el dato— y
+    # cuándo se comprobó lo dice el registro del Action.
+    sin_cambios = (previo.get("serie") == serie
+                   and previo.get("saldo_bruto") == saldo
+                   and previo.get("ultimo_bloque") == tope)
+    sello = (previo.get("actualizado") if sin_cambios and previo.get("actualizado")
+             else datetime.utcnow().strftime("%Y-%m-%d %H:%M"))
     return {"esquema": ESQUEMA, "serie": serie, "saldo_bruto": saldo,
-            "ultimo_bloque": tope,
-            "actualizado": datetime.utcnow().strftime("%Y-%m-%d %H:%M")}
+            "ultimo_bloque": tope, "actualizado": sello}
 
 
 def supply_on_chain(api_key: str) -> float | None:
