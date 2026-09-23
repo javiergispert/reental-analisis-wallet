@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 from datetime import date
 
+import plotly.graph_objects as go
 import streamlit as st
 from dotenv import load_dotenv
 
@@ -386,6 +387,68 @@ st.caption(
     "Las rentabilidades se ponderan por **importe invertido** en cada proyecto, no por número de "
     "tokens: un token de 100 € y otro de 100 $ no son la misma inversión."
 )
+
+
+# ── Cómo queda repartida la cartera ──────────────────────────────────────────
+#
+# Los mismos cuatro repartos que llevará el documento, aquí en pantalla: el
+# asesor suele ir ajustando cantidades mientras habla con el inversor —«quiero
+# menos México», «más renta mensual»— y esperar a generar el PDF para ver el
+# efecto convierte cada ajuste en un ciclo de medio minuto.
+def _corto(texto: str) -> str:
+    """La categoría, acortada para la leyenda. El nombre completo sigue en el
+    globo al pasar el ratón: «rendimientos a final del proyecto» ocupa media
+    fila y lo que distingue a unos de otros es lo que viene después."""
+    t = str(texto).strip()
+    for prefijo in ("rendimientos ", "Rendimientos ", "Emisión ", "emisión "):
+        if t.startswith(prefijo):
+            t = t[len(prefijo):]
+            break
+    return (t[:22].rstrip() + "…") if len(t) > 23 else t
+
+
+def _donut(reparto: dict, titulo: str):
+    """Un anillo con el peso de cada categoría, en los colores del documento."""
+    etiquetas = list(reparto.keys())
+    valores = [v * 100 for v in reparto.values()]
+    fig = go.Figure(go.Pie(
+        labels=[_corto(e) for e in etiquetas], values=valores, hole=0.58, sort=False,
+        customdata=etiquetas,
+        marker=dict(colors=propuesta_pdf.PALETA[:len(etiquetas)] or None,
+                    line=dict(color="rgba(255,255,255,.85)", width=1.5)),
+        textinfo="percent", texttemplate="%{percent:.0%}",
+        # Sin esto plotly gira el texto para seguir la curva y en trozos
+        # estrechos queda ilegible.
+        insidetextorientation="horizontal",
+        textfont=dict(size=12),
+        hovertemplate="%{customdata}<br>%{value:.1f} % de la cartera<extra></extra>"))
+    fig.update_layout(
+        title=dict(text=titulo, x=0.5, xanchor="center", font=dict(size=13)),
+        margin=dict(l=6, r=6, t=42, b=6), height=310,
+        legend=dict(orientation="h", y=-0.08, x=0.5, xanchor="center",
+                    font=dict(size=10.5), itemsizing="constant"),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+    return fig
+
+
+_repartos = [("ubicacion", "Distribución geográfica"),
+             ("dividendo", "Tipología de dividendo"),
+             ("emision", "Emisión de tokenización"),
+             ("divisa", "Divisa del inmueble")]
+_con_datos = [(c, t) for c, t in _repartos if cartera["reparto"].get(c)]
+if _con_datos:
+    st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+    _gcols = st.columns(len(_con_datos))
+    for _col, (_clave, _titulo) in zip(_gcols, _con_datos):
+        _col.plotly_chart(_donut(cartera["reparto"][_clave], _titulo),
+                          use_container_width=True,
+                          key=f"donut_{_clave}", config={"displayModeBar": False})
+    st.caption(
+        "Cada reparto se pondera por **importe invertido**, igual que en el documento. "
+        "La **emisión de tokenización** dice bajo qué estructura se emitió el token y no coincide "
+        "necesariamente con dónde está el inmueble ni con su moneda: hay proyectos de la emisión "
+        "estadounidense situados en España y denominados en euros."
+    )
 
 # El salto de estatus, con las dos lecturas. Publicar solo la primera hace que
 # parezca mayor de lo que es, porque deja fuera lo que cuesta el estatus.
