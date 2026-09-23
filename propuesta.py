@@ -48,10 +48,27 @@ def importe_proyecto(proy: dict, tokens: float, eurusd: float) -> dict:
     return {"eur": eur, "usd": usd, "nativo": nativo, "divisa": proy.get("divisa", "USD")}
 
 
-def coste_estatus(rnts: float, precio_rnt: float, eurusd: float) -> dict:
-    """Lo que cuesta comprar los RNT que dan acceso a un estatus."""
-    usd = (rnts or 0.0) * (precio_rnt or 0.0)
-    return {"usd": usd, "eur": usd / eurusd if eurusd else None, "rnts": rnts or 0.0}
+def coste_estatus(rnts: float, precio_rnt: float, eurusd: float,
+                  ya_tiene: float = 0.0) -> dict:
+    """Lo que cuesta alcanzar un estatus, descontando el RNT que ya se posee.
+
+    Si el inversor ya llega al umbral no hay nada que comprar. Cobrarle otra
+    vez la adquisición completa de un estatus que ya tiene es el error más caro
+    que puede cometer una propuesta, y es el que comete cualquier plantilla que
+    no sepa qué hay en su wallet.
+    """
+    faltan = max(0.0, (rnts or 0.0) - (ya_tiene or 0.0))
+    usd = faltan * (precio_rnt or 0.0)
+    return {"usd": usd, "eur": usd / eurusd if eurusd else None,
+            "rnts": faltan, "rnts_umbral": rnts or 0.0, "rnts_ya": ya_tiene or 0.0}
+
+
+def estatus_actual(rnt_en_cartera: float, umbrales: dict) -> str:
+    """El estatus que ya tiene alguien con ese RNT, contando lo que está en
+    staking: bloquearlo no lo hace desaparecer."""
+    alcanzados = [n for n, _ in maestro.ESTATUS
+                  if (rnt_en_cartera or 0.0) + 1e-9 >= (umbrales.get(n) or 0.0)]
+    return alcanzados[-1] if alcanzados else maestro.ESTATUS[0][0]
 
 
 # ─── Cartera ─────────────────────────────────────────────────────────────────
@@ -59,22 +76,43 @@ def coste_estatus(rnts: float, precio_rnt: float, eurusd: float) -> dict:
 def construir(seleccion: list, eurusd: float) -> dict:
     """Agrega la cartera propuesta.
 
-    `seleccion` son pares (proyecto, nº de tokens). Devuelve los totales, el
-    reparto por cada criterio y la rentabilidad ponderada de los tres estatus.
+    `seleccion` son tuplas (proyecto, nº de tokens) o, cuando se parte de una
+    cartera existente, (proyecto, nº de tokens propuestos, nº que ya tiene).
+    En ese caso cada línea guarda además la variación, que es lo que de verdad
+    hay que comprar o vender: una propuesta puede no traer ningún inmueble
+    nuevo y consistir solo en mover cantidades de los que ya están.
     """
     lineas, tot_eur, tot_usd, tot_tokens = [], 0.0, 0.0, 0.0
-    for proy, tokens in seleccion:
-        if not tokens or tokens <= 0:
+    hay_actuales = False
+    for item in seleccion:
+        proy, tokens = item[0], item[1]
+        # Un proyecto NUEVO dentro de una ampliación llega con `None`: no es que
+        # falte el dato, es que hoy tiene cero. Se conserva la distinción
+        # porque el modo sí lleva cartera previa aunque esta línea no la tenga.
+        if len(item) > 2:
+            hay_actuales = True
+            actuales = float(item[2] or 0.0)
+        else:
+            actuales = None
+        if tokens is None or tokens < 0:
+            continue
+        if not tokens and not actuales:
             continue
         imp = importe_proyecto(proy, tokens, eurusd)
-        lineas.append({"proyecto": proy, "tokens": float(tokens), "importe": imp})
+        linea = {"proyecto": proy, "tokens": float(tokens), "importe": imp,
+                 "tokens_actuales": actuales}
+        if actuales is not None:
+            linea["delta"] = float(tokens) - actuales
+            linea["importe_delta"] = importe_proyecto(proy, linea["delta"], eurusd)
+        lineas.append(linea)
         tot_eur += imp["eur"] or 0.0
         tot_usd += imp["usd"] or 0.0
         tot_tokens += float(tokens)
 
     if not lineas:
         return {"lineas": [], "n": 0, "tokens": 0.0, "eur": 0.0, "usd": 0.0,
-                "meses_medios": 0.0, "rentabilidad": {}, "reparto": {}, "pesos": {}}
+                "meses_medios": 0.0, "rentabilidad": {}, "reparto": {},
+                "con_cartera_previa": hay_actuales, "delta_eur": 0.0, "delta_tokens": 0.0}
 
     # El peso de cada línea es su importe en una divisa única, no su número de
     # tokens: es lo que de verdad ha puesto el inversor en cada proyecto.
@@ -101,9 +139,13 @@ def construir(seleccion: list, eurusd: float) -> dict:
     con_meses = [l for l in lineas if l["proyecto"].get("meses_pendientes") is not None]
     peso_meses = sum(l["peso"] for l in con_meses)
 
+    delta_eur = sum((l["importe_delta"]["eur"] or 0.0) for l in lineas if "importe_delta" in l)
     return {
         "lineas": lineas,
         "n": len(lineas),
+        "con_cartera_previa": hay_actuales,
+        "delta_eur": delta_eur,
+        "delta_tokens": sum(l.get("delta", 0.0) for l in lineas),
         "tokens": tot_tokens,
         "eur": tot_eur,
         "usd": tot_usd,

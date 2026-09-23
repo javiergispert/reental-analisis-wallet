@@ -91,7 +91,7 @@ modo = c3.selectbox("Punto de partida", ["Inversor nuevo", "Ampliación sobre un
 
 # La ampliación se apoya en lo que ya analizó el Analizador de Wallets: lo deja
 # en sesión, así que no hace falta volver a consultar la cadena.
-cartera_actual = {}
+cartera_actual, rnt_actual, alias_wallet = {}, 0.0, ""
 if modo == "Ampliación sobre una wallet":
     token_data = st.session_state.get("token_data") or {}
     if not token_data:
@@ -100,15 +100,27 @@ if modo == "Ampliación sobre una wallet":
             "Lo que encuentre allí aparecerá aquí sin volver a consultar la cadena."
         )
     else:
-        alias = ", ".join(a or d[:8] for d, a in st.session_state.get("wallets_analyzed", []))
+        alias_wallet = ", ".join(a or d[:8] for d, a in st.session_state.get("wallets_analyzed", []))
         for d in token_data.values():
             info, saldo = d["info"], round(d.get("balance", 0.0), 6)
             if saldo > 1e-6 and not info.get("is_aave"):
                 cartera_actual[info.get("label", "")] = saldo
+        pos = st.session_state.get("posicion_rnt") or {}
+        rnt_actual = float(pos.get("total") or 0.0)
+        _detalle_rnt = ""
+        if rnt_actual:
+            _detalle_rnt = (f" · **{rnt_actual:,.0f} RNT** en cartera "
+                            f"({pos.get('liquido', 0):,.0f} líquidos + "
+                            f"{pos.get('staking', 0):,.0f} en staking)")
         st.success(
-            f"Cartera actual de **{alias}**: {len(cartera_actual)} proyectos con saldo. "
-            "Se parte de ella y se le añade lo que propongas."
+            f"Cartera actual de **{alias_wallet}**: {len(cartera_actual)} proyectos con saldo"
+            f"{_detalle_rnt}. Se parte de ella: lo que propongas se compara con lo que ya tiene."
         )
+        if not pos:
+            st.caption(
+                "⚠️ No consta la posición de RNT de esta wallet. Vuelve a analizarla en "
+                "**Analizador de Wallets** para que el estatus que ya tenga se descuente del coste."
+            )
 
 
 # ── 2. Supuestos de mercado ──────────────────────────────────────────────────
@@ -148,10 +160,32 @@ st.caption(
     "Los cerrados no se pueden suscribir, así que no aparecen."
 )
 
-etiquetas = {f"{p['label']} · {p['nombre']} ({p['ubicacion']}, {p['estado'].lower()})": p['label']
-             for p in sorted(ABIERTOS, key=lambda x: x["label"])}
+# Los que el inversor ya tiene se marcan en la propia etiqueta: en una lista de
+# 75 proyectos, saber cuáles son «los suyos» de un vistazo es la diferencia
+# entre construir sobre su cartera y empezar de cero sin darse cuenta.
+def _etiqueta(p: dict) -> str:
+    marca = "📁 EN CARTERA · " if p["label"] in cartera_actual else ""
+    tiene = f" — tiene {cartera_actual[p['label']]:,.0f}" if p["label"] in cartera_actual else ""
+    return f"{marca}{p['label']} · {p['nombre']} ({p['ubicacion']}, {p['estado'].lower()}){tiene}"
+
+
+# Primero los que ya están en cartera, para no tener que buscarlos.
+_orden = sorted(ABIERTOS, key=lambda x: (x["label"] not in cartera_actual, x["label"]))
+etiquetas = {_etiqueta(p): p["label"] for p in _orden}
 previa = [k for k, v in etiquetas.items() if v in cartera_actual]
-elegidos = st.multiselect("Proyectos", list(etiquetas), default=previa)
+
+# Un proyecto de la cartera puede estar CERRADO y por tanto no ser suscribible,
+# pero sigue formando parte del patrimonio: se avisa en vez de ignorarlo.
+_fuera = [lbl for lbl in cartera_actual if lbl not in {p["label"] for p in ABIERTOS}]
+if _fuera:
+    st.caption(
+        f"ℹ️ {len(_fuera)} proyecto(s) de su cartera no admiten suscripción hoy "
+        f"({', '.join(sorted(_fuera)[:6])}{'…' if len(_fuera) > 6 else ''}): "
+        "están cerrados o fuera de periodo, así que no aparecen en la lista."
+    )
+
+elegidos = st.multiselect("Proyectos", list(etiquetas), default=previa,
+                          help="Los marcados con 📁 ya están en la cartera del inversor.")
 
 seleccion = []
 if elegidos:
@@ -160,12 +194,25 @@ if elegidos:
         lbl = etiquetas[etiqueta]
         p = POR_ID[lbl]
         pe = p.get("precio_emision") or 0.0
-        tokens = cols[i % len(cols)].number_input(
-            f"{lbl} · tokens", min_value=0.0, step=1.0,
-            value=float(cartera_actual.get(lbl, 10.0)),
+        actuales = cartera_actual.get(lbl)
+        col = cols[i % len(cols)]
+        rotulo = f"📁 {lbl} · tokens" if actuales is not None else f"{lbl} · tokens"
+        tokens = col.number_input(
+            rotulo, min_value=0.0, step=1.0,
+            value=float(actuales if actuales is not None else 10.0),
             key=f"tok_{lbl}",
-            help=f"{p['nombre']} — {pe:,.0f} {p['divisa']} por token")
-        seleccion.append((p, tokens))
+            help=f"{p['nombre']} — {pe:,.0f} {p['divisa']} por token"
+                 + (f" · ya tiene {actuales:,.3f}" if actuales is not None else ""))
+        if actuales is not None:
+            d = tokens - actuales
+            if abs(d) < 1e-9:
+                col.caption(f"Tiene {actuales:,.0f} · **sin cambios**")
+            elif d > 0:
+                col.caption(f"Tiene {actuales:,.0f} · :green[**compra {d:,.0f}**]")
+            else:
+                col.caption(f"Tiene {actuales:,.0f} · :red[**vende {abs(d):,.0f}**]")
+        seleccion.append((p, tokens, actuales) if modo == "Ampliación sobre una wallet"
+                         else (p, tokens))
 
 if not seleccion or all(t <= 0 for _, t in seleccion):
     st.info("Elige al menos un proyecto y asígnale tokens para ver la propuesta.")
@@ -190,7 +237,22 @@ for i, (nombre, _suf) in enumerate(maestro.ESTATUS):
         value={"Reentel": 11.0, "ReentelPro": 13.0, "SuperReentel": 16.0}[nombre],
         step=0.5, key=f"tasa_{nombre}") / 100.0
 
-costes = {n: propuesta.coste_estatus(r, precio_rnt, eurusd) for n, r in rnts.items()}
+_actual = propuesta.estatus_actual(rnt_actual, rnts) if rnt_actual else None
+costes = {n: propuesta.coste_estatus(r, precio_rnt, eurusd, rnt_actual)
+          for n, r in rnts.items()}
+if rnt_actual:
+    _c = costes[estatus]
+    if _c["rnts"] <= 0:
+        st.success(
+            f"Este inversor ya tiene **{rnt_actual:,.0f} RNT**, así que **ya es {_actual}**: "
+            f"la propuesta no le cobra ninguna adquisición de estatus."
+        )
+    else:
+        st.info(
+            f"Este inversor ya es **{_actual}** con {rnt_actual:,.0f} RNT. Para llegar a "
+            f"**{estatus}** solo necesita comprar **{_c['rnts']:,.0f} RNT** más, no los "
+            f"{_c['rnts_umbral']:,.0f} del umbral: la propuesta cobra únicamente la diferencia."
+        )
 cartera = propuesta.construir(seleccion, eurusd)
 escenarios = propuesta.escenarios(
     cartera, tasas, {n: c["eur"] for n, c in costes.items()}, tasa_staking)
@@ -211,8 +273,10 @@ k[0].markdown(kpi_card("🏠", "Inmuebles", str(cartera["n"]),
                        sublabel=f"{cartera['tokens']:,.0f} tokens"), unsafe_allow_html=True)
 k[1].markdown(kpi_card("💶", "En inmuebles", f"{cartera['eur']:,.2f} €",
                        sublabel=f"${cartera['usd']:,.2f}"), unsafe_allow_html=True)
+_sub_estatus = (f"{coste_ep['rnts']:,.0f} RNT · {estatus}" if coste_ep["rnts"] > 0
+                else f"ya es {_actual or estatus}")
 k[2].markdown(kpi_card("⭐", "Coste del estatus", f"{coste_ep['eur'] or 0:,.2f} €",
-                       sublabel=f"{coste_ep['rnts']:,.0f} RNT · {estatus}"),
+                       sublabel=_sub_estatus),
               unsafe_allow_html=True)
 k[3].markdown(kpi_card("💰", "Capital total", f"{total_eur:,.2f} €",
                        sublabel="inmuebles + estatus"), unsafe_allow_html=True)

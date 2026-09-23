@@ -34,6 +34,8 @@ DORADO   = "#F5A623"
 NAVY     = "#0D1B2E"
 AZUL     = "#3B82F6"
 VERDE    = "#4DE4A0"
+VERDE_OSC = "#0F9960"
+ROJO      = "#C0392B"
 
 PDF_DORADO = colors.HexColor(DORADO)
 PDF_NAVY   = colors.HexColor(NAVY)
@@ -260,14 +262,30 @@ def construir(datos: dict) -> bytes:
                      (pct(r_prop["anual"]), f"rentabilidad anualizada estimada · {ep}")], E),
               Spacer(1, 0.5 * cm)]
 
-    story += [_tabla(
-        ["Concepto", "Importe (€)", "Importe ($)"],
-        [["Inversión en inmuebles", eur(cartera["eur"]), usd(cartera["usd"])],
-         [f"Adquisición del estatus {ep} ({num(coste.get('rnts'))} RNT)",
-          eur(coste.get("eur")), usd(coste.get("usd"))],
-         ["<b>Capital total desplegado</b>", f"<b>{eur(total_eur)}</b>", f"<b>{usd(total_usd)}</b>"]],
-        [ANCHO_UTIL * 0.5, ANCHO_UTIL * 0.25, ANCHO_UTIL * 0.25], E),
-        Spacer(1, 0.5 * cm)]
+    previa = cartera.get("con_cartera_previa")
+    filas_resumen = [["Valor de la cartera propuesta", eur(cartera["eur"]), usd(cartera["usd"])]]
+    if previa:
+        delta = cartera.get("delta_eur") or 0.0
+        actual = (cartera["eur"] or 0.0) - delta
+        filas_resumen = [
+            ["Cartera actual del inversor", eur(actual), usd(actual * datos["eurusd"])],
+            ["Movimiento propuesto (compra +, venta −)",
+             ("+" if delta >= 0 else "−") + eur(abs(delta)),
+             ("+" if delta >= 0 else "−") + usd(abs(delta) * datos["eurusd"])],
+            ["<b>Cartera resultante</b>", f"<b>{eur(cartera['eur'])}</b>",
+             f"<b>{usd(cartera['usd'])}</b>"],
+        ]
+    if coste.get("rnts_ya"):
+        etiqueta_estatus = (f"Adquisición del estatus {ep} — ya dispone de "
+                            f"{num(coste['rnts_ya'])} RNT, faltan {num(coste.get('rnts'))}")
+    else:
+        etiqueta_estatus = f"Adquisición del estatus {ep} ({num(coste.get('rnts'))} RNT)"
+    filas_resumen.append([etiqueta_estatus, eur(coste.get("eur")), usd(coste.get("usd"))])
+    filas_resumen.append(["<b>Capital total desplegado</b>",
+                          f"<b>{eur(total_eur)}</b>", f"<b>{usd(total_usd)}</b>"])
+    story += [_tabla(["Concepto", "Importe (€)", "Importe ($)"], filas_resumen,
+                     [ANCHO_UTIL * 0.5, ANCHO_UTIL * 0.25, ANCHO_UTIL * 0.25], E),
+              Spacer(1, 0.5 * cm)]
 
     story += [_tabla(
         ["Rentabilidad estimada de la cartera", "Reentel (base)", f"{ep} (propuesto)"],
@@ -352,20 +370,43 @@ def construir(datos: dict) -> bytes:
     filas = []
     for l in cartera["lineas"]:
         p = l["proyecto"]
-        filas.append([
-            f"<b>{p['label']}</b> · {p.get('nombre', '')}",
-            p.get("ubicacion", "—"), p.get("estado", "—"),
-            num(l["tokens"]), pct(l["peso"], 1),
-            eur(l["importe"]["eur"]),
-            _fecha(p.get("fecha_fin_estimada")),
-            pct(maestro.rentabilidad(p, "rnt", "anual")),
-            pct(maestro.rentabilidad(p, suf_ep, "anual")),
-        ])
-    story.append(_tabla(
-        ["Inmueble", "Ubicación", "Estado", "Tokens", "% cartera", "Inversión (€)",
-         "Fin estimado", "Rent. Reentel", f"Rent. {ep}"],
-        filas,
-        [ANCHO_UTIL * c for c in (0.26, 0.10, 0.11, 0.07, 0.08, 0.12, 0.08, 0.09, 0.09)], E))
+        fila = [f"<b>{p['label']}</b> · {p.get('nombre', '')}",
+                p.get("ubicacion", "—"), p.get("estado", "—")]
+        if previa:
+            act = l.get("tokens_actuales") or 0.0
+            d = l.get("delta", 0.0)
+            if abs(d) < 1e-9:
+                mov = "se mantiene"
+            elif d > 0:
+                mov = f"<b><font color='{VERDE_OSC}'>+{num(d)}</font></b>"
+            else:
+                mov = f"<b><font color='{ROJO}'>{num(d)}</font></b>"
+            fila += [num(act), num(l["tokens"]), mov]
+        else:
+            fila.append(num(l["tokens"]))
+        fila += [pct(l["peso"], 1), eur(l["importe"]["eur"]),
+                 _fecha(p.get("fecha_fin_estimada")),
+                 pct(maestro.rentabilidad(p, "rnt", "anual")),
+                 pct(maestro.rentabilidad(p, suf_ep, "anual"))]
+        filas.append(fila)
+
+    if previa:
+        cab = ["Inmueble", "Ubicación", "Estado", "Tokens hoy", "Tokens propuestos",
+               "Movimiento", "% cartera", "Inversión (€)", "Fin estimado",
+               "Rent. Reentel", f"Rent. {ep}"]
+        anchos = (0.20, 0.08, 0.09, 0.07, 0.08, 0.08, 0.06, 0.10, 0.07, 0.085, 0.085)
+    else:
+        cab = ["Inmueble", "Ubicación", "Estado", "Tokens", "% cartera", "Inversión (€)",
+               "Fin estimado", "Rent. Reentel", f"Rent. {ep}"]
+        anchos = (0.26, 0.10, 0.11, 0.07, 0.08, 0.12, 0.08, 0.09, 0.09)
+    story.append(_tabla(cab, filas, [ANCHO_UTIL * c for c in anchos], E))
+    if previa:
+        story += [Spacer(1, 0.3 * cm),
+                  Paragraph(
+                      "<b>Tokens hoy</b> es lo que el inversor ya posee de cada proyecto y "
+                      "<b>Movimiento</b> lo que habría que comprar o vender para llegar a la cartera "
+                      "propuesta. Una propuesta puede no incorporar ningún inmueble nuevo y consistir "
+                      "solo en ajustar las cantidades de los que ya tiene.", E["nota"])]
     story.append(PageBreak())
 
     # ── 6. Fichas por ubicación ──────────────────────────────────────────────
@@ -385,8 +426,14 @@ def construir(datos: dict) -> bytes:
                              f"{p.get('estado', '')}", E["txt"]),
                    Spacer(1, 0.15 * cm),
                    Paragraph((p.get("descripcion") or "")[:420], E["nota"])]
+            filas_ficha = [["Tokens propuestos", num(l["tokens"])]]
+            if l.get("tokens_actuales") is not None:
+                filas_ficha.insert(0, ["Tokens que ya tiene", num(l["tokens_actuales"])])
+                filas_ficha.append(["Movimiento", ("se mantiene" if abs(l.get("delta", 0)) < 1e-9
+                                                   else f"{l['delta']:+,.0f}".replace(",", "."))])
             der = _tabla(["Concepto", "Valor"],
-                         [["Tokens", num(l["tokens"])],
+                         filas_ficha +
+                         [
                           ["Inversión", eur(l["importe"]["eur"])],
                           ["Inicio de renta", _fecha(p.get("fecha_inicio_renta"))],
                           ["Fin estimado", _fecha(p.get("fecha_fin_estimada"))],

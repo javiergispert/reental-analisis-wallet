@@ -3416,6 +3416,17 @@ if rnt_events_filtered:
 
     # Precio RNT y valoración de la posición de farming ACTUAL (no del histórico
     # acumulado: lo que ya se retiró del farming no forma parte de la posición).
+    #
+    # Se deja la posición de RNT en sesión para que el constructor de propuestas
+    # sepa qué estatus tiene ya este inversor: cobrarle de nuevo la adquisición
+    # de un estatus que ya posee es el error más caro que puede cometer una
+    # propuesta, y el dato ya está calculado aquí.
+    st.session_state["posicion_rnt"] = {
+        "liquido": round(bal_rnt, 6),
+        "staking": round(bal_xrnt_staked, 6),
+        "total": round(bal_rnt + bal_xrnt_staked, 6),
+    }
+
     rnt_price = get_rnt_price_usdt()
     farm_rnt, farm_usdt, farm_ok = _farming_composicion(
         bal_slp_farm, pool_slp_total, pool_rnt_total, pool_usdt_total)
