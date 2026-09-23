@@ -183,6 +183,24 @@ def precio_rnt(bloque: int, api_key: str) -> float | None:
     return r[1] / r[0]
 
 
+def precio_actual(api_key: str) -> float | None:
+    """Precio del RNT en USDT ahora mismo, leyendo las reservas del par.
+
+    Para el presente sí sirve `eth_call`: lo que el nodo público no honra es la
+    etiqueta de un bloque pasado. Una sola consulta, sin recorrer eventos."""
+    try:
+        j = _consulta(api_key, module="proxy", action="eth_call", to=PAR,
+                      data="0x0902f1ac", tag="latest")     # getReserves()
+        h = str(j.get("result") or "")[2:]
+        if len(h) < 128:
+            return None
+        rnt = int(h[0:64], 16) / 10 ** DEC_RNT
+        usdt = int(h[64:128], 16) / 10 ** DEC_USDT
+        return usdt / rnt if rnt else None
+    except Exception:       # noqa: BLE001
+        return None
+
+
 def valor_lp(bloque: int, fecha: str, api_key: str, datos: dict) -> float | None:
     """Valor en USD de UNA participación del pool (SLP) en esa fecha.
 

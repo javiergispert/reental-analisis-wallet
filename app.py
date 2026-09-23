@@ -13,5 +13,6 @@ pg = st.navigation([
     st.Page("pages/03_Analisis_P2P.py",       title="Análisis Oportunidades P2P", icon="📊"),
     st.Page("pages/04_Aave_Mercado.py",        title="Mercado Aave",           icon="🏦"),
     st.Page("pages/05_Simulador_Rentabilidad.py", title="Simulador rentabilidad", icon="📈"),
+    st.Page("pages/06_Constructor_Propuestas.py", title="Constructor de propuestas", icon="📑"),
 ])
 pg.run()
