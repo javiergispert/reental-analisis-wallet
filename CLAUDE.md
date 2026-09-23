@@ -49,15 +49,16 @@ No hay suite de tests. Lo que funciona:
 
 ## Trampas conocidas
 
-### 1. Los JSON de la raíz no son los datos
+### 1. Los datos OTC no están en disco
 
-`otc_ofertas.json` y `otc_reservas.json` están en `.gitignore` y contienen una
-copia de junio de 2026. **La fuente de verdad es Google Sheets**, vía
-`otc_storage.read_list()`.
+**La fuente de verdad es Google Sheets**, vía `otc_storage.read_list()`. Nunca
+un fichero local.
 
-Pasó de verdad: alguien analizó una oferta de 400 tokens de Atlanta 1 leyendo el
-JSON y razonó sobre ella durante un rato. En el almacén real había **cero**
-ofertas activas.
+Pasó de verdad: existían en la raíz un `otc_ofertas.json` y un
+`otc_reservas.json` con una copia de junio de 2026 —ignorados por git, pero ahí—
+y alguien analizó una oferta de 400 tokens de Atlanta 1 leyéndolos. En el
+almacén real había **cero** ofertas activas. Los ficheros ya se han borrado y
+siguen en `.gitignore`: si vuelven a aparecer, no son datos, son residuo.
 
 ### 2. Tres lectores del maestro, tres verdades
 
@@ -94,9 +95,12 @@ desde `Sync`, supply desde los `Transfer` de emisión y quema. Ver `pool_rnt.py`
 - La solución fue el **BCE** para divisas (`divisas.py`, histórico completo) y el
   **pool** para el RNT (`pool_rnt.py`, sin límite).
 
-Queda pendiente: el Analizador todavía usa CoinGecko para el precio del RNT
-actual, y `pages/02_OTC.py` usa CoinGecko para su tipo de cambio. Hoy difieren
-del BCE y del pool en 0,28 % y 0,46 % respectivamente.
+Ya unificado: el precio del RNT sale siempre del pool y el tipo de cambio
+siempre del BCE, en toda la herramienta. Las fuentes antiguas —CoinGecko para el
+RNT, er-api para las divisas— quedan solo como respaldo si la principal falla, y
+cuando se usan se dice. **No vuelvas a introducir una segunda fuente para un
+dato que ya tiene la suya**: las dos cifras divergen y acaban en documentos
+distintos para la misma operación.
 
 ### 5. Las reservas se pisan entre sí
 
@@ -159,9 +163,6 @@ Cosas decididas a medias o sabidas y no hechas:
   renta**. Hasta saber qué son, quedan fuera.
 - **El SLP repartido en los claims de staking** ya se valora (parte proporcional
   de las reservas del pool), pero conviene contrastarlo con Reental.
-- **`pages/01_Simulador.py`** está muerto: 627 líneas inalcanzables tras un
-  `st.stop()`. Pendiente de borrar junto con las funciones de `utils.py` que
-  quedan huérfanas.
 - **`data/pool_rnt/supply.json` no tiene workflow**: se actualiza a mano con
   `scripts/snapshot_pool_rnt.py`.
 - **`requirements.txt` sin versiones fijadas** salvo `kaleido`.

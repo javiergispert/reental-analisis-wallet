@@ -8,3 +8,7 @@ otc_precios.json
 
 # Archivos de restauración con datos personales — nunca commitear
 RESTAURAR_*
+
+# Entorno virtual local y ajustes del editor: nunca se commitean
+.venv/
+.claude/

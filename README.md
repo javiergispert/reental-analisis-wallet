@@ -45,9 +45,6 @@ Google en `st.secrets["gcp_service_account"]`.
 | **Simulador rentabilidad** | Calculadora de estrategias empotrada (HTML de terceros) más el análisis del umbral de rentabilidad que hace falta para que un préstamo salga a cuenta |
 | **Constructor de propuestas** | Dossier comercial en PDF para un inversor, de alta o de ampliación sobre su cartera real. Puede dejar reservados en OTC los tokens que propone |
 
-`pages/01_Simulador.py` está **en construcción y no operativo**: corta con
-`st.stop()` en la línea 30. Las ~627 líneas siguientes no se ejecutan.
-
 ---
 
 ## Los módulos

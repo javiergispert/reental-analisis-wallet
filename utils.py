@@ -70,16 +70,6 @@ def parse_fecha_util(val: str) -> date:
     return None
 
 
-def add_months(dt: date, n: int) -> date:
-    """Suma n meses a una fecha sin depender de dateutil."""
-    month = dt.month - 1 + n
-    year  = dt.year + month // 12
-    month = month % 12 + 1
-    import calendar
-    last_day = calendar.monthrange(year, month)[1]
-    return dt.replace(year=year, month=month, day=min(dt.day, last_day))
-
-
 # ── Financiero ────────────────────────────────────────────────────────────────
 
 def calculate_irr(cash_flows: list, max_iter: int = 1000, tol: float = 1e-8):
@@ -274,44 +264,6 @@ def load_master_projects() -> pd.DataFrame:
     return pd.DataFrame(projects)
 
 
-@st.cache_data(show_spinner=False, ttl=1800)
-def load_p2p_listings(_master_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Carga el CSV de P2P y cruza con el máster.
-    Devuelve solo filas con tokens_disponibles > 0.
-    El parámetro _master_df tiene prefijo _ para excluirlo del hash de caché de Streamlit.
-    """
-    r = requests.get(GSHEET_P2P_URL, timeout=15, allow_redirects=True)
-    r.raise_for_status()
-    raw = pd.read_csv(io.BytesIO(r.content), header=None, encoding="utf-8")
-    raw.columns = raw.iloc[0]
-    raw = raw.iloc[1:].reset_index(drop=True)
-
-    master_by_id = {row["id"]: row.to_dict() for _, row in _master_df.iterrows()}
-    listings = []
-
-    for _, row in raw.iterrows():
-        pid            = str(row.iloc[0]).strip()
-        tokens_disp    = parse_float_val(str(row.iloc[3]))
-        precio_p2p     = parse_float_val(str(row.iloc[4]))
-
-        if not tokens_disp or tokens_disp <= 0:
-            continue
-        if pid not in master_by_id:
-            continue
-
-        m = dict(master_by_id[pid])
-        m.update({
-            "tokens_disponibles":   tokens_disp,
-            "tokens_en_propuestas": parse_float_val(str(row.iloc[2])) or 0,
-            "precio_p2p_usdt":      precio_p2p,
-            "fuente":               "p2p_real",
-        })
-        listings.append(m)
-
-    return pd.DataFrame(listings) if listings else pd.DataFrame()
-
-
 # ── Blockchain ────────────────────────────────────────────────────────────────
 
 # La nomenclatura de los tokens Reental vive en su propio módulo. Se reexporta
@@ -423,26 +375,3 @@ def fetch_all_token_txs(wallet: str, api_key: str, max_rounds: int = 40) -> list
     return fetch_all_account_txs(wallet, api_key, action="tokentx", max_rounds=max_rounds)
 
 
-def fetch_wallet_token_balances(wallet: str, known_addresses: set, api_key: str) -> dict:
-    """
-    Devuelve {contract_address_lower: net_balance} para tokens Reental en la wallet.
-    Solo incluye tokens con saldo > 0.
-    """
-    if not api_key:
-        return {}
-    wallet = wallet.lower()
-    txs = fetch_all_token_txs(wallet, api_key)
-
-    balances = {}
-    for tx in txs:
-        contract = tx["contractAddress"].lower()
-        if contract not in known_addresses:
-            continue
-        dec   = int(tx["tokenDecimal"]) if tx.get("tokenDecimal") else 18
-        value = int(tx["value"]) / (10 ** dec)
-        if tx["to"].lower() == wallet:
-            balances[contract] = balances.get(contract, 0.0) + value
-        elif tx["from"].lower() == wallet:
-            balances[contract] = balances.get(contract, 0.0) - value
-
-    return {k: round(v, 6) for k, v in balances.items() if v > 0.001}
