@@ -1521,7 +1521,18 @@ def calculate_irr(cash_flows: list, max_iter: int = 1000, tol: float = 1e-8):
 
 @st.cache_data(show_spinner=False, ttl=300)
 def get_rnt_price_usdt() -> float:
-    """Obtiene el precio actual de RNT en USD desde CoinGecko. Devuelve 0.0 si no está disponible."""
+    """Precio del RNT en USDT ahora mismo.
+
+    Del pool RNT/USDT, que es donde se forma: es el mercado contra el que
+    cualquiera compra o vende RNT, y el mismo del que salen los precios
+    históricos. CoinGecko queda como red de seguridad —deriva de este mismo
+    pool y hoy difiere un 0,3%— para que un fallo de Etherscan no deje la
+    página sin precio.
+    """
+    if API_KEY:
+        precio = _pool.precio_actual(API_KEY)
+        if precio:
+            return precio
     try:
         r = requests.get(
             "https://api.coingecko.com/api/v3/simple/price",
@@ -3591,10 +3602,19 @@ def _rnt_price_history_usd() -> dict:
 
 
 def get_rnt_price_on_date(date_str: str):
-    """Precio de RNT en USD para una fecha dada (YYYY-MM-DD). Devuelve None si
-    la fecha excede la ventana de 365 días del plan gratuito de CoinGecko, o si
-    el histórico no se pudo obtener — nunca se aproxima a 0 en ese caso."""
-    return _rnt_price_history_usd().get(date_str[:10])
+    """Precio del RNT en USD para una fecha dada (YYYY-MM-DD).
+
+    Primero CoinGecko, que no cuesta ninguna consulta porque el histórico se
+    descarga entero de una vez; y si la fecha cae fuera de su ventana de 365
+    días, el propio pool RNT/USDT, que no tiene límite. Devuelve None solo
+    cuando ninguna de las dos sabe: nunca se aproxima a cero ni al precio de
+    hoy, que en un informe fiscal sería peor que no dar cifra.
+    """
+    dia = date_str[:10]
+    precio = _rnt_price_history_usd().get(dia)
+    if precio:
+        return precio
+    return (_pool_en_fecha(dia) or {}).get("precio_rnt")
 
 @st.cache_data(show_spinner=False, ttl=86400)
 def _pool_en_fecha(fecha: str, _esquema: int = _pool.ESQUEMA) -> dict:

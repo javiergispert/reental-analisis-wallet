@@ -26,6 +26,7 @@ from reental_tokens import codigo_proyecto_atoken
 # de la API se convirtiera en "saldo desconocido".
 import aave_lend as _al
 import otc_saldos as _saldos
+import divisas as _fx
 import otc_inventario as _inv
 # Avisos de protocolo: los pasos que hay que dar FUERA de la herramienta y en
 # orden. El texto vive en el módulo, no aquí.
@@ -90,15 +91,28 @@ def _fresh_dict(tab: str) -> dict:
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def get_eur_usd_rate() -> tuple:
-    """Devuelve (tasa EUR→USD, fecha_str). Fallback a 1.10 si falla."""
+    """(dólares por euro, fecha de la referencia).
+
+    Del Banco Central Europeo, que es el mismo tipo con el que el informe
+    fiscal convierte las operaciones. Antes salía de otro proveedor y las dos
+    cifras no coincidían: una reserva quedaba guardada con un cambio distinto
+    del que después declaraba esa misma operación. La diferencia es pequeña
+    —una décima— pero no hay ninguna razón para tener dos.
+
+    El BCE publica en días hábiles; para un sábado o un festivo se usa la
+    última referencia anterior, que es lo que hace cualquier contabilidad. Si
+    la consulta falla se recurre al proveedor de antes, y solo si ese también
+    falla se devuelve un valor por defecto, señalado como tal.
+    """
+    hoy = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    tipo = _fx.tipo_en(hoy, _fx.serie("EUR", "2026-01-01", hoy))
+    if tipo:
+        return round(1.0 / tipo, 6), f"{hoy} (BCE)"
     try:
-        r = requests.get(EXCHANGE_API_URL, timeout=8)
-        data = r.json()
-        rate = data["rates"]["USD"]
-        fecha = data.get("time_last_update_utc", "")[:16]
-        return round(rate, 6), fecha
+        data = requests.get(EXCHANGE_API_URL, timeout=8).json()
+        return round(data["rates"]["USD"], 6), data.get("time_last_update_utc", "")[:16]
     except Exception:
-        return 1.10, "API no disponible"
+        return 1.10, "sin referencia disponible"
 
 # ── Carga del catálogo master ─────────────────────────────────────────────────
 
