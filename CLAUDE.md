@@ -72,9 +72,18 @@ estaba usando no traía la columna R. **23 de 127 proyectos salían mal** — ha
 proyectos de la emisión estadounidense denominados en euros y uno español en
 dólares. Emisión, divisa y ubicación son tres cosas distintas.
 
-`maestro.py` lee **por el nombre de la cabecera** y solo cae a la posición si no
-la encuentra, precisamente porque el maestro lo editan personas y una columna
-insertada en medio desplaza todo lo que viene detrás sin que nada falle.
+**Los dos lectores resuelven ya las columnas por el nombre de su cabecera** y
+solo caen a la posición si no la encuentran o si el nombre está repetido. Es la
+defensa contra lo que de verdad pasa: el maestro lo editan personas y una
+columna insertada en medio desplaza todo lo que viene detrás **sin que nada
+falle**. Comprobado simulando esa inserción: el lector antiguo devolvía
+`ubicacion='nan'` y la ubicación metida en la columna de tipología; el de ahora
+devuelve ambas bien.
+
+Lo que sigue pendiente es tener **un solo lector**. `load_master_projects`
+deriva campos propios —tipo de renta, si el proyecto es colateralizable, y la
+preferencia de dato real sobre estimado en los cerrados— de los que dependen
+dos páginas, así que fundirlo con `maestro.proyectos` no es mecánico.
 
 ### 3. `eth_call` a un bloque antiguo devuelve el estado de HOY
 
