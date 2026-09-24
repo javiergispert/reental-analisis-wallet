@@ -1046,7 +1046,7 @@ else:
 
         st.markdown("<div style='font-size:0.78rem;color:#64748b;font-weight:600;"
                     "margin:12px 0 6px;'>👥 Amplitud</div>", unsafe_allow_html=True)
-        a1, a2, a3 = st.columns(3)
+        a1, a2, a3, a4 = st.columns(4)
         a1.markdown(kpi_card("🧍", "Vendedores únicos", f"{_k_tot['vendedores']:,}",
                              sublabel="wallets distintas",
                              help="Cuántos inversores distintos han vendido. Mide si el mercado "
@@ -1057,9 +1057,49 @@ else:
                              help="Solo se conoce en RNTP2P: en OTC el comprador se registra "
                                   "por nombre, no por wallet."),
                     unsafe_allow_html=True)
-        a3.markdown(kpi_card("🪙", "Tokens transaccionados", f"{_k_tot['tokens']:,.2f}",
+        _repes = _k_tot["vendedores"] + _k_tot["compradores"] - _k_tot["usuarios"]
+        a3.markdown(kpi_card("👥", "Usuarios únicos", f"{_k_tot['usuarios']:,}",
+                             sublabel=(f"{_repes:,} han vendido y comprado" if _repes
+                                       else "sin solapamiento"),
+                             help="Inversores distintos que han participado, vendiendo o "
+                                  "comprando. NO es la suma de las dos tarjetas anteriores: "
+                                  "quien vendió un mes y compró otro es una sola persona y "
+                                  "sumarlas lo contaría dos veces."),
+                    unsafe_allow_html=True)
+        a4.markdown(kpi_card("🪙", "Tokens transaccionados", f"{_k_tot['tokens']:,.2f}",
                              sublabel="con detalle disponible",
                              help="Solo cuenta las operaciones cuya cantidad se conoce."),
+                    unsafe_allow_html=True)
+
+        # El ritmo va junto al gráfico de evolución, que es su contexto.
+        st.markdown("<div style='font-size:0.78rem;color:#64748b;font-weight:600;"
+                    "margin:12px 0 6px;'>📆 Ritmo</div>", unsafe_allow_html=True)
+        r1, r2, r3 = st.columns(3)
+        _med, _med3 = _k_tot["mediana_mes"], _k_tot["mediana_mes_3"]
+        r1.markdown(kpi_card("📊", "Mediana mensual", f"{_med:,.1f}" if _med is not None else "—",
+                             sublabel=f"operaciones · {_k_tot['meses']} meses de serie",
+                             help="Operaciones del mes típico en todo el histórico. Se usa la "
+                                  "MEDIANA y no la media porque un mes excepcional —el "
+                                  "lanzamiento de un proyecto que mueve cien operaciones— "
+                                  "desplaza la media y deja de describir el mes normal. Los "
+                                  "meses sin ninguna operación cuentan como cero: son "
+                                  "información sobre la profundidad, no ausencia de dato."),
+                    unsafe_allow_html=True)
+        _delta = (_med3 - _med) if (_med is not None and _med3 is not None) else None
+        r2.markdown(kpi_card("🔥", "Mediana últimos 3 meses",
+                             f"{_med3:,.1f}" if _med3 is not None else "—",
+                             sublabel=(f"{_delta:+,.1f} frente al histórico" if _delta is not None
+                                       else "operaciones"),
+                             value_color=("#16a34a" if (_delta or 0) > 0 else
+                                          "#dc2626" if (_delta or 0) < 0 else "#1e293b"),
+                             help="El mismo cálculo sobre los tres últimos meses. Comparado con "
+                                  "la mediana histórica dice si el mercado se está animando o "
+                                  "enfriando."),
+                    unsafe_allow_html=True)
+        r3.markdown(kpi_card("🧾", "Operaciones en el período", f"{_k_tot['ops']:,}",
+                             sublabel="con los filtros aplicados",
+                             help="Total de operaciones que cumplen el filtro de fechas y "
+                                  "proyecto seleccionado arriba."),
                     unsafe_allow_html=True)
 
         _serie = _mkt.serie_mensual(_ops)

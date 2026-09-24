@@ -144,6 +144,55 @@ def filtrar(df: pd.DataFrame, desde=None, hasta=None,
     return out
 
 
+def usuarios_unicos(df: pd.DataFrame) -> int:
+    """Inversores distintos que han participado, vendiendo o comprando.
+
+    No es la suma de vendedores y compradores: quien vendió en marzo y compró
+    en julio es UNA persona, y sumarlos lo contaría dos veces. Se unen los dos
+    conjuntos y se deduplica.
+
+    Funciona igual con las direcciones seudonimizadas, porque el seudónimo es
+    estable: la misma wallet da el mismo identificador aparezca en la columna
+    que aparezca.
+    """
+    if df.empty:
+        return 0
+    vend = set(df["vendedor"].dropna().astype(str))
+    comp = set(df["comprador"].dropna().astype(str))
+    return len((vend | comp) - {""})
+
+
+def operaciones_por_mes(df: pd.DataFrame) -> pd.Series:
+    """Operaciones de cada mes, CON los meses sin actividad a cero.
+
+    Rellenar los huecos no es un detalle: sin ellos la mediana solo mira los
+    meses en que hubo mercado y sale más alta de lo que fue. Un mes sin una
+    sola operación es información sobre la profundidad, no una ausencia de
+    dato.
+    """
+    if df.empty:
+        return pd.Series(dtype="int64")
+    meses = df["fecha"].dt.to_period("M")
+    conteo = meses.value_counts().sort_index()
+    completo = pd.period_range(meses.min(), meses.max(), freq="M")
+    return conteo.reindex(completo, fill_value=0)
+
+
+def mediana_mensual(df: pd.DataFrame, ultimos: int | None = None):
+    """Mediana de operaciones al mes. `ultimos` la acota a los N últimos meses.
+
+    Mediana y no media: un mes excepcional —el lanzamiento de un proyecto que
+    mueve cien operaciones— desplaza la media y deja de describir el mes
+    normal, que es justo lo que se quiere saber.
+    """
+    serie = operaciones_por_mes(df)
+    if serie.empty:
+        return None
+    if ultimos:
+        serie = serie.tail(ultimos)
+    return float(serie.median())
+
+
 def kpis(df: pd.DataFrame, precio_emision: float | None = None) -> dict:
     """Métricas de un conjunto de operaciones ya filtrado.
 
@@ -153,7 +202,8 @@ def kpis(df: pd.DataFrame, precio_emision: float | None = None) -> dict:
     if df.empty:
         return {"ops": 0, "volumen": 0.0, "tokens": 0.0, "precio_medio": None,
                 "ticket_medio": None, "vendedores": 0, "compradores": 0,
-                "prima_pct": None, "sin_detalle": 0}
+                "usuarios": 0, "mediana_mes": None, "mediana_mes_3": None,
+                "meses": 0, "prima_pct": None, "sin_detalle": 0}
     ok = df["detalle_ok"].fillna(False).astype(bool)
     con = df[ok & df["precio_unitario"].notna()]
     precio = (con["importe_usd"].sum() / con["tokens"].sum()) if len(con) and con["tokens"].sum() > 0 else None
@@ -167,6 +217,10 @@ def kpis(df: pd.DataFrame, precio_emision: float | None = None) -> dict:
         "ticket_medio": float(df["importe_usd"].mean()),
         "vendedores": int(df["vendedor"].dropna().nunique()),
         "compradores": int(df["comprador"].dropna().nunique()),
+        "usuarios": usuarios_unicos(df),
+        "mediana_mes": mediana_mensual(df),
+        "mediana_mes_3": mediana_mensual(df, ultimos=3),
+        "meses": int(len(operaciones_por_mes(df))),
         "prima_pct": prima,
         "sin_detalle": int((~ok).sum()),
     }
