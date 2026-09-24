@@ -28,6 +28,7 @@ cp .env.example .env     # y rellenar (ver más abajo)
 | `GSHEET_WALLETS_URL` | Hoja con las wallets conocidas de Reental (opcional) |
 | `OTC_WALLET` | Wallet de custodia del stock OTC |
 | `OTC_ADMIN_PIN` | PIN del panel de precios mínimos OTC |
+| `OFFRAMP_SHEET_URL` | Enlace al Excel de OFF-RAMP que muestra el aviso de protocolo OTC. La herramienta **no lee datos** de esa hoja: solo la enlaza. Sin ella el protocolo aparece igual, sin enlace |
 
 En Streamlit Cloud, además, el almacén OTC necesita la credencial de servicio de
 Google en `st.secrets["gcp_service_account"]`.

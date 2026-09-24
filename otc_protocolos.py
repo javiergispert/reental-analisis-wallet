@@ -45,8 +45,25 @@ RESERVA_TERCERO = "reserva_tercero"
 
 SAFE_OTC = os.getenv("OTC_WALLET", "0xCE0719ec1bDA336Ba069C6961aD167767829301A")
 
-URL_OFFRAMP = ("https://docs.google.com/spreadsheets/u/1/d/"
-               "1yNiqL2dWPCt6OW8D48Z3sWEIG6fQ19mOWzS_W1IPSa0/edit?gid=0#gid=0")
+# El enlace al OFF-RAMP viene de la configuración, no del código.
+#
+# Esa hoja lleva nombre, correo, IBAN y certificado de titularidad de cada
+# inversor: es el fichero más sensible que toca este proceso. La herramienta no
+# lee ni un dato de ella —solo la enlaza para que el comercial llegue de un
+# clic—, así que no hay ninguna razón para que su dirección viaje en un
+# repositorio público. Tenerla ahí no abre la puerta a nadie, pero dice que la
+# puerta existe y dónde está, que es justo lo que necesita una suplantación.
+#
+# Sin configurar, el protocolo se muestra igual y sin enlace: el paso sigue
+# siendo obligatorio, solo que hay que llegar a la hoja por cuenta propia.
+URL_OFFRAMP = os.getenv("OFFRAMP_SHEET_URL", "").strip()
+
+
+def _enlace_offramp() -> str:
+    """El OFF-RAMP tal y como debe aparecer en el aviso."""
+    if URL_OFFRAMP:
+        return '<a href="%s" target="_blank">abrir</a>' % URL_OFFRAMP
+    return "<i>pídeselo a tu responsable</i>"
 
 # Cada paso es un texto y, opcionalmente, un detalle en viñetas. `html=True`
 # permite meter el enlace al OFF-RAMP y la dirección del SAFE sin escaparlos.
@@ -78,7 +95,7 @@ PROTOCOLOS = {
                     ("El inversor propietario del token lo tendrá que enviar al "
                      f"<b>SAFE OTC de Reental</b>:<br><code>{SAFE_OTC}</code>"),
                     ("El responsable de ese inversor indicará la operación en el excel de "
-                     f"<b>OFF-RAMP</b> (<a href=\"{URL_OFFRAMP}\" target=\"_blank\">abrir</a>) "
+                     f"<b>OFF-RAMP</b> ({_enlace_offramp()}) "
                      "para que Reental procese la compra y así pagarle según se indique. "
                      "Será <b>imprescindible</b> tener el hash del envío de los tokens."),
                 ],
@@ -298,7 +315,7 @@ def _modal_consulta() -> None:
         f'padding:12px 16px;font-size:0.84rem;color:#334155;">'
         f'<b>Datos que siempre hacen falta</b><br>'
         f'SAFE OTC de Reental: <code>{SAFE_OTC}</code><br>'
-        f'Excel de OFF-RAMP: <a href="{URL_OFFRAMP}" target="_blank">abrir</a> '
+        f'Excel de OFF-RAMP: {_enlace_offramp()} '
         f'— imprescindible el hash del envío de los tokens.</div>',
         unsafe_allow_html=True,
     )

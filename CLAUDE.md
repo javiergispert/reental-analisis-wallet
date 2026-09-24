@@ -7,6 +7,27 @@ que llegó a producción o estuvo a punto.
 
 ---
 
+## El repositorio es PÚBLICO
+
+`github.com/javiergispert/reental-analisis-wallet` es público desde junio de
+2026. Cualquiera puede leer el código y los ficheros de `data/`, y Google los
+indexa.
+
+Consecuencias al trabajar aquí:
+
+- **Nada de enlaces a hojas internas ni identificadores de documentos en el
+  código.** Van a variables de entorno. No abren la puerta a nadie —esas hojas
+  tienen sus propios permisos— pero dicen que la puerta existe y dónde está, que
+  es lo que necesita una suplantación. El caso concreto: el Excel de OFF-RAMP,
+  con nombre, correo, IBAN y certificado de titularidad de cada inversor, estuvo
+  enlazado a fuego en `otc_protocolos.py` durante 27 días.
+- **Ojo con lo que se commitea en `data/`.** Ahí hay ~1.900 direcciones de
+  inversores con su histórico de compraventas e importes. No hay nombres ni
+  correos, pero una wallet con su historial es dato personal seudonimizado y
+  Reental sabe a quién corresponde cada una. Está pendiente de decidir si se
+  saca o se anonimiza; borrarlo de `main` no lo quita del historial de git.
+- Sin licencia, nadie puede reutilizar el código legalmente aunque lo vea.
+
 ## Quién la usa y para qué
 
 La usa el equipo **Reental Wealth** —gestores de cartera y comerciales— y en
