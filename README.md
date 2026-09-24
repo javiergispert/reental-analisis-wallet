@@ -102,10 +102,35 @@ Cada carpeta tiene su propio `README.md`. En resumen:
 | `data/aave/snapshot.json` | `scripts/snapshot_aave.py` | **GitHub Action diaria** (04:30 UTC), commitea si cambia |
 | `data/pool_rnt/supply.json` | `scripts/snapshot_pool_rnt.py` | **A mano** — no tiene workflow todavía |
 | `data/simulador/calculadora.html` | `scripts/preparar_simulador.py` | Solo si Jesús González entrega una versión nueva |
-| `data/rnt_p2p/`, `data/otc_historico/` | Exports normalizados | Puntual |
+| `data/rnt_p2p/`, `data/otc_historico/` | Exports **seudonimizados** | Mensual (ver abajo) |
 
 El snapshot de Aave existe porque reconstruirlo en cada visita son 4-5 minutos de
 llamadas a Etherscan. Con el fichero, la página carga en segundos.
+
+### La exportación mensual del mercado secundario
+
+Cada mes entra una exportación nueva de p2p.rnt.finance. Lleva las direcciones
+reales de los inversores, y el repositorio es público, así que **no se commitea
+nunca tal cual**:
+
+```bash
+# 1. Dejar la exportación en bruto aquí (la carpeta está en .gitignore)
+cp ~/Descargas/finalized_2026-10-01.csv data/rnt_p2p/crudo/
+
+# 2. Reconstruir desde la cadena el detalle que la plataforma purga
+#    (necesita las direcciones reales, por eso va primero)
+python3 scripts/enriquecer_p2p.py
+
+# 3. Seudonimizar: copia crudo/ → exports/ y sustituye las direcciones
+python3 scripts/anonimizar_secundario.py
+
+# 4. Commitear solo lo que quedó en exports/ y enriquecido.csv
+```
+
+El paso 3 se puede ensayar con `--revisar`, que informa sin tocar nada. Las
+direcciones se sustituyen por `inv_xxxxxxxx`, **estable**: la misma wallet da
+siempre el mismo seudónimo, así que el recuento de vendedores y compradores
+únicos no cambia de un mes a otro.
 
 ---
 

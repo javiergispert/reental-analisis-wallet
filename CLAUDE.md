@@ -21,11 +21,14 @@ Consecuencias al trabajar aquí:
   es lo que necesita una suplantación. El caso concreto: el Excel de OFF-RAMP,
   con nombre, correo, IBAN y certificado de titularidad de cada inversor, estuvo
   enlazado a fuego en `otc_protocolos.py` durante 27 días.
-- **Ojo con lo que se commitea en `data/`.** Ahí hay ~1.900 direcciones de
-  inversores con su histórico de compraventas e importes. No hay nombres ni
-  correos, pero una wallet con su historial es dato personal seudonimizado y
-  Reental sabe a quién corresponde cada una. Está pendiente de decidir si se
-  saca o se anonimiza; borrarlo de `main` no lo quita del historial de git.
+- **Las direcciones de `data/` van seudonimizadas.** Había 952 wallets de
+  inversores con su histórico de compraventas e importes. Ahora aparecen como
+  `inv_xxxxxxxx` y las exportaciones en bruto viven en `data/*/crudo/`, que está
+  en `.gitignore`. Antes de commitear una exportación nueva hay que pasar
+  `scripts/anonimizar_secundario.py` — el flujo mensual está en el README.
+  **Aviso: el historial de git conserva las versiones antiguas con las
+  direcciones reales.** Limpiarlo de verdad exige reescribir el historial
+  (`git filter-repo`), que cambia todos los hashes de commit; está sin hacer.
 - Sin licencia, nadie puede reutilizar el código legalmente aunque lo vea.
 
 ## Quién la usa y para qué
@@ -63,7 +66,7 @@ No hay suite de tests. Lo que funciona:
   conocida. El motor de propuestas se validó reproduciendo una propuesta real
   del equipo: cuadraba al céntimo en importes y dentro del 0,5 % en escenarios.
 - **La aplicación de verdad**: `streamlit run app.py` y recorrer el flujo. Varios
-  fallos solo aparecen ahí (ver trampa 7).
+  fallos solo aparecen ahí (ver trampa 8).
 - Si tocas una página que escribe datos —OTC—, pruébala sin llegar a guardar.
 
 ---
@@ -132,7 +135,22 @@ cuando se usan se dice. **No vuelvas a introducir una segunda fuente para un
 dato que ya tiene la suya**: las dos cifras divergen y acaban en documentos
 distintos para la misma operación.
 
-### 5. Un fallo de red que parece «no hay datos»
+### 5. Un hash sin clave no anonimiza nada
+
+Seudonimizar direcciones con `sha256(direccion)` aquí no protegería: el conjunto
+de candidatos es **enumerable**. Cualquiera puede listar desde la cadena todas
+las direcciones que han tenido un token de Reental, hashearlas y cruzarlas. La
+reidentificación sería completa y en minutos.
+
+Por eso `seudonimos.py` usa HMAC con una clave secreta (`SEUDONIMO_SALT`, fuera
+del repositorio) y **se niega a ejecutarse sin ella**: un valor por defecto en
+un repositorio público equivale a no tener clave, y el fallo sería silencioso
+—los ficheros parecerían anonimizados.
+
+La clave hay que conservarla. Si se pierde, los seudónimos nuevos dejan de
+cuadrar con los antiguos y una misma wallet se contaría dos veces.
+
+### 6. Un fallo de red que parece «no hay datos»
 
 Una función que devuelve lista vacía tanto si no hay resultados como si la API
 falló es una bomba de relojería. `pool_rnt._logs` lo hacía: un límite de
@@ -148,13 +166,13 @@ La regla general: cuando reconstruyas un estado sumando eventos, busca una
 cifra independiente contra la que contrastarlo y compárala antes de dar el
 resultado por bueno.
 
-### 6. Las reservas se pisan entre sí
+### 7. Las reservas se pisan entre sí
 
 Hay un incidente documentado de pérdida de reservas (22/07/2026) por guardar la
 copia leída al pintar la página. **Releer la lista fresca justo antes de
 escribir**: `_store.read_list(TAB, fresh=True)` y añadir encima.
 
-### 7. Streamlit: cuatro cosas que no son evidentes
+### 8. Streamlit: cuatro cosas que no son evidentes
 
 - **`st.cache_data` indexa por los argumentos, no por el cuerpo de la función.**
   Si cambias la forma del diccionario que devuelve, la caché vieja sigue
@@ -172,7 +190,7 @@ escribir**: `_store.read_list(TAB, fresh=True)` y añadir encima.
   pasó de `(proyecto, tokens)` a `(proyecto, tokens, actuales)` y quedó un sitio
   desempaquetando dos. Accede por índice.
 
-### 8. Criterios de cálculo que no son obvios
+### 9. Criterios de cálculo que no son obvios
 
 - **La cartera se pondera por importe invertido, no por número de tokens.** Un
   token de 100 € y otro de 100 $ no son la misma inversión; hoy el europeo pesa

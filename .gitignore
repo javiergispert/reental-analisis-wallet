@@ -12,3 +12,8 @@ RESTAURAR_*
 # Entorno virtual local y ajustes del editor: nunca se commitean
 .venv/
 .claude/
+
+# Exportaciones en bruto del mercado secundario: llevan las direcciones reales
+# de los inversores. Se seudonimizan con scripts/anonimizar_secundario.py y solo
+# se versiona el resultado.
+data/*/crudo/

@@ -41,7 +41,13 @@ from utils import fetch_all_account_txs          # noqa: E402
 from reental_tokens import es_atoken_reental     # noqa: E402
 
 DIR_DATOS   = os.path.join(RAIZ, "data", "rnt_p2p")
-DIR_EXPORTS = os.path.join(DIR_DATOS, "exports")
+# Las exportaciones en bruto viven en `crudo/`, que está en .gitignore. Este
+# paso NECESITA las direcciones reales para cruzar con la cadena, así que mira
+# ahí primero; si no hay nada, cae a `exports/` —ya seudonimizado— y entonces
+# solo podrá resolver lo que ya tuviera detalle.
+DIR_CRUDO   = os.path.join(DIR_DATOS, "crudo")
+DIR_EXPORTS = (DIR_CRUDO if os.path.isdir(DIR_CRUDO) and glob.glob(os.path.join(DIR_CRUDO, "*.csv"))
+               else os.path.join(DIR_DATOS, "exports"))
 SALIDA      = os.path.join(DIR_DATOS, "enriquecido.csv")
 
 API_KEY = os.getenv("ETHERSCAN_API_KEY", "")
