@@ -37,6 +37,7 @@ from reental_tokens import codigo_proyecto_atoken
 # Disponibilidad de las ofertas de terceros: misma fuente que la página OTC, para
 # que las dos respondan lo mismo a "cuántos tokens se pueden vender de verdad".
 import otc_saldos as _saldos
+import mercado_pdf as _mkt_pdf_mod
 import mercado_secundario as _mkt
 import recarga as _recarga
 # Streamlit no reimporta lo que ya está en sys.modules: tras un despliegue esta
@@ -1149,6 +1150,56 @@ else:
             )
         st.caption(f"Cobertura de detalle en todo el histórico: **{_cob:.1f} %** de las operaciones. "
                    f"Datos desde {_fmin:%d/%m/%Y} hasta {_fmax:%d/%m/%Y}.")
+
+        # ── Informe técnico de esta sección ──────────────────────────────────
+        #
+        # Va en un fragmento porque pulsar el botón reejecuta el script entero,
+        # y aquí eso significa releer el maestro y rehacer todo el ranking para
+        # nada. Los datos entran como argumentos, ya calculados.
+        @st.fragment
+        def _informe_profundidad(datos: dict, nombre: str) -> None:
+            st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+            st.caption(
+                "**Informe técnico de profundidad** — nueve páginas con el volumen por canal, "
+                "la amplitud de participantes, el ritmo mensual, la dispersión del precio, la "
+                "concentración entre proyectos y la liquidez proyecto a proyecto. Respeta el "
+                "proyecto y las fechas que tengas filtrados arriba."
+            )
+            c1, c2 = st.columns([3, 1])
+            _borrador = c2.checkbox(
+                "Marca de borrador", value=True, key="mkt_pdf_borrador",
+                help="El documento va a inversores y Legal y Compliance no lo ha revisado. "
+                     "Mientras tanto sale con marca de agua para que no circule como material "
+                     "comercial si se reenvía por error.")
+            if c1.button("📄 Generar informe de profundidad (PDF)", type="primary",
+                         use_container_width=True, key="mkt_pdf_btn"):
+                with st.spinner("Componiendo el informe…"):
+                    st.session_state["_pdf_mercado"] = _mkt_pdf_mod.construir(
+                        {**datos, "borrador": _borrador})
+            _pdf = st.session_state.get("_pdf_mercado")
+            if _pdf:
+                st.download_button("⬇️ Descargar informe de profundidad",
+                                   data=_pdf, file_name=nombre, mime="application/pdf",
+                                   type="primary", use_container_width=True,
+                                   key="mkt_pdf_dl")
+
+        _emitidos = {a: (d or {}).get("n_tokens_total")
+                     for a, d in project_by_addr_global.items()
+                     if (d or {}).get("n_tokens_total")}
+        _nombres_proy = {a: f"{(d or {}).get('id', '')} · {(d or {}).get('nombre', '')}".strip(" ·")
+                         for a, d in project_by_addr_global.items()}
+        _informe_profundidad(
+            {"operaciones": _ops,
+             "kpis": _k_tot, "kpis_p2p": _k_p2p, "kpis_otc": _k_otc,
+             "dispersion": _mkt.dispersion_precio(_ops),
+             "concentracion": _mkt.concentracion(_ops),
+             "por_token": _mkt.resumen_por_token(_ops, meses=12),
+             "rotacion": _mkt.rotacion(_ops, _emitidos),
+             "nombres": _nombres_proy,
+             "desde": _desde, "hasta": _hasta,
+             "proyecto": None if _sel_proy.startswith("—") else _sel_proy,
+             "fecha": date.today()},
+            f"Reental_Profundidad_Mercado_{date.today():%Y%m%d}.pdf")
 
 # ── Exportar ─────────────────────────────────────────────────────────────────
 st.markdown("---")

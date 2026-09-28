@@ -237,6 +237,85 @@ def serie_mensual(df: pd.DataFrame) -> pd.DataFrame:
     return g
 
 
+def dispersion_precio(df: pd.DataFrame) -> dict:
+    """Cómo de apretado cotiza el mercado: percentiles del precio por token.
+
+    El precio medio solo no dice nada de la profundidad. Un mercado donde todo
+    se cruza entre 98 y 102 y otro donde va de 60 a 140 pueden tener la misma
+    media y ser cosas muy distintas para quien necesita vender.
+
+    Los percentiles van POR OPERACIÓN, no ponderados: aquí interesa el rango de
+    precios al que se ha cerrado, no cuánto dinero se movió a cada uno.
+    """
+    if df.empty:
+        return {}
+    ok = df["detalle_ok"].fillna(False).astype(bool)
+    precios = df[ok]["precio_unitario"].dropna()
+    if precios.empty:
+        return {}
+    p25, p50, p75 = (float(precios.quantile(q)) for q in (0.25, 0.50, 0.75))
+    return {
+        "min": float(precios.min()), "p25": p25, "mediana": p50, "p75": p75,
+        "max": float(precios.max()), "n": int(len(precios)),
+        # Operaciones de polvo: cantidades ínfimas o importe cero. No se
+        # excluyen —quitar datos en silencio es peor— pero se cuentan, porque
+        # son las que estiran el mínimo y el máximo sin significar un precio.
+        "marginales": int(((df[ok]["tokens"].fillna(0) < 0.01)
+                           | (df[ok]["importe_usd"].fillna(0) == 0)).sum()),
+        # Rango intercuartílico sobre la mediana: una medida de dispersión que
+        # no se descoloca con una operación extrema, como sí haría la
+        # desviación típica.
+        "dispersion_pct": ((p75 - p25) / p50 * 100) if p50 else None,
+    }
+
+
+def concentracion(df: pd.DataFrame) -> dict:
+    """Si el mercado es un mercado o son tres proyectos.
+
+    Se mide sobre el volumen por proyecto con el índice de Herfindahl, el mismo
+    que usan los reguladores de competencia. `equivalentes` es 1/HHI: cuántos
+    proyectos de tamaño idéntico darían esta misma concentración, que se lee
+    mucho mejor que el índice en bruto.
+    """
+    if df.empty:
+        return {}
+    por = df.groupby(df["token_address"].fillna("").str.lower())["importe_usd"].sum()
+    por = por[por.index != ""]
+    total = float(por.sum())
+    if not total or por.empty:
+        return {}
+    cuotas = (por / total).sort_values(ascending=False)
+    hhi = float((cuotas ** 2).sum())
+    return {
+        "proyectos": int(len(cuotas)),
+        "hhi": hhi,
+        "equivalentes": (1.0 / hhi) if hhi else None,
+        "top1_pct": float(cuotas.iloc[0] * 100),
+        "top5_pct": float(cuotas.head(5).sum() * 100),
+    }
+
+
+def rotacion(df: pd.DataFrame, tokens_emitidos: dict | None = None) -> dict:
+    """Qué parte de cada proyecto ha cambiado de manos en el período.
+
+    Es la medida de liquidez que de verdad importa a quien quiere salir: que se
+    hayan movido 300 tokens dice poco si el proyecto emitió 300 y mucho si
+    emitió 20.000. `tokens_emitidos` viene del maestro; sin él no se calcula,
+    porque inventar el denominador sería peor que no dar la cifra.
+    """
+    if df.empty or not tokens_emitidos:
+        return {}
+    ok = df["detalle_ok"].fillna(False).astype(bool)
+    con = df[ok]
+    salida = {}
+    for addr, g in con.groupby(con["token_address"].fillna("").str.lower()):
+        emitidos = tokens_emitidos.get(addr)
+        if not addr or not emitidos:
+            continue
+        salida[addr] = float(g["tokens"].sum()) / float(emitidos) * 100
+    return salida
+
+
 def resumen_por_token(df: pd.DataFrame, meses: int = 12) -> dict:
     """Liquidez del secundario por proyecto en los últimos `meses`.
 
@@ -267,5 +346,10 @@ def resumen_por_token(df: pd.DataFrame, meses: int = 12) -> dict:
             # Precio medio ponderado por importe, no por operación.
             "precio_medio": (con["importe_usd"].sum() / con["tokens"].sum())
                             if len(con) and con["tokens"].sum() > 0 else None,
+            # Cuándo se cruzó la última. Un proyecto con 40 operaciones hace
+            # ocho meses y ninguna desde entonces no es líquido hoy, y el
+            # recuento por sí solo no lo dice.
+            "ultima": g["fecha"].max(),
+            "dias_sin_operar": int((df["fecha"].max() - g["fecha"].max()).days),
         }
     return out
