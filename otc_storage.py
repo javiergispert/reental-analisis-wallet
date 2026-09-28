@@ -36,8 +36,18 @@ _CHUNK_SIZE = 45000     # margen de seguridad bajo el límite duro de 50.000
 _MAX_ROWS   = 60        # filas a leer/limpiar (≈2,7 M caracteres ≈ miles de reservas)
 
 
+@st.cache_resource(show_spinner=False)
 def _get_client():
-    """Cliente gspread por sesión para evitar conflictos entre usuarios."""
+    """Cliente gspread, construido una vez y reutilizado.
+
+    Antes se rehacía en CADA lectura: credenciales nuevas y un `authorize` que
+    pide un token OAuth por red. La página de OTC lee tres pestañas en cada
+    recarga, así que eran tres apretones de manos antes de traer un solo dato.
+
+    Compartirlo es correcto: la identidad es la misma para todos —una cuenta de
+    servicio, no la del usuario— y el objeto de credenciales renueva su token
+    solo. `cache_resource` es el mecanismo que Streamlit prevé para conexiones.
+    """
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     creds  = Credentials.from_service_account_info(
         dict(st.secrets["gcp_service_account"]), scopes=scopes
@@ -45,8 +55,26 @@ def _get_client():
     return gspread.authorize(creds)
 
 
+@st.cache_resource(show_spinner=False)
+def _libro():
+    """El libro abierto, reutilizado: `open_by_key` es otra llamada a la API
+    que se repetía en cada lectura."""
+    return _get_client().open_by_key(SPREADSHEET_ID)
+
+
 def _ws(tab: str):
-    return _get_client().open_by_key(SPREADSHEET_ID).worksheet(tab)
+    return _libro().worksheet(tab)
+
+
+def _reensamblar(filas) -> str | None:
+    """Une las celdas de la columna A hasta el primer hueco."""
+    partes = []
+    for fila in (filas or []):
+        val = fila[0] if fila else ""
+        if not val:
+            break            # primer hueco = fin del blob
+        partes.append(val)
+    return "".join(partes) if partes else None
 
 
 def _raw_read(tab: str) -> str | None:
@@ -54,23 +82,46 @@ def _raw_read(tab: str) -> str | None:
     concatenando celdas consecutivas hasta el primer hueco. Con reintentos."""
     for intento in range(4):
         try:
-            filas = _ws(tab).get(f"A1:A{_MAX_ROWS}")
-            partes = []
-            for fila in filas:
-                val = fila[0] if fila else ""
-                if not val:
-                    break            # primer hueco = fin del blob
-                partes.append(val)
-            return "".join(partes) if partes else None
+            return _reensamblar(_ws(tab).get(f"A1:A{_MAX_ROWS}"))
         except Exception:
             if intento < 3:
                 time.sleep(1.5)
     return None
 
 
+TABS = (TAB_RESERVAS, TAB_OFERTAS, TAB_PRECIOS)
+
+
 @st.cache_data(ttl=6, show_spinner=False)
+def _leer_todas() -> dict:
+    """Las tres pestañas en UNA sola petición, cacheadas juntas 6 segundos.
+
+    Antes cada pestaña era una llamada independiente y la página de OTC hace
+    tres en cada recarga. `values_batch_get` las trae de golpe, así que
+    cambiar de pestaña en la lista de reservas deja de costar tres viajes a
+    Google.
+
+    Si la llamada agrupada falla se devuelve vacío y cada lectura cae a su
+    camino individual: es un atajo, no la única vía.
+    """
+    try:
+        res = _libro().values_batch_get([f"'{t}'!A1:A{_MAX_ROWS}" for t in TABS])
+        bloques = res.get("valueRanges", [])
+        return {t: _reensamblar(b.get("values")) for t, b in zip(TABS, bloques)}
+    except Exception:       # noqa: BLE001
+        return {}
+
+
 def _cached_read(tab: str) -> str | None:
-    """Caché de lectura de 6 segundos: evita golpes simultáneos a la API."""
+    """El contenido de una pestaña, de la lectura agrupada si está disponible.
+
+    Una pestaña que no esté en `TABS` —o una lectura agrupada que falló— se
+    pide por su cuenta.
+    """
+    if tab in TABS:
+        todas = _leer_todas()
+        if tab in todas:
+            return todas[tab]
     return _raw_read(tab)
 
 
@@ -139,7 +190,7 @@ def write(tab: str, data) -> bool:
     for intento in range(4):
         try:
             _ws(tab).update(filas, f"A1:A{total}", raw=True)
-            _cached_read.clear()   # invalida caché inmediatamente tras escritura
+            _leer_todas.clear()    # invalida caché inmediatamente tras escritura
             return True
         except Exception:
             if intento < 3:
@@ -148,5 +199,10 @@ def write(tab: str, data) -> bool:
 
 
 def clear_cache():
-    """Invalida la caché de lectura (compartida por todas las páginas del proceso)."""
-    _cached_read.clear()
+    """Invalida la caché de lectura (compartida por todas las páginas del proceso).
+
+    Se limpia la lectura agrupada, que es donde vive ahora el contenido. El
+    cliente y el libro NO se tiran: son conexiones, no datos, y rehacerlas
+    cuesta dos viajes a Google sin ganar nada.
+    """
+    _leer_todas.clear()

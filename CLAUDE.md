@@ -66,7 +66,7 @@ No hay suite de tests. Lo que funciona:
   conocida. El motor de propuestas se validó reproduciendo una propuesta real
   del equipo: cuadraba al céntimo en importes y dentro del 0,5 % en escenarios.
 - **La aplicación de verdad**: `streamlit run app.py` y recorrer el flujo. Varios
-  fallos solo aparecen ahí (ver trampa 9).
+  fallos solo aparecen ahí (ver trampa 10).
 - Si tocas una página que escribe datos —OTC—, pruébala sin llegar a guardar.
 
 ---
@@ -197,13 +197,32 @@ La regla general: cuando reconstruyas un estado sumando eventos, busca una
 cifra independiente contra la que contrastarlo y compárala antes de dar el
 resultado por bueno.
 
-### 8. Las reservas se pisan entre sí
+### 8. Cada lectura del Sheet costaba tres viajes
+
+`otc_storage` reconstruía las credenciales y llamaba a `authorize` —un token
+OAuth por red— en CADA lectura, y además reabría el libro con `open_by_key`,
+que es otra llamada. Con tres pestañas que leer en cada recarga de la página
+de OTC, eran nueve viajes a Google antes de pintar nada. Y como las pestañas
+de la lista de reservas son botones que llaman a `st.rerun()`, cambiar de
+«Activas» a «Completadas» pagaba la cuenta entera.
+
+Ahora el cliente y el libro se guardan con `cache_resource` —son conexiones,
+no datos— y las tres pestañas se traen en **una sola** petición con
+`values_batch_get`. La caché de lectura sigue siendo de 6 segundos y se
+invalida en cada escritura.
+
+**No subas ese TTL para ganar velocidad.** La comprobación de disponibilidad
+al crear una reserva se hace contra esos datos, y alargar la ventana aumenta
+el riesgo de comprometer los mismos tokens dos veces. La velocidad se gana
+quitando viajes, no mirando datos más viejos.
+
+### 9. Las reservas se pisan entre sí
 
 Hay un incidente documentado de pérdida de reservas (22/07/2026) por guardar la
 copia leída al pintar la página. **Releer la lista fresca justo antes de
 escribir**: `_store.read_list(TAB, fresh=True)` y añadir encima.
 
-### 9. Streamlit: cuatro cosas que no son evidentes
+### 10. Streamlit: cuatro cosas que no son evidentes
 
 - **`st.cache_data` indexa por los argumentos, no por el cuerpo de la función.**
   Si cambias la forma de lo que devuelve, la caché vieja sigue sirviéndose y
@@ -227,7 +246,7 @@ escribir**: `_store.read_list(TAB, fresh=True)` y añadir encima.
   pasó de `(proyecto, tokens)` a `(proyecto, tokens, actuales)` y quedó un sitio
   desempaquetando dos. Accede por índice.
 
-### 10. Criterios de cálculo que no son obvios
+### 11. Criterios de cálculo que no son obvios
 
 - **La cartera se pondera por importe invertido, no por número de tokens.** Un
   token de 100 € y otro de 100 $ no son la misma inversión; hoy el europeo pesa
