@@ -181,7 +181,7 @@ Queda un caso ambiguo: un inversor con oferta publicada que además le venda a
 Reental por su cuenta el mismo token. Ahí se atribuiría de más y se bloquearía
 una venta — el error cae del lado seguro, nunca duplica una reserva.
 
-### 6. Un fallo de red que parece «no hay datos»
+### 7. Un fallo de red que parece «no hay datos»
 
 Una función que devuelve lista vacía tanto si no hay resultados como si la API
 falló es una bomba de relojería. `pool_rnt._logs` lo hacía: un límite de
