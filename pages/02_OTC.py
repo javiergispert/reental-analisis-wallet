@@ -39,6 +39,16 @@ API_KEY         = os.getenv("ETHERSCAN_API_KEY", "")
 ETHERSCAN_BASE  = "https://api.etherscan.io/v2/api"
 POLYGON_CHAIN   = 137
 CACHE_TTL_SECS   = 3600
+
+# Versión de la FORMA que devuelve `fetch_otc_balances`.
+#
+# `st.cache_data` indexa por los argumentos, no por el cuerpo de la función: al
+# pasar de devolver tres elementos a cuatro, la entrada vieja se seguía
+# sirviendo y la página reventaba al desempaquetar. Se sube este número cada
+# vez que cambie la forma del resultado, y se pasa COMO ARGUMENTO —sin guion
+# bajo delante, que en Streamlit significa «no formes parte de la clave»— para
+# que la entrada anterior deje de encontrarse.
+ESQUEMA_SALDOS   = 2
 POLYSCAN_TX_URL  = "https://polygonscan.com/tx/"
 EXCHANGE_API_URL = "https://open.er-api.com/v6/latest/EUR"
 OTC_ADMIN_PIN    = os.getenv("OTC_ADMIN_PIN", "1234")
@@ -137,10 +147,13 @@ known_addresses = set(project_by_addr.keys())
 # ── Fetch saldos OTC desde Etherscan ─────────────────────────────────────────
 
 @st.cache_data(show_spinner=False, ttl=CACHE_TTL_SECS)
-def fetch_otc_balances(wallet: str, api_key: str) -> tuple:
+def fetch_otc_balances(wallet: str, api_key: str, esquema: int) -> tuple:
     """Saldos de la wallet de custodia. El cálculo vive en `otc_inventario`,
     que lo comparte con el constructor de propuestas: dos páginas no pueden
-    tener dos ideas distintas de cuántos tokens hay disponibles."""
+    tener dos ideas distintas de cuántos tokens hay disponibles.
+
+    `esquema` no se usa dentro: está en la firma para formar parte de la clave
+    de caché (ver ESQUEMA_SALDOS)."""
     return _inv.balances_de_wallet(wallet, api_key, project_by_addr, project_by_id)
 
 
@@ -164,7 +177,8 @@ if col_ref.button("🔄 Actualizar saldos ahora", use_container_width=True):
     st.rerun()
 
 with st.spinner("Consultando blockchain…"):
-    otc_balances, last_txs, entradas_otc, fetch_ts = fetch_otc_balances(OTC_WALLET, API_KEY)
+    otc_balances, last_txs, entradas_otc, fetch_ts = fetch_otc_balances(
+        OTC_WALLET, API_KEY, ESQUEMA_SALDOS)
 
 col_ts.caption(f"Última consulta: {fetch_ts.strftime('%d/%m/%Y %H:%M')} UTC")
 

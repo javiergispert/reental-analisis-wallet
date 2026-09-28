@@ -42,6 +42,11 @@ API_KEY = os.getenv("ETHERSCAN_API_KEY", "")
 OTC_WALLET = os.getenv("OTC_WALLET", "0xce0719ec1bda336ba069c6961ad167767829301a").lower()
 TAB_RESERVAS, TAB_OFERTAS, TAB_PRECIOS = "Reservas", "Ofertas", "precios_otc"
 
+# Se sube cuando cambia lo que devuelve `_catalogo_otc`, en forma o en valor.
+# Aquí no cambió la forma pero sí las cifras: el disponible pasa a descontar
+# los tokens de terceros que ya están en la custodia.
+ESQUEMA_CATALOGO = 2
+
 
 st.title("📑 Constructor de propuestas")
 st.caption(
@@ -73,7 +78,7 @@ def _precio_rnt(_dia: str):
 
 
 @st.cache_data(show_spinner="Consultando el inventario OTC…", ttl=900)
-def _catalogo_otc(_dia: str, _hora: int) -> dict:
+def _catalogo_otc(_dia: str, _hora: int, esquema: int) -> dict:
     """Lo que hoy se puede comprometer, de stock propio y de ofertas de
     terceros. Es el mismo cálculo que usa la gestión OTC: el módulo es común
     para que las dos páginas no lleguen a cifras distintas."""
@@ -113,7 +118,7 @@ ABIERTOS = [p for p in PROYECTOS if p["abierto"]]
 POR_ID = {p["label"]: p for p in PROYECTOS}
 
 from datetime import datetime as _dt          # noqa: E402 — solo para la clave de caché
-CATALOGO = _catalogo_otc(_hoy, _dt.utcnow().hour)
+CATALOGO = _catalogo_otc(_hoy, _dt.utcnow().hour, ESQUEMA_CATALOGO)
 OTC_POR_ID = {v["id"]: {**v, "address": a} for a, v in CATALOGO.items()}
 
 

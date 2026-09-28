@@ -206,9 +206,15 @@ escribir**: `_store.read_list(TAB, fresh=True)` y añadir encima.
 ### 9. Streamlit: cuatro cosas que no son evidentes
 
 - **`st.cache_data` indexa por los argumentos, no por el cuerpo de la función.**
-  Si cambias la forma del diccionario que devuelve, la caché vieja sigue
-  sirviéndose y revienta con un `KeyError`. Pasa un número de esquema como
-  argumento explícito.
+  Si cambias la forma de lo que devuelve, la caché vieja sigue sirviéndose y
+  revienta al usarla. Pasa un número de esquema **como argumento explícito y
+  sin guion bajo delante** —en Streamlit el guion bajo significa «no formes
+  parte de la clave», que es justo lo contrario de lo que hace falta.
+  Ha pasado dos veces: un `KeyError` con el dato de salud de Aave, y un
+  `ValueError` en la página de OTC al pasar `fetch_otc_balances` de devolver
+  tres elementos a cuatro. En local no se ve, porque el servidor arranca con
+  la caché vacía; en Streamlit Cloud, no. Ver `ESQUEMA_SALDOS` y
+  `ESQUEMA_CATALOGO`.
 - **No recarga los módulos propios tras un despliegue.** Para eso está
   `recarga.refrescar("modulo")`. Limitación: arregla `modulo.funcion()` pero no
   `from modulo import funcion`, que queda enlazado al objeto viejo. Si aparece
