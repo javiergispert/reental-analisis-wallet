@@ -123,9 +123,18 @@ def reservado_de_oferta(oferta_id: str, reservas: list) -> float:
                and r.get("oferta_id") == oferta_id)
 
 
-def estado_oferta(oferta: dict, reservas: list, api_key: str, en_wallet_fn) -> dict:
-    """Estado real de una oferta de tercero cruzando lo publicado con la cadena."""
+def estado_oferta(oferta: dict, reservas: list, api_key: str, en_wallet_fn,
+                  recibido: float = 0.0) -> dict:
+    """Estado real de una oferta de tercero cruzando lo publicado con la cadena.
+
+    `recibido` son los tokens de esta oferta que YA están en la wallet de
+    custodia de Reental. Sin ese dato, en cuanto el inversor envía los tokens
+    su saldo cae a cero y la oferta se marcaba en rojo —«faltan 400»— como si
+    hubiera incumplido, justo cuando acababa de hacer lo que tenía que hacer.
+    Lo enviado sigue respaldando la oferta: cambia de sitio, no desaparece.
+    """
     n_oferta  = float(oferta.get("n_tokens", 0) or 0)
+    recibido  = max(0.0, float(recibido or 0.0))
     sal       = saldo_efectivo(oferta.get("wallet_inversor", ""),
                                (oferta.get("token_address") or "").lower(), api_key, en_wallet_fn)
     reservado = reservado_de_oferta(oferta.get("id"), reservas)
@@ -134,16 +143,26 @@ def estado_oferta(oferta: dict, reservas: list, api_key: str, en_wallet_fn) -> d
         # Sin lectura fiable no se afirma nada: ni verde ni rojo.
         return {"ok": False, "alerta": "⚠️", "en_wallet": 0.0, "colateral": 0.0,
                 "saldo_real": 0.0, "reservado": reservado, "disponible": 0.0,
-                "respaldo": 0.0, "motivo": sal.get("motivo", "No se pudo consultar la cadena.")}
+                "recibido": recibido, "respaldo": 0.0,
+                "motivo": sal.get("motivo", "No se pudo consultar la cadena.")}
 
-    respaldo   = min(n_oferta, sal["total"])          # la cifra menor manda
+    # Lo que respalda la oferta es lo que el inversor conserva MÁS lo que ya ha
+    # entregado a la custodia por esta misma oferta.
+    respaldo   = min(n_oferta, sal["total"] + recibido)
     disponible = max(0.0, respaldo - reservado)
-    falta      = n_oferta - sal["total"]
+    falta      = n_oferta - sal["total"] - recibido
 
     if falta > 0.001:
         alerta = "🔴"
         motivo = (f"El inversor tiene {sal['total']:,.3f} tokens y la oferta es de "
                   f"{n_oferta:,.3f}: faltan {falta:,.3f}.")
+        if recibido > 0.001:
+            motivo += f" ({recibido:,.3f} ya están en la custodia.)"
+    elif recibido > 0.001:
+        alerta = "🔵"
+        motivo = (f"{recibido:,.3f} tokens ya están en la wallet OTC, pendientes de "
+                  "entregar al comprador. El saldo del inversor baja por eso, no "
+                  "porque haya incumplido.")
     elif disponible <= 0.001:
         alerta = "🟡"
         motivo = "La oferta está íntegramente reservada."
@@ -153,4 +172,4 @@ def estado_oferta(oferta: dict, reservas: list, api_key: str, en_wallet_fn) -> d
     return {"ok": True, "alerta": alerta, "en_wallet": sal["en_wallet"],
             "colateral": sal["colateral"], "saldo_real": sal["total"],
             "reservado": reservado, "disponible": disponible,
-            "respaldo": respaldo, "motivo": motivo}
+            "recibido": recibido, "respaldo": respaldo, "motivo": motivo}

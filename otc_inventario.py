@@ -53,12 +53,18 @@ def saldo_en_wallet(wallet: str, token_address: str, api_key: str) -> float:
 
 def balances_de_wallet(wallet: str, api_key: str, project_by_addr: dict,
                        project_by_id: dict) -> tuple:
-    """(balances, últimos envíos, fecha de lectura) de la wallet de custodia.
+    """(balances, envíos, entradas, fecha de lectura) de la wallet de custodia.
 
       - balances  {token_address: {"nombre", "id", "saldo", "divisa", …}}
         Los aTokens de Aave se consolidan sobre el token subyacente: un token
         colateralizado sigue siendo del mismo proyecto.
       - envíos    {token_address: [{"hash", "to", "value", "ts"}]}
+      - entradas  {token_address: [{"hash", "from", "value", "ts"}]}
+
+    Las entradas hacen falta para saber cuándo los tokens de una oferta de
+    tercero han llegado a la custodia. Se registran aquí porque el bucle ya
+    recorre cada transferencia y ya tiene el remitente, el importe y la fecha:
+    no cuesta ni una llamada más.
 
     Etherscan corta `tokentx` en 1.000 resultados, así que se pagina: sin eso
     los saldos se calculaban solo con los movimientos más antiguos.
@@ -68,7 +74,7 @@ def balances_de_wallet(wallet: str, api_key: str, project_by_addr: dict,
     nombre_a_addr = {row["nombre"].lower(): addr for addr, row in project_by_addr.items()
                      if row.get("nombre")}
 
-    brutos, mapa_atoken, envios = {}, {}, {}
+    brutos, mapa_atoken, envios, entradas = {}, {}, {}, {}
     w = (wallet or "").lower()
 
     for tx in txs:
@@ -96,6 +102,9 @@ def balances_de_wallet(wallet: str, api_key: str, project_by_addr: dict,
 
         if to_addr == w and from_addr != w:
             brutos[efectiva] = brutos.get(efectiva, 0.0) + valor
+            if contrato in conocidas:      # los aTokens no son compras
+                entradas.setdefault(efectiva, []).append(
+                    {"hash": tx["hash"], "from": from_addr, "value": valor, "ts": ts})
         elif from_addr == w and to_addr != w:
             brutos[efectiva] = brutos.get(efectiva, 0.0) - valor
             if contrato in conocidas:      # los aTokens no son envíos al inversor
@@ -120,25 +129,109 @@ def balances_de_wallet(wallet: str, api_key: str, project_by_addr: dict,
             "fecha_fin": fin.strftime("%Y/%m") if fin else "—",
             "tipo_renta": proj.get("tipo_renta", "—"),
         }
-    return resultado, envios, datetime.now(timezone.utc)
+    return resultado, envios, entradas, datetime.now(timezone.utc)
 
 
-def disponibles_reental(balances: dict, reservas: list) -> dict:
+def llegadas_de_terceros(reservas: list, ofertas: list, entradas: dict) -> dict:
+    """Cuántos tokens de cada reserva de tercero están YA en la custodia.
+
+    Devuelve {id_de_reserva: tokens llegados}. Es un dato DERIVADO de la
+    cadena, no un estado guardado: se recalcula en cada carga, así que no puede
+    quedarse obsoleto ni hay nada que marcar a mano.
+
+    POR QUÉ HACE FALTA
+    ------------------
+    Los tokens de un tercero no van directos al comprador: pasan por la wallet
+    OTC. Durante esa escala aparecían como stock libre y otro comercial podía
+    reservarlos por segunda vez. Y como además Reental paga al recibirlos, en
+    ese momento ya son suyos: lo único que falta es entregarlos.
+
+    POR QUÉ ESTAS CUATRO CONDICIONES Y NO «entró algo»
+    --------------------------------------------------
+    Porque a la custodia entran constantemente tokens que Reental compra para
+    su propio libro —en el histórico hay 467 entradas desde 230 wallets
+    distintas— y darlas todas por llegadas de reservas sería un disparate. Se
+    exige que la transferencia sea de ESE token, desde LA wallet de la oferta
+    de ESA reserva, posterior a la reserva y con una reserva viva detrás. Una
+    compra propia no cumple la segunda ni la cuarta.
+
+    El resto que llegue por encima de lo reservado NO se atribuye: si el
+    tercero envía 400 y la reserva era de 100, los otros 300 son de Reental
+    —ya pagados— y quedan como stock libre, que es lo correcto.
+    """
+    por_id = {o.get("id"): o for o in (ofertas or []) if o.get("id")}
+    vivas = [r for r in (reservas or [])
+             if r.get("tipo_origen") == "tercero"
+             and r.get("estado") not in ("completada", "cancelada", "eliminada")
+             and r.get("oferta_id") in por_id]
+    # Más antigua primero: si dos reservas de la misma oferta compiten por una
+    # llegada, la que se hizo antes tiene prioridad. Es un criterio arbitrario
+    # pero estable; la página avisa cuando hay empate.
+    vivas.sort(key=lambda r: str(r.get("fecha_reserva") or ""))
+
+    consumido: dict = {}      # (token, wallet origen) -> ya atribuido
+    salida: dict = {}
+    for r in vivas:
+        oferta = por_id[r["oferta_id"]]
+        token = (r.get("token_address") or oferta.get("token_address") or "").lower()
+        origen = (oferta.get("wallet_inversor") or "").lower()
+        if not token or not origen:
+            continue
+        desde = _momento(r.get("fecha_reserva"))
+        disponible = sum(
+            e["value"] for e in (entradas.get(token) or [])
+            if e["from"] == origen and (desde is None or e["ts"] >= desde))
+        clave = (token, origen)
+        disponible = max(0.0, disponible - consumido.get(clave, 0.0))
+        atribuido = min(float(r.get("n_tokens", 0) or 0), disponible)
+        if atribuido > 0.001:
+            consumido[clave] = consumido.get(clave, 0.0) + atribuido
+            salida[r.get("id")] = round(atribuido, 6)
+    return salida
+
+
+def _momento(fecha_str) -> float | None:
+    """La fecha de una reserva como timestamp, o None si no se entiende.
+
+    Sin fecha legible no se filtra por tiempo: es preferible atribuir de más
+    —que bloquea una venta— a no detectar la llegada y permitir una reserva
+    duplicada.
+    """
+    for formato in ("%d/%m/%Y %H:%M", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(str(fecha_str), formato).replace(
+                tzinfo=timezone.utc).timestamp()
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
+def disponibles_reental(balances: dict, reservas: list, llegadas: dict | None = None) -> dict:
     """El stock propio menos lo ya comprometido.
 
-    Las reservas contra ofertas de TERCEROS salen de la wallet del inversor que
-    publicó, no del inventario de Reental: contarlas aquí hacía aparecer el
-    stock propio mermado por tokens que nunca fueron suyos. Las reservas
-    antiguas no llevan `tipo_origen` y son todas de Reental.
+    Una reserva descuenta cuando sus tokens están en esta wallet. Las de
+    Reental, siempre. Las de tercero, solo la parte que ya haya LLEGADO, que
+    viene en `llegadas` (ver `llegadas_de_terceros`).
+
+    Antes se ignoraban por completo las de tercero, con el argumento de que
+    esos tokens salían de la wallet del inversor y no del inventario propio.
+    Era falso: en el proceso real pasan siempre por la custodia, y durante esa
+    escala aparecían libres. Dos comerciales podían reservar los mismos.
+
+    Las reservas antiguas no llevan `tipo_origen` y son todas de Reental.
     """
+    llegadas = llegadas or {}
     reservado = {}
     for r in (reservas or []):
-        if r.get("estado") in ("completada", "cancelada"):
-            continue
-        if r.get("tipo_origen") == "tercero":
+        if r.get("estado") in ("completada", "cancelada", "eliminada"):
             continue
         addr = (r.get("token_address") or "").lower()
-        reservado[addr] = reservado.get(addr, 0.0) + float(r.get("n_tokens", 0) or 0)
+        if r.get("tipo_origen") == "tercero":
+            cantidad = float(llegadas.get(r.get("id"), 0.0) or 0.0)
+        else:
+            cantidad = float(r.get("n_tokens", 0) or 0)
+        if cantidad:
+            reservado[addr] = reservado.get(addr, 0.0) + cantidad
     return {addr: {**d,
                    "reservado": reservado.get(addr, 0.0),
                    "disponible": max(0.0, d["saldo"] - reservado.get(addr, 0.0))}
@@ -146,14 +239,15 @@ def disponibles_reental(balances: dict, reservas: list) -> dict:
 
 
 def catalogo(balances: dict, reservas: list, ofertas: list,
-             api_key: str, en_wallet_fn) -> dict:
+             api_key: str, en_wallet_fn, entradas: dict | None = None) -> dict:
     """Lo comprometible hoy de cada proyecto, por dirección de token.
 
     Devuelve {token_address: {"id", "nombre", "reental", "terceros", "total"}},
     donde `terceros` es la lista de ofertas vivas con su disponible. Un
     proyecto puede tener stock propio, ofertas de terceros o ambas cosas.
     """
-    propio = disponibles_reental(balances, reservas)
+    llegadas = llegadas_de_terceros(reservas, ofertas, entradas or {})
+    propio = disponibles_reental(balances, reservas, llegadas)
     cat = {}
     for addr, d in propio.items():
         if d["disponible"] <= 0.001:
@@ -165,7 +259,10 @@ def catalogo(balances: dict, reservas: list, ofertas: list,
         if o.get("estado") != "activa":
             continue
         addr = (o.get("token_address") or "").lower()
-        est = _saldos.estado_oferta(o, reservas, api_key, en_wallet_fn)
+        recibido = sum(v for rid, v in llegadas.items()
+                       if any(r.get("id") == rid and r.get("oferta_id") == o.get("id")
+                              for r in (reservas or [])))
+        est = _saldos.estado_oferta(o, reservas, api_key, en_wallet_fn, recibido)
         # Sin lectura fiable de la cadena no se afirma que haya nada disponible:
         # una propuesta que ofrece tokens que no existen es peor que una corta.
         if not est.get("ok") or est["disponible"] <= 0.001:

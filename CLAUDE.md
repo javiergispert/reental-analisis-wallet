@@ -66,7 +66,7 @@ No hay suite de tests. Lo que funciona:
   conocida. El motor de propuestas se validó reproduciendo una propuesta real
   del equipo: cuadraba al céntimo en importes y dentro del 0,5 % en escenarios.
 - **La aplicación de verdad**: `streamlit run app.py` y recorrer el flujo. Varios
-  fallos solo aparecen ahí (ver trampa 8).
+  fallos solo aparecen ahí (ver trampa 9).
 - Si tocas una página que escribe datos —OTC—, pruébala sin llegar a guardar.
 
 ---
@@ -150,6 +150,37 @@ un repositorio público equivale a no tener clave, y el fallo sería silencioso
 La clave hay que conservarla. Si se pierde, los seudónimos nuevos dejan de
 cuadrar con los antiguos y una misma wallet se contaría dos veces.
 
+### 6. Los tokens de un tercero PASAN por la wallet OTC
+
+`disponibles_reental` ignoraba las reservas contra ofertas de terceros, con
+este argumento escrito en el código: *«salen de la wallet del inversor, no del
+inventario de Reental»*. **Era falso.** En el proceso real, todo token de un
+tercero viaja primero a la custodia de Reental y de ahí al comprador.
+
+Durante esa escala aparecía como stock libre y otro comercial lo reservaba: la
+misma cantidad comprometida dos veces. Y de paso, como el saldo del inversor
+caía a cero, la oferta se marcaba 🔴 «faltan 400» justo cuando el tercero
+acababa de hacer lo correcto.
+
+Dos hechos del proceso que hay que tener presentes:
+
+- **Reental paga al recibir**, aunque el comprador todavía no haya pagado. En
+  cuanto los tokens entran en la custodia ya son de Reental; lo único que falta
+  es entregarlos.
+- **A la custodia entran constantemente tokens que Reental compra para su
+  propio libro** —467 entradas desde 230 wallets distintas en el histórico—.
+  Por eso NO vale una regla del tipo «entró algo, luego llegó una reserva».
+
+La atribución exige las cuatro condiciones a la vez: ese token, desde la wallet
+de la oferta de esa reserva, después de la reserva, y con reserva viva. Va en
+`otc_inventario.llegadas_de_terceros` y es **derivada, no almacenada**: se
+recalcula en cada carga desde la cadena, así que no hay nada que marcar a mano
+ni banderas que se queden obsoletas.
+
+Queda un caso ambiguo: un inversor con oferta publicada que además le venda a
+Reental por su cuenta el mismo token. Ahí se atribuiría de más y se bloquearía
+una venta — el error cae del lado seguro, nunca duplica una reserva.
+
 ### 6. Un fallo de red que parece «no hay datos»
 
 Una función que devuelve lista vacía tanto si no hay resultados como si la API
@@ -166,13 +197,13 @@ La regla general: cuando reconstruyas un estado sumando eventos, busca una
 cifra independiente contra la que contrastarlo y compárala antes de dar el
 resultado por bueno.
 
-### 7. Las reservas se pisan entre sí
+### 8. Las reservas se pisan entre sí
 
 Hay un incidente documentado de pérdida de reservas (22/07/2026) por guardar la
 copia leída al pintar la página. **Releer la lista fresca justo antes de
 escribir**: `_store.read_list(TAB, fresh=True)` y añadir encima.
 
-### 8. Streamlit: cuatro cosas que no son evidentes
+### 9. Streamlit: cuatro cosas que no son evidentes
 
 - **`st.cache_data` indexa por los argumentos, no por el cuerpo de la función.**
   Si cambias la forma del diccionario que devuelve, la caché vieja sigue
@@ -190,7 +221,7 @@ escribir**: `_store.read_list(TAB, fresh=True)` y añadir encima.
   pasó de `(proyecto, tokens)` a `(proyecto, tokens, actuales)` y quedó un sitio
   desempaquetando dos. Accede por índice.
 
-### 9. Criterios de cálculo que no son obvios
+### 10. Criterios de cálculo que no son obvios
 
 - **La cartera se pondera por importe invertido, no por número de tokens.** Un
   token de 100 € y otro de 100 $ no son la misma inversión; hoy el europeo pesa

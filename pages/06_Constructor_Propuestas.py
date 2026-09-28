@@ -88,10 +88,12 @@ def _catalogo_otc(_dia: str, _hora: int) -> dict:
                                    "tipo_renta": p.get("tipologia_dividendo", "")}
                     for p in PROYECTOS}
         por_id = {p["label"].lower(): por_addr[p["address"]] for p in PROYECTOS}
-        balances, _envios, _ts = _inv.balances_de_wallet(OTC_WALLET, API_KEY, por_addr, por_id)
+        balances, _envios, entradas, _ts = _inv.balances_de_wallet(
+            OTC_WALLET, API_KEY, por_addr, por_id)
         reservas = _store.read_list(TAB_RESERVAS)
         ofertas = _store.read_list(TAB_OFERTAS)
-        return _inv.catalogo(balances, reservas, ofertas, API_KEY, _inv.saldo_en_wallet)
+        return _inv.catalogo(balances, reservas, ofertas, API_KEY,
+                             _inv.saldo_en_wallet, entradas)
     except Exception:       # noqa: BLE001 — sin inventario la propuesta se hace igual
         return {}
 

@@ -164,7 +164,7 @@ if col_ref.button("🔄 Actualizar saldos ahora", use_container_width=True):
     st.rerun()
 
 with st.spinner("Consultando blockchain…"):
-    otc_balances, last_txs, fetch_ts = fetch_otc_balances(OTC_WALLET, API_KEY)
+    otc_balances, last_txs, entradas_otc, fetch_ts = fetch_otc_balances(OTC_WALLET, API_KEY)
 
 col_ts.caption(f"Última consulta: {fetch_ts.strftime('%d/%m/%Y %H:%M')} UTC")
 
@@ -252,13 +252,24 @@ if _detectar_envios(reservas):
 # ── Calcular saldos reservados y disponibles ──────────────────────────────────
 
 def calcular_disponibles(balances: dict, reservas: list) -> dict:
-    """Stock propio menos lo comprometido. La lógica vive en `otc_inventario`."""
-    return _inv.disponibles_reental(balances, reservas)
+    """Stock propio menos lo comprometido. La lógica vive en `otc_inventario`.
+
+    Se le pasan las llegadas de terceros ya detectadas: un token de una oferta
+    que ya está en la custodia está comprometido aunque su reserva siga viva.
+    """
+    return _inv.disponibles_reental(balances, reservas, llegadas_terceros)
 
 
 def estado_oferta(o: dict) -> dict:
     """Estado real de una oferta de tercero. La lógica vive en `otc_saldos`."""
-    return _saldos.estado_oferta(o, reservas, API_KEY, fetch_token_balance)
+    recibido = sum(v for rid, v in (llegadas_terceros or {}).items()
+                   if any(r.get("id") == rid and r.get("oferta_id") == o.get("id")
+                          for r in reservas))
+    return _saldos.estado_oferta(o, reservas, API_KEY, fetch_token_balance, recibido)
+
+# Qué tokens de reservas contra terceros están YA en la custodia. Es un dato
+# derivado de la cadena, se recalcula en cada carga y no hay nada que marcar.
+llegadas_terceros = _inv.llegadas_de_terceros(reservas, load_ofertas(), entradas_otc)
 
 saldos       = calcular_disponibles(otc_balances, reservas)
 precios_otc  = load_precios_otc()
@@ -801,6 +812,33 @@ with _exp_reserva:
         total_usd = total_en_divisa if divisa_proj == "USD" else total_en_divisa * eur_usd
         total_eur = total_en_divisa if divisa_proj == "EUR" else total_en_divisa / eur_usd
 
+        # El caso que generaba reservas duplicadas: los tokens de un tercero
+        # pasan por la custodia camino del comprador, y durante esa escala el
+        # saldo de la wallet parece stock libre. Ya se descuentan cuando se
+        # detecta su llegada, pero antes de que lleguen no hay nada que
+        # descontar, así que aquí se avisa.
+        if sel["tipo"] == "reental":
+            _terceros_vivas = [
+                r for r in reservas
+                if r.get("tipo_origen") == "tercero"
+                and r.get("estado") not in ("completada", "cancelada", "eliminada")
+                and (r.get("token_address") or "").lower() == addr_sel
+            ]
+            if _terceros_vivas:
+                _n = sum(float(r.get("n_tokens", 0) or 0) for r in _terceros_vivas)
+                _ya = sum(float((llegadas_terceros or {}).get(r.get("id"), 0) or 0)
+                          for r in _terceros_vivas)
+                _pend = max(0.0, _n - _ya)
+                st.warning(
+                    f"⚠️ Este proyecto tiene **{len(_terceros_vivas)} reserva(s) de tokens de "
+                    f"terceros** por {_n:,.3f} tokens. "
+                    + (f"De esos, **{_pend:,.3f} todavía no han llegado** a la wallet OTC: cuando "
+                       "lleguen se descontarán del stock y el disponible de arriba bajará. "
+                       "Comprueba que no estás comprometiendo los mismos tokens dos veces."
+                       if _pend > 0.001 else
+                       "Ya están todos en la custodia y descontados del disponible.")
+                )
+
         bg_calc = "#f0f9ff" if sel["tipo"] == "reental" else "#fefce8"
         br_calc = "#bae6fd" if sel["tipo"] == "reental" else "#fde68a"
         tx_calc = "#0c4a6e" if sel["tipo"] == "reental" else "#78350f"
@@ -1029,13 +1067,24 @@ def render_reservas(lista: list, editable: bool = False):
                 {"activa": "ACTIVA", "completada": "COMPLETADA", "cancelada": "CANCELADA"}.get(r["estado"], r["estado"].upper())
             )
             origen_badge    = ' <span style="background:#7c3aed;color:white;border-radius:4px;padding:1px 6px;font-size:0.65rem;font-weight:700;">👤 TERCERO</span>' if es_tercero else ""
+            # Los tokens de esta reserva ya están en la custodia: Reental los ha
+            # pagado y solo falta entregarlos. Se dice, porque si no el saldo de
+            # la wallet OTC parece stock libre y alguien lo reserva otra vez.
+            _recibido = float((llegadas_terceros or {}).get(r.get("id"), 0) or 0)
+            recibido_badge = (
+                f' <span style="background:#0284c7;color:white;border-radius:4px;'
+                f'padding:1px 6px;font-size:0.65rem;font-weight:700;" '
+                f'title="Ya están en la wallet OTC de Reental, pendientes de entregar '
+                f'al comprador. Se descuentan del stock disponible.">'
+                f'📥 {_recibido:,.3f} EN CUSTODIA</span>'
+                if _recibido > 0.001 and r["estado"] not in ("completada", "cancelada") else "")
             propuesta_badge = ' <span style="background:#0369a1;color:white;border-radius:4px;padding:1px 6px;font-size:0.65rem;font-weight:700;">📋 PROPUESTA</span>' if es_propuesta else ""
 
             header_html = (
                 f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">'
                 f'<span style="background:{badge_color};color:white;border-radius:5px;'
                 f'padding:2px 8px;font-size:0.7rem;font-weight:700;">{badge_label}</span>'
-                f'{origen_badge}{propuesta_badge}'
+                f'{origen_badge}{recibido_badge}{propuesta_badge}'
                 f'<span style="font-weight:700;font-size:1rem;">{r["proyecto_nombre"]}</span>'
                 f'<span style="color:#94a3b8;font-size:0.85rem;">{r["id"]}</span>'
                 f'</div>'
