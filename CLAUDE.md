@@ -276,26 +276,43 @@ Cosas decididas a medias o sabidas y no hechas:
 - **El generador de propuestas de Ainhoa** (una plantilla de Google Sheets con
   Apps Script, menú "⭐ Reental Wealth") sigue existiendo. Hay dos generadores y
   hay que decidir cuál manda.
-- **Pagos de RNT sin identificar — lo más urgente del informe fiscal.** Hay
-  cuatro direcciones que reparten RNT a inversores y no están en la lista de
-  direcciones conocidas, así que el informe las etiqueta «Recepción de RNT —
-  origen a determinar» y **no las cuenta como renta**:
+- **Las cuatro direcciones que repartían RNT ya están identificadas** (producto,
+  30/09/2026), y eran tres cosas distintas. Queda pendiente **revisar los
+  informes fiscales ya entregados**, porque el criterio ha cambiado:
 
-  | Dirección | Qué es | Volumen observado |
+  | Dirección | Qué es | Cómo se trata ahora |
   |---|---|---|
-  | `0x21aaf98e74f2ad1ca487dc20f598e6bdd89e24ad` | contrato (`ERC1967Proxy`) | 414.010 RNT en 9 envíos a una sola wallet |
-  | `0xcb6420b380b7ceb0317208f3568c2c5009bd6c25` | contrato (`ERC1967Proxy`) | 56.714 RNT en 25 envíos recurrentes a esa misma wallet |
-  | `0xed5b64603e254aab6d2dd7f6128fee8d8d567d5e` | contrato (sin verificar) | 196.514 RNT a una sola wallet, ago-2025 a sep-2026 |
-  | `0x51e3d44172868acc60d68ca99591ce4230bc75e0` | wallet (no es contrato) | 32.814 RNT |
+  | `0x21aaf98e74f2ad1ca487dc20f598e6bdd89e24ad` | Vesting de RNT, tramo oct-2024 → oct-2026 | **Renta** — `Vesting de RNT liberado` |
+  | `0xcb6420b380b7ceb0317208f3568c2c5009bd6c25` | Vesting de RNT, tramo oct-2023 → oct-2025 | **Renta** — `Vesting de RNT liberado` |
+  | `0xed5b64603e254aab6d2dd7f6128fee8d8d567d5e` | Wallet de un beneficiario del vesting (persona física) | Sigue sin calificar — `Recepción de RNT` |
+  | `0x51e3d44172868acc60d68ca99591ce4230bc75e0` | Hot wallet de un exchange centralizado, ajena a Reental | **No es renta**, y el coste va a «Por completar» |
 
-  Que las dos primeras sean proxies actualizables las señala como
-  infraestructura de Reental, no como transferencias entre particulares.
+  Los dos primeros son el mismo contrato desplegado dos veces
+  (`RNTDistributionVaultMerkleVesting`, proxy UUPS). Lo que liberan es
+  retribución en especie: el beneficiario no pagó por esos tokens. La
+  herramienta aporta importe y fecha; **la categoría concreta —trabajo,
+  actividad o capital— depende de la relación del beneficiario con Reental y la
+  pone el asesor**, no el código.
 
-  **Un despacho fiscal externo especialista en criptoactivos sí las declara**:
-  clasifica como *Income* cuatro cobros de `0x21aaf98e…` de 2025 que suman
-  246.351,69 RNT, unos **39.953 €** para una sola inversora y un solo ejercicio.
-  Mientras no se sepa qué son siguen fuera —inventar una calificación sería
-  peor—, pero la cifra dice lo que cuesta el silencio.
+  El tercero enseña por qué no vale agrupar por volumen: parecía un distribuidor
+  porque movía 196.514 RNT, y es un particular repartiendo lo que le fue
+  liberando su propio vesting. Una transferencia entre particulares puede ser
+  compra, pago o donación, y cada una tributa distinto, así que se queda sin
+  calificar a propósito.
+
+  El cuarto es el aviso de que no todo lo que mueve RNT es de Reental. Un RNT
+  que llega de un exchange no es renta —ya era del inversor— pero su coste se
+  fijó dentro del exchange y no consta en la cadena: si no se pide, una venta
+  posterior calcula la plusvalía **sobre un coste de cero**, que es el error más
+  caro que puede cometer este informe.
+
+  **La lección, que es la de siempre aquí:** las cuatro se habían dejado sin
+  contar «hasta saber qué son», lo cual era prudente, pero nadie preguntó
+  durante meses. Lo que destrabó el asunto fue un tercero —un despacho fiscal—
+  declarando como renta 246.351,69 RNT de 2025 que la herramienta ignoraba.
+  Cuando algo queda «pendiente de identificar», hay que ponerle fecha para
+  preguntar.
+
 - **El SLP repartido en los claims de staking** ya se valora (parte proporcional
   de las reservas del pool), pero conviene contrastarlo con Reental.
 - **`data/pool_rnt/supply.json` no tiene workflow todavía**: el fichero YAML

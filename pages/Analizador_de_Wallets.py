@@ -926,6 +926,27 @@ OWNER_SELECTOR        = "0x8da5cb5b"   # owner()
 # depender de ventanas de 10.000 filas ni de cuándo se cobró el último dividendo.
 VAULT_METHOD_IDS = {"0x346476f1", "0x2eb652a9", "0x8696e4ff", "0x753d3c76"}
 
+# Contratos de vesting de RNT (RNTDistributionVaultMerkleVesting, proxy UUPS).
+# Liberan RNT a sus beneficiarios según un calendario, así que lo que sale de
+# aquí es RETRIBUCIÓN, no una transferencia entre particulares: hay que contarla
+# como renta al valor de mercado del día de la liberación, y ese valor pasa a ser
+# el coste de adquisición de ese RNT. Se identificaron a raíz de la revisión de
+# un despacho fiscal externo, que sí las declaraba mientras la herramienta las
+# dejaba como «origen a determinar».
+RNT_VESTING_CONTRACTS = {
+    "0x21aaf98e74f2ad1ca487dc20f598e6bdd89e24ad",   # tramo oct-2024 → oct-2026
+    "0xcb6420b380b7ceb0317208f3568c2c5009bd6c25",   # tramo oct-2023 → oct-2025
+}
+
+# Hot wallets de exchanges centralizados. Un RNT que llega de aquí es una
+# RETIRADA del propio inversor, no un ingreso: el dinero ya era suyo. No se
+# puede contar como renta, pero tampoco se conoce su coste de adquisición
+# —la compra ocurrió dentro del exchange, fuera de la cadena—, así que va a
+# «Por completar» para que lo aporte el extracto del exchange.
+EXCHANGE_HOT_WALLETS = {
+    "0x51e3d44172868acc60d68ca99591ce4230bc75e0",
+}
+
 
 def _etherscan_proxy(params: dict):
     """GET al endpoint proxy de Etherscan con reintento ante rate-limit. Devuelve
@@ -1400,10 +1421,27 @@ def process_rnt_ecosystem(transfers: list, wallet: str, nft_transfers: list = No
                 "detalle": detalle,
                 "rnt_delta": rnt_in, "slp_delta": 0.0, "frmrnt_delta": 0.0, "usdt_delta": -usdt_out,
             }
+        elif rnt_in > 0 and rnt_from in RNT_VESTING_CONTRACTS:
+            # Liberación de un calendario de vesting: es retribución en RNT, y se
+            # trata igual que un claim de recompensas (renta al precio del día).
+            ev = {
+                "tipo": "Vesting de RNT liberado",
+                "detalle": f"Liberado del vesting: {rnt_in:,.4f} RNT",
+                "rnt_delta": rnt_in, "slp_delta": 0.0, "frmrnt_delta": 0.0, "usdt_delta": 0.0,
+            }
+        elif rnt_in > 0 and rnt_from in EXCHANGE_HOT_WALLETS:
+            ev = {
+                "tipo": "Retirada de RNT desde exchange",
+                "detalle": (f"Retirado a la wallet: {rnt_in:,.4f} RNT desde un exchange "
+                            f"centralizado · no es renta; el coste de adquisición está "
+                            f"en el extracto del exchange"),
+                "rnt_delta": rnt_in, "slp_delta": 0.0, "frmrnt_delta": 0.0, "usdt_delta": 0.0,
+            }
         elif rnt_in > 0:
+            orig = f"{rnt_from[:8]}…{rnt_from[-4:]}" if rnt_from else "—"
             ev = {
                 "tipo": "Recepción de RNT",
-                "detalle": f"Recibido: {rnt_in:,.4f} RNT",
+                "detalle": f"Recibido: {rnt_in:,.4f} RNT de {orig}",
                 "rnt_delta": rnt_in, "slp_delta": 0.0, "frmrnt_delta": 0.0, "usdt_delta": 0.0,
             }
         elif rnt_out > 0:
@@ -3353,6 +3391,8 @@ if rnt_events_filtered:
         "Venta de RNT al pool de Reental":      "#ffd6d6",
         "Compra de RNT al pool de Reental":     "#e8f4fd",
         "Recepción de RNT":                    "#d4edda",
+        "Vesting de RNT liberado":             "#d4edda",
+        "Retirada de RNT desde exchange":      "#e8f4fd",
         "Envío de RNT":                        "#ffd6d6",
     }
 
@@ -3670,7 +3710,8 @@ def _income_items() -> tuple:
                 items.append((m["fecha_str"], "Intereses Aave (prestamista)", interes))
 
     claim_events = [ev for ev in (rnt_events or [])
-                    if ev["tipo"] in ("Claim rewards de staking", "Claim rewards de farming")
+                    if ev["tipo"] in ("Claim rewards de staking", "Claim rewards de farming",
+                                      "Vesting de RNT liberado")
                     and _en_periodo(ev["fecha_str"])]
     fechas = {ev["fecha_str"][:10] for ev in claim_events}
     precios = {d: get_rnt_price_on_date(d) for d in fechas}
@@ -3679,7 +3720,12 @@ def _income_items() -> tuple:
         rnt  = ev.get("rnt_delta", 0.0) or 0.0
         slp  = ev.get("slp_delta", 0.0) or 0.0
         usdt = ev.get("usdt_delta", 0.0) or 0.0
-        concepto = "Staking (recompensas)" if "staking" in ev["tipo"] else "Farming (recompensas)"
+        if ev["tipo"] == "Vesting de RNT liberado":
+            concepto = "Vesting de RNT (retribución)"
+        elif "staking" in ev["tipo"]:
+            concepto = "Staking (recompensas)"
+        else:
+            concepto = "Farming (recompensas)"
 
         # Solo se consulta el pool si hace falta: si CoinGecko ya da precio y
         # no hay SLP en el claim, no se gasta ni una petición.
@@ -3988,6 +4034,15 @@ GLOSARIO_CONCEPTOS = [
      "Qué es": ("Compra de tokens nuevos con el saldo acumulado en el vault, sin que el dinero "
                 "pase por el banco del inversor."),
      "Equivalencia en el mundo tradicional": "Reinversión automática de dividendos."},
+    {"Bloque": "El activo", "Concepto": "Vesting de RNT",
+     "Qué es": ("Calendario de entrega diferida de RNT a un beneficiario —empleado, asesor, "
+                "socio o inversor de una ronda—. Un contrato retiene los tokens y los va "
+                "liberando por tramos a lo largo de años. Lo que se libera es retribución: el "
+                "beneficiario no ha pagado por esos tokens, los recibe por su relación con "
+                "Reental. El día de la liberación es el que fija tanto la renta como el coste "
+                "de adquisición de ese RNT."),
+     "Equivalencia en el mundo tradicional": ("Entrega de acciones sujeta a permanencia "
+                "(«stock options» ya ejercitables o «restricted stock units»).")},
     {"Bloque": "El activo", "Concepto": "Cierre del proyecto",
      "Qué es": ("Venta del inmueble: se devuelve el capital más la plusvalía y los tokens se "
                 "destruyen («se queman»), por lo que desaparecen de la cartera."),
@@ -4140,6 +4195,22 @@ FISCAL_GLOSARIO = [
     {"Operación": "Airdrop / entrega gratuita de tokens",
      "Naturaleza fiscal": "Adquisición sin coste (posible renta en especie)",
      "Tratamiento / nota": "Según jurisdicción puede ser renta al valor de mercado del día de la entrega, valor que pasaría a ser el coste de adquisición. Si no se ha podido valorar, queda como «origen a determinar»."},
+    {"Operación": "Vesting de RNT liberado",
+     "Tratamiento / nota": ("Retribución en especie: renta por el valor de mercado del RNT el día de la liberación, "
+                            "y ese mismo valor es el coste de adquisición para una venta futura. La categoría concreta "
+                            "—rendimiento del trabajo, de actividad profesional o del capital— depende de la relación "
+                            "del beneficiario con Reental, que la herramienta no conoce: se entrega el importe y la "
+                            "fecha, la calificación la pone el asesor.")},
+    {"Operación": "Retirada de RNT desde exchange",
+     "Tratamiento / nota": ("NO es renta: el RNT ya era del inversor y solo cambia de sitio. Pero su coste de "
+                            "adquisición se fijó dentro del exchange y no consta en la cadena, así que figura en "
+                            "«Por completar». Sin ese dato, una venta posterior calcularía la plusvalía sobre un "
+                            "coste de cero.")},
+    {"Operación": "Recepción de RNT — origen a determinar",
+     "Tratamiento / nota": ("RNT que llega de una dirección que no es ni un contrato de Reental ni un exchange "
+                            "conocido: típicamente la wallet de otro particular. Puede ser una compra, un pago o una "
+                            "donación, y cada cosa tributa distinto. La herramienta NO lo califica y NO lo cuenta "
+                            "como renta; hay que preguntar al inversor qué fue.")},
     {"Operación": "Recepción / Envío de RNT (no clasificado como recompensa)",
      "Naturaleza fiscal": "Origen a determinar",
      "Tratamiento / nota": "No se computa como renta automáticamente (puede ser compra, traspaso o airdrop). Revisar manualmente."},
@@ -4177,6 +4248,24 @@ def build_por_completar_rows() -> list:
             elif cant < 0 and stin == 0:
                 rows.append({**base, "Concepto": "Disposición — valor de transmisión a completar",
                              "Coste estimado USD (precio emisión)": ""})
+    # El RNT que llega de la hot wallet de un exchange no es renta —ya era del
+    # inversor—, pero su coste de adquisición se fijó DENTRO del exchange y no
+    # consta en la cadena. Si no se pide, al venderlo se calcula una plusvalía
+    # con coste cero, que es el error más caro de todo el informe.
+    for ev in filtrar_por_wallet(rnt_events or []):
+        if ev["tipo"] != "Retirada de RNT desde exchange" or not _en_periodo(ev["fecha_str"]):
+            continue
+        rows.append({
+            "Fecha UTC": ev["fecha_str"], "Token": "RNT",
+            "Concepto": "Adquisición en exchange — coste a completar",
+            "Cantidad": round(ev.get("rnt_delta", 0.0) or 0.0, 6),
+            "Coste estimado USD (precio emisión)": "",
+            "Importe FIAT real (a completar)": "", "Divisa": "",
+            "Notas del inversor": ("Retirada desde un exchange centralizado. Aportar el precio "
+                                   "de compra según el extracto del exchange."),
+            "Wallet/Alias": ev.get("wallet_alias", ""),
+        })
+
     rows.sort(key=lambda r: r["Fecha UTC"])
     return rows
 
