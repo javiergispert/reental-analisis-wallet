@@ -276,11 +276,26 @@ Cosas decididas a medias o sabidas y no hechas:
 - **El generador de propuestas de Ainhoa** (una plantilla de Google Sheets con
   Apps Script, menú "⭐ Reental Wealth") sigue existiendo. Hay dos generadores y
   hay que decidir cuál manda.
-- **Pagos de RNT sin identificar**: la wallet `0xed5b6460…567d5e` envía RNT
-  semanalmente a inversores (196.514 RNT a una sola wallet entre ago-2025 y
-  sep-2026) y `0x51e3d441…bc75e0` otros 32.814. No son contratos y no están en la
-  lista de direcciones conocidas, así que el informe fiscal **no los cuenta como
-  renta**. Hasta saber qué son, quedan fuera.
+- **Pagos de RNT sin identificar — lo más urgente del informe fiscal.** Hay
+  cuatro direcciones que reparten RNT a inversores y no están en la lista de
+  direcciones conocidas, así que el informe las etiqueta «Recepción de RNT —
+  origen a determinar» y **no las cuenta como renta**:
+
+  | Dirección | Qué es | Volumen observado |
+  |---|---|---|
+  | `0x21aaf98e74f2ad1ca487dc20f598e6bdd89e24ad` | contrato (`ERC1967Proxy`) | 414.010 RNT en 9 envíos a una sola wallet |
+  | `0xcb6420b380b7ceb0317208f3568c2c5009bd6c25` | contrato (`ERC1967Proxy`) | 56.714 RNT en 25 envíos recurrentes a esa misma wallet |
+  | `0xed5b64603e254aab6d2dd7f6128fee8d8d567d5e` | contrato (sin verificar) | 196.514 RNT a una sola wallet, ago-2025 a sep-2026 |
+  | `0x51e3d44172868acc60d68ca99591ce4230bc75e0` | wallet (no es contrato) | 32.814 RNT |
+
+  Que las dos primeras sean proxies actualizables las señala como
+  infraestructura de Reental, no como transferencias entre particulares.
+
+  **Un despacho fiscal externo especialista en criptoactivos sí las declara**:
+  clasifica como *Income* cuatro cobros de `0x21aaf98e…` de 2025 que suman
+  246.351,69 RNT, unos **39.953 €** para una sola inversora y un solo ejercicio.
+  Mientras no se sepa qué son siguen fuera —inventar una calificación sería
+  peor—, pero la cifra dice lo que cuesta el silencio.
 - **El SLP repartido en los claims de staking** ya se valora (parte proporcional
   de las reservas del pool), pero conviene contrastarlo con Reental.
 - **`data/pool_rnt/supply.json` no tiene workflow todavía**: el fichero YAML

@@ -3973,9 +3973,17 @@ GLOSARIO_CONCEPTOS = [
                 "abonado en stablecoin."),
      "Equivalencia en el mundo tradicional": "Dividendo o reparto de resultados."},
     {"Bloque": "El activo", "Concepto": "Vault de Reental",
-     "Qué es": ("Monedero interno de la plataforma donde se acumulan los dividendos hasta que el "
-                "inversor los retira o los reinvierte."),
-     "Equivalencia en el mundo tradicional": "Cuenta de efectivo del bróker."},
+     "Qué es": ("Dirección de la blockchain controlada por Reental —NO custodiada por el inversor, "
+                "que no tiene sus claves— donde se abona el saldo que la plataforma le reconoce: "
+                "la renta mensual de cada proyecto y el capital más la plusvalía cuando un proyecto "
+                "se liquida. El inversor decide después si lo retira a su propia wallet o lo "
+                "reinvierte en tokens nuevos. Que el saldo esté en el vault y no en la wallet no "
+                "lo hace menos suyo: es un derecho de crédito exigible desde el momento del abono. "
+                "Por eso este informe imputa la renta al abonarse en el vault y no al retirarse, "
+                "y por eso un extracto hecho solo con las direcciones del inversor NO ve estos "
+                "movimientos: ocurren entre Reental y el vault."),
+     "Equivalencia en el mundo tradicional": ("Cuenta de efectivo del bróker: el dinero es del "
+                "cliente aunque siga en la cuenta del intermediario.")},
     {"Bloque": "El activo", "Concepto": "Reinversión desde vault",
      "Qué es": ("Compra de tokens nuevos con el saldo acumulado en el vault, sin que el dinero "
                 "pase por el banco del inversor."),
@@ -4380,6 +4388,23 @@ def build_report_meta() -> list:
         {"Campo": "Generado (UTC)", "Valor": datetime.utcnow().strftime("%Y-%m-%d %H:%M")},
         {"Campo": "Wallets analizadas", "Valor": wallets_txt},
         {"Campo": "Alcance temporal", "Valor": alcance},
+        {"Campo": "Alcance de activos", "Valor": (
+            "SOLO el ecosistema Reental: tokens inmobiliarios, RNT, xRNT (staking), SLP y frmRNT "
+            "(pool y farming), las stablecoins movidas en esas operaciones y la posición en RNT "
+            "Lend. Se incluyen también los abonos del vault de Reental —ver «Vault de Reental» en "
+            "el Glosario—, que no son visibles en un extracto hecho solo con las direcciones del "
+            "inversor.")},
+        {"Campo": "Qué NO incluye", "Valor": (
+            "1) Cualquier otro criptoactivo de estas mismas wallets ajeno a Reental. "
+            "2) Wallets no listadas arriba, exchanges centralizados y saldos en FIAT. "
+            "3) Otras redes: solo se ha leído Polygon. "
+            "4) Las comisiones de red (gas) de las transacciones, que no se registran. "
+            "Para una declaración completa hay que sumar estos conceptos por separado: este "
+            "informe es exhaustivo dentro de su alcance, no del patrimonio del inversor.")},
+        {"Campo": "Criterio de imputación", "Valor": (
+            "La renta se imputa en la fecha en que queda a disposición del inversor —el abono en "
+            "el vault—, con independencia de que la retire, la deje acumulada o la reinvierta. La "
+            "reinversión posterior se registra como una compra nueva, no como un segundo ingreso.")},
         {"Campo": "Divisas", "Valor": (f"USD y {DIVISA} ({_fx.MONEDAS.get(DIVISA, DIVISA)}). Conversión con la "
                                        "referencia diaria del Banco Central Europeo de la fecha de cada operación "
                                        "—el último día hábil anterior si cayó en festivo—. USDT, USDC y DAI se "
@@ -4392,6 +4417,23 @@ def build_report_meta() -> list:
                                      "profesional. Los importes marcados como estimados o pendientes (p.ej. compras "
                                      "en FIAT) deben completarse con los datos del inversor antes de presentar impuestos.")},
     ]
+
+
+def _formatear_portada(writer) -> None:
+    """Anchos y ajuste de línea de la hoja «Informe».
+
+    Existe porque los campos de alcance son párrafos, no etiquetas: con el ancho
+    por defecto se ven como una línea cortada y el lector se los salta, que es
+    justo lo contrario de lo que se busca —un despacho que reciba el libro tiene
+    que enterarse de qué NO cubre antes de darlo por completo."""
+    ws = writer.sheets["Informe"]
+    ws.column_dimensions["A"].width = 26
+    ws.column_dimensions["B"].width = 105
+    for fila in ws.iter_rows(min_row=1, max_row=ws.max_row, max_col=2):
+        for celda in fila:
+            celda.alignment = Alignment(wrap_text=True, vertical="top")
+    for celda in ws["A"]:
+        celda.font = Font(bold=True)
 
 
 def _escribir_glosario(writer) -> None:
@@ -4446,6 +4488,7 @@ def build_aggregate_xlsx(agg: dict) -> bytes:
 
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         pd.DataFrame(build_report_meta()).to_excel(writer, sheet_name="Informe", index=False)
+        _formatear_portada(writer)
         _escribir_glosario(writer)
         pd.DataFrame(resumen).to_excel(writer, sheet_name="Resumen", index=False)
         rend = agg["rend_rows"] or [{"Año": "", "Concepto": "(sin rendimientos en el periodo)",
