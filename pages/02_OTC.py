@@ -280,7 +280,10 @@ def estado_oferta(o: dict) -> dict:
     recibido = sum(v for rid, v in (llegadas_terceros or {}).items()
                    if any(r.get("id") == rid and r.get("oferta_id") == o.get("id")
                           for r in reservas))
-    return _saldos.estado_oferta(o, reservas, API_KEY, fetch_token_balance, recibido)
+    return _saldos.estado_oferta(
+        o, reservas, API_KEY, fetch_token_balance, recibido,
+        movimientos_fn=(lambda w, t, c, ts: _inv.movimientos_de_wallet(w, t, API_KEY, c, ts)),
+        custodia=OTC_WALLET)
 
 # Qué tokens de reservas contra terceros están YA en la custodia. Es un dato
 # derivado de la cadena, se recalcula en cada carga y no hay nada que marcar.
@@ -421,11 +424,14 @@ if ofertas_activas:
             "En wallet":     est["en_wallet"] if est["ok"] else None,
             "En colateral":  est["colateral"] if est["ok"] else None,
             "Saldo":         est["saldo_real"] if est["ok"] else None,
-            "En oferta":     n_oferta,
-            # Sin esta columna la fila no se puede leer: se ve que oferta 77 y
-            # tiene 67 y parece que falta algo, cuando lo que pasa es que ya
-            # entregó 25 y la oferta viva es de 52.
+            # Tres columnas y no una, porque la fila no se puede leer con una
+            # sola: viendo «oferta 77, saldo 67» parece que falta algo, cuando lo
+            # que pasa es que ya entregó 35 y lo que sigue en venta son 42.
+            # «En oferta» es la cifra VIVA —lo publicado menos lo entregado según
+            # la cadena— y es la que manda para reservar.
+            "Publicado":     est.get("publicado", n_oferta),
             "Entregado":     est.get("entregado", 0.0),
+            "En oferta":     est.get("n_vivo", n_oferta),
             "Estado":        proj.get("estado", "—"),
             "Ubicación":     proj.get("ubicacion", "—"),
         })
@@ -481,8 +487,9 @@ if ofertas_activas:
         .format({
             "P. emisión":  "{:,.2f}",
             "P. OTC mín.": "{:,.2f}",
-            "En oferta":   "{:,.3f}",
+            "Publicado":   "{:,.3f}",
             "Entregado":   "{:,.3f}",
+            "En oferta":   "{:,.3f}",
             # Estas cuatro son None cuando la cadena no se pudo consultar: se
             # muestran como «—» en vez de fingir un cero que se leería como
             # «el inversor no tiene nada».
@@ -500,11 +507,12 @@ if ofertas_activas:
         "Reental, pendiente de entregar al comprador · ⚪ ya entregada entera, conviene cerrarla · "
         "🔴 al inversor le faltan tokens para cubrir lo que sigue ofertando · ⚠️ no se ha podido "
         "comprobar en la cadena.  \n"
-        "**En oferta** = lo que se publicó. **Entregado** = lo que ya salió a compradores en "
-        "reservas completadas; la oferta viva es la resta de las dos. **Disponibles** = la cifra "
-        "menor entre esa oferta viva y su saldo real, menos lo reservado. **Saldo** = lo que tiene "
-        "en la wallet más lo que tiene colateralizado en Aave, que también puede vender porque "
-        "sigue siendo suyo."
+        "**Publicado** = lo que el inversor puso a la venta el primer día. **Entregado** = lo que "
+        "ya ha salido de su wallet hacia la custodia de Reental desde entonces, **según la cadena** "
+        "y no según lo que se anotara. **En oferta** = la resta de las dos, que es lo que sigue en "
+        "venta y la cifra que manda al reservar. **Disponibles** = la menor entre esa y su saldo "
+        "real, menos lo ya reservado. **Saldo** = lo que tiene en la wallet más lo colateralizado "
+        "en Aave, que también puede vender porque sigue siendo suyo."
     )
 
     if avisos_of:

@@ -22,23 +22,39 @@ from utils import fetch_all_account_txs, fetch_all_token_txs
 import otc_saldos as _saldos
 
 
-def saldo_en_wallet(wallet: str, token_address: str, api_key: str) -> float:
-    """Tokens del proyecto que el inversor tiene sueltos en su wallet.
+def movimientos_de_wallet(wallet: str, token_address: str, api_key: str,
+                          custodia: str = "", desde_ts: int = 0) -> dict:
+    """Saldo del inversor y lo que ha entregado a la custodia, de UNA sola lectura.
+
+    Devuelve {"ok", "saldo", "entregado"}. `entregado` son los tokens que han
+    salido de esta wallet hacia `custodia` a partir de `desde_ts` (unix UTC).
+
+    Las dos cifras salen del MISMO recorrido a propósito. Separarlas en dos
+    consultas las deja mirando instantes distintos, y basta un desfase para
+    reproducir el error que esto viene a arreglar: el saldo ya refleja una
+    entrega que el contador de entregado todavía no ve, y la oferta se marca en
+    rojo acusando al inversor de no tener lo que acaba de entregar. Cuando dos
+    cifras se restan una de otra, tienen que venir de la misma foto.
 
     Se apoya en `fetch_all_account_txs`, que pagina: la consulta directa a
     Etherscan se corta a 10.000 resultados y en una wallet con mucho histórico
     devolvía un saldo incompleto.
     """
-    wallet = wallet.lower()
-    token  = token_address.lower()
+    wallet   = wallet.lower()
+    token    = token_address.lower()
+    custodia = (custodia or "").lower()
     try:
         txs = fetch_all_account_txs(wallet, api_key, action="tokentx",
                                     contractaddress=token)
     except Exception:
-        return -1.0   # -1 indica error de consulta, NO saldo cero
+        txs = None
     if txs is None:
-        return -1.0
+        # -1 indica error de consulta, NO saldo cero. Quien lo reciba debe
+        # abstenerse de afirmar nada, no asumir que el inversor está a cero.
+        return {"ok": False, "saldo": -1.0, "entregado": 0.0}
+
     bal = 0.0
+    entregado = 0.0
     for tx in txs:
         dec   = int(tx.get("tokenDecimal") or 18)
         value = int(tx["value"]) / (10 ** dec)
@@ -48,7 +64,18 @@ def saldo_en_wallet(wallet: str, token_address: str, api_key: str) -> float:
             bal += value
         elif from_ == wallet and to_ != wallet:
             bal -= value
-    return round(bal, 6)
+            if custodia and to_ == custodia and int(tx.get("timeStamp") or 0) >= desde_ts:
+                entregado += value
+    return {"ok": True, "saldo": round(bal, 6), "entregado": round(entregado, 6)}
+
+
+def saldo_en_wallet(wallet: str, token_address: str, api_key: str) -> float:
+    """Tokens del proyecto que el inversor tiene sueltos en su wallet.
+
+    Envoltorio de `movimientos_de_wallet` para los sitios que solo necesitan el
+    saldo. -1.0 si la consulta falló.
+    """
+    return movimientos_de_wallet(wallet, token_address, api_key)["saldo"]
 
 
 def balances_de_wallet(wallet: str, api_key: str, project_by_addr: dict,
@@ -239,7 +266,8 @@ def disponibles_reental(balances: dict, reservas: list, llegadas: dict | None = 
 
 
 def catalogo(balances: dict, reservas: list, ofertas: list,
-             api_key: str, en_wallet_fn, entradas: dict | None = None) -> dict:
+             api_key: str, en_wallet_fn, entradas: dict | None = None,
+             custodia: str = "") -> dict:
     """Lo comprometible hoy de cada proyecto, por dirección de token.
 
     Devuelve {token_address: {"id", "nombre", "reental", "terceros", "total"}},
@@ -262,7 +290,10 @@ def catalogo(balances: dict, reservas: list, ofertas: list,
         recibido = sum(v for rid, v in llegadas.items()
                        if any(r.get("id") == rid and r.get("oferta_id") == o.get("id")
                               for r in (reservas or [])))
-        est = _saldos.estado_oferta(o, reservas, api_key, en_wallet_fn, recibido)
+        est = _saldos.estado_oferta(
+            o, reservas, api_key, en_wallet_fn, recibido,
+            movimientos_fn=(lambda w, t, c, ts: movimientos_de_wallet(w, t, api_key, c, ts)),
+            custodia=custodia)
         # Sin lectura fiable de la cadena no se afirma que haya nada disponible:
         # una propuesta que ofrece tokens que no existen es peor que una corta.
         if not est.get("ok") or est["disponible"] <= 0.001:

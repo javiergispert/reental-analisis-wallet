@@ -37,6 +37,7 @@ from reental_tokens import codigo_proyecto_atoken
 # Disponibilidad de las ofertas de terceros: misma fuente que la página OTC, para
 # que las dos respondan lo mismo a "cuántos tokens se pueden vender de verdad".
 import otc_saldos as _saldos
+import otc_inventario as _inv
 import mercado_pdf as _mkt_pdf_mod
 import mercado_secundario as _mkt
 import recarga as _recarga
@@ -229,7 +230,10 @@ def construir_disponibilidad(master_df: pd.DataFrame) -> list:
         # entre esa y el saldo real del inversor (wallet + colateral en Aave),
         # descontando lo ya reservado. Tomar `n_tokens` sin comprobar metía en
         # el ranking oportunidades que no se podían ejecutar.
-        est = _saldos.estado_oferta(o, reservas, API_KEY, _saldo_en_wallet)
+        est = _saldos.estado_oferta(
+            o, reservas, API_KEY, _saldo_en_wallet,
+            movimientos_fn=(lambda w, t, c, ts: _inv.movimientos_de_wallet(w, t, API_KEY, c, ts)),
+            custodia=OTC_WALLET)
         if not est["ok"]:
             continue                    # sin saldo verificable no se ofrece
         if est["disponible"] < 0.001:

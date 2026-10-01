@@ -99,7 +99,7 @@ def _catalogo_otc(_dia: str, _hora: int, esquema: int) -> dict:
         reservas = _store.read_list(TAB_RESERVAS)
         ofertas = _store.read_list(TAB_OFERTAS)
         return _inv.catalogo(balances, reservas, ofertas, API_KEY,
-                             _inv.saldo_en_wallet, entradas)
+                             _inv.saldo_en_wallet, entradas, custodia=OTC_WALLET)
     except Exception:       # noqa: BLE001 — sin inventario la propuesta se hace igual
         return {}
 

@@ -17,16 +17,28 @@ Dos ideas de fondo:
     prevalecía siempre lo publicado, así que una oferta seguía apareciendo entera
     aunque el inversor ya hubiera vendido sus tokens por otra vía.
 
+  * Una oferta NO sigue vendiendo lo que ya entregó. Lo entregado se mide en la
+    CADENA —transferencias de la wallet de la oferta a la custodia de Reental
+    desde que se publicó—, no en el registro de reservas: una entrega puede
+    anotarse mal o no anotarse, y entonces la oferta seguía ofreciendo tokens
+    que ya habían salido de la wallet, y encima marcaba al inversor en rojo por
+    no conservarlos.
+
 API pública:
-    saldo_efectivo(wallet, token, api_key) -> dict
+    saldo_efectivo(wallet, token, api_key, en_wallet_fn) -> dict
     reservado_de_oferta(oferta_id, reservas) -> float
-    estado_oferta(oferta, reservas, api_key) -> dict
+    entregado_de_oferta(oferta_id, reservas) -> float
+    publicada_en(oferta) -> int
+    estado_oferta(oferta, reservas, api_key, en_wallet_fn, recibido,
+                  movimientos_fn, custodia) -> dict
 """
 from __future__ import annotations
 
 import streamlit as st
 
 import aave_lend as _al
+
+from datetime import datetime, timezone
 
 # Pool de Aave del mercado de colateral inmobiliario de Reental.
 AAVE_POOL = "0x67dc8037db6309dd5571d82c65f5f593f7da1505"
@@ -123,6 +135,28 @@ def reservado_de_oferta(oferta_id: str, reservas: list) -> float:
                and r.get("oferta_id") == oferta_id)
 
 
+def publicada_en(oferta: dict) -> int:
+    """Instante (unix UTC) en que se publicó la oferta, leído de su id.
+
+    Los ids tienen la forma `OFR-AAAAMMDDHHMMSS`, que es la única fuente del
+    dato: el campo `fecha` existe en el registro pero está vacío en las 24
+    ofertas del almacén, así que fiarse de él sería fiarse de un None.
+
+    Devuelve 0 si no se puede leer. Un 0 hace que se cuente TODO lo que esa
+    wallet haya mandado nunca a la custodia, lo que descuenta de más y deja la
+    oferta corta: el error cae del lado seguro, que es el único aceptable aquí.
+    """
+    ident = str(oferta.get("id") or "")
+    marca = ident.split("-")[-1]
+    if len(marca) != 14 or not marca.isdigit():
+        return 0
+    try:
+        return int(datetime.strptime(marca, "%Y%m%d%H%M%S")
+                   .replace(tzinfo=timezone.utc).timestamp())
+    except ValueError:
+        return 0
+
+
 def entregado_de_oferta(oferta_id: str, reservas: list) -> float:
     """Tokens de esta oferta que YA se entregaron al comprador.
 
@@ -145,7 +179,7 @@ def entregado_de_oferta(oferta_id: str, reservas: list) -> float:
 
 
 def estado_oferta(oferta: dict, reservas: list, api_key: str, en_wallet_fn,
-                  recibido: float = 0.0) -> dict:
+                  recibido: float = 0.0, movimientos_fn=None, custodia: str = "") -> dict:
     """Estado real de una oferta de tercero cruzando lo publicado con la cadena.
 
     `recibido` son los tokens de esta oferta que YA están en la wallet de
@@ -155,13 +189,40 @@ def estado_oferta(oferta: dict, reservas: list, api_key: str, en_wallet_fn,
     Lo enviado sigue respaldando la oferta: cambia de sitio, no desaparece.
     """
     n_publicado = float(oferta.get("n_tokens", 0) or 0)
-    entregado   = entregado_de_oferta(oferta.get("id"), reservas)
+
+    # Cuánto ha entregado ya el inversor por esta oferta. Se mira la CADENA, no
+    # el registro de reservas: una entrega puede anotarse mal —ha pasado, como
+    # reserva de stock propio de Reental en vez de contra la oferta— o no
+    # anotarse, y entonces la oferta sigue vendiendo lo que ya salió de la
+    # wallet. Lo que de verdad ocurrió está en la cadena.
+    #
+    # Se toma el MAYOR de las dos lecturas. Si una entrega consta por reserva
+    # pero no llegó a la custodia, igual se descuenta. Descontar de más deja la
+    # oferta corta; descontar de menos la deja vendiendo tokens que ya no están.
+    # Entre quedarse corto y comprometer dos veces, siempre corto.
+    recibido  = max(0.0, float(recibido or 0.0))
+    entregado = entregado_de_oferta(oferta.get("id"), reservas)
+    mov = None
+    if movimientos_fn is not None and custodia:
+        mov = movimientos_fn(oferta.get("wallet_inversor", ""),
+                             (oferta.get("token_address") or "").lower(),
+                             custodia, publicada_en(oferta))
+        if mov.get("ok"):
+            # A lo que ve la cadena se le resta `recibido`: son las entregas que
+            # corresponden a reservas TODAVÍA VIVAS, y de esas ya se ocupa el
+            # cálculo de abajo —suman al respaldo y restan como reservado—. Sin
+            # esta resta se descontarían dos veces y la oferta aparecería más
+            # corta de lo que es justo cuando el inversor acaba de cumplir.
+            entregado = max(entregado, float(mov.get("entregado") or 0.0) - recibido)
+    entregado = max(0.0, round(entregado, 6))
     # Lo que la oferta todavía puede vender. Lo entregado ya salió de la wallet
     # del inversor, así que exigirle que lo conserve es exigirle lo imposible.
     n_oferta  = max(0.0, round(n_publicado - entregado, 6))
-    recibido  = max(0.0, float(recibido or 0.0))
+    # El saldo sale de la MISMA lectura que el entregado cuando la hay: las dos
+    # cifras se restan entre sí y tienen que venir de la misma foto.
     sal       = saldo_efectivo(oferta.get("wallet_inversor", ""),
-                               (oferta.get("token_address") or "").lower(), api_key, en_wallet_fn)
+                               (oferta.get("token_address") or "").lower(), api_key,
+                               (lambda *_a, **_k: mov["saldo"]) if (mov and mov.get("ok")) else en_wallet_fn)
     reservado = reservado_de_oferta(oferta.get("id"), reservas)
 
     if not sal["ok"]:

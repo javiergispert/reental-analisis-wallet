@@ -181,6 +181,42 @@ Queda un caso ambiguo: un inversor con oferta publicada que además le venda a
 Reental por su cuenta el mismo token. Ahí se atribuiría de más y se bloquearía
 una venta — el error cae del lado seguro, nunca duplica una reserva.
 
+### 6 bis. Una oferta no deja de vender lo que ya entregó
+
+`estado_oferta` comparaba el saldo del inversor contra lo que publicó **el
+primer día**. Una oferta no se decrementa nunca al cumplirse una reserva contra
+ella, así que después de entregar parte el inversor aparecía debiendo tokens.
+
+Pasó de verdad: Dania Beach 1 en 🔴 «faltan 10» con el inversor cumpliendo.
+Publicó 77,026, entregó 25 el 17/09 y 10 más el 01/10, y conserva 67,026. Y la
+fila se leía coherente —«En oferta 77,026 · Saldo 67,026 · Disponibles
+67,026»—, que es lo peligroso: una cifra verosímil entrena a ignorar los avisos
+rojos justo en la página que compromete tokens.
+
+**Lo entregado se mide en la CADENA, no en las reservas.** El registro de
+reservas no es fiable para esto: el envío del 01/10 se anotó como reserva de
+*stock propio de Reental* —no contra la oferta del tercero— y el de MRB-1 del
+24/09 (289 tokens) no se anotó de ninguna forma. Lo que de verdad ocurrió está
+en las transferencias de la wallet de la oferta a la custodia.
+
+Cuatro detalles que costaron:
+
+- **La fecha de publicación sale del id** (`OFR-AAAAMMDDHHMMSS`). El campo
+  `fecha` existe y está vacío en las 24 ofertas del almacén.
+- **Saldo y entregado salen del MISMO recorrido** (`movimientos_de_wallet`).
+  Con dos consultas distintas basta un desfase para reproducir el error que esto
+  arregla: el saldo ya refleja una entrega que el contador no ve todavía.
+- **A lo que ve la cadena se le resta `recibido`** —las entregas de reservas
+  todavía vivas—, porque de esas ya se ocupa el cálculo de respaldo y reservado.
+  Sin esa resta se descuentan dos veces.
+- **Se toma el MAYOR entre la cadena y las reservas completadas.** Descontar de
+  más deja la oferta corta; descontar de menos la deja vendiendo lo que ya no
+  está. Entre quedarse corto y comprometer dos veces, siempre corto.
+
+Es **derivado, no almacenado**: `n_tokens` sigue siendo lo que se publicó y la
+cifra viva se recalcula en cada carga. Reescribir la oferta borraría lo que se
+acordó y crearía escrituras donde no hacen falta.
+
 ### 7. Un fallo de red que parece «no hay datos»
 
 Una función que devuelve lista vacía tanto si no hay resultados como si la API
