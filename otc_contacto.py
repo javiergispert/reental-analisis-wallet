@@ -30,6 +30,13 @@ from __future__ import annotations
 # pegado algo que no era un correo (una fila entera, una lista de direcciones).
 _LARGO_MAXIMO = 254
 
+# El valor que ocupa el hueco cuando todavía no se sabe el correo. Existe porque
+# el campo es obligatorio y había reservas vivas creadas antes de que existiera:
+# sin un valor explícito, o se bloqueaban esas reservas para cualquier otro
+# cambio, o se dejaban en blanco y el blanco se lee como «este inversor no tiene
+# correo» en vez de «esto falta por rellenar».
+PENDIENTE = "pendiente de indicar"
+
 
 def normalizar(email: str | None) -> str:
     """Quita espacios alrededor y pasa a minúsculas.
@@ -43,14 +50,22 @@ def normalizar(email: str | None) -> str:
     return (email or "").strip().lower()
 
 
-def error(email: str | None, obligatorio: bool = True) -> str | None:
+def error(email: str | None, obligatorio: bool = True,
+          permitir_pendiente: bool = False) -> str | None:
     """Devuelve el mensaje de error, o None si el correo vale.
 
     Devuelve el texto para enseñarlo tal cual en vez de un booleano: el mensaje
     tiene que decir QUÉ está mal, porque «email inválido» obliga a adivinar.
+
+    `permitir_pendiente` acepta además el valor PENDIENTE. Se activa al EDITAR
+    una reserva y no al crearla: una reserva nueva se crea hablando con el
+    comprador, así que el correo se tiene; una antigua hay que poder guardarla
+    reconociendo que falta, o no se puede ni corregirle el precio.
     """
     valor = normalizar(email)
 
+    if permitir_pendiente and valor == PENDIENTE:
+        return None
     if not valor:
         return "El email del inversor es obligatorio." if obligatorio else None
     # El orden importa: se comprueba primero lo que falta y después lo que sobra,
@@ -78,15 +93,22 @@ def error(email: str | None, obligatorio: bool = True) -> str | None:
     return None
 
 
-def para_mostrar(email: str | None) -> tuple:
-    """(texto, es_correcto) para pintar el correo en una lista.
+def valor(email: str | None) -> str:
+    """Lo que se enseña y se exporta: el correo, o PENDIENTE si no lo hay.
 
-    Las reservas creadas antes de que existiera este campo no lo tienen, y en una
-    lista NO pueden aparecer en blanco: quien revisa leería el hueco como «este
-    inversor no tiene correo» en vez de «esta reserva es anterior al campo». Se
-    devuelve un texto explícito y una bandera para que quien pinta lo marque.
+    Un hueco vacío en la lista se lee como «este inversor no tiene correo» en vez
+    de «esto falta por rellenar», así que no se deja ninguno.
+
+    Esto resuelve el hueco **al mostrar**, no reescribiendo las filas antiguas
+    del almacén. Rellenar cientos de reservas vivas de golpe es una escritura
+    masiva sobre datos que comprometen tokens, con el riesgo de pisar lo que otro
+    esté guardando en ese momento (ver trampa 9); y no haría falta para nada,
+    porque lo que se ve acaba siendo exactamente lo mismo. Una fila se actualiza
+    cuando alguien la edita, que es cuando de verdad se sabe el correo.
     """
-    valor = normalizar(email)
-    if not valor:
-        return "— sin email · reserva anterior a este campo —", False
-    return valor, True
+    return normalizar(email) or PENDIENTE
+
+
+def es_pendiente(email: str | None) -> bool:
+    """Si ese correo todavía no se sabe —esté vacío o puesto como PENDIENTE—."""
+    return valor(email) == PENDIENTE

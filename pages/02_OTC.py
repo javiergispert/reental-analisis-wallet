@@ -1139,8 +1139,8 @@ def render_reservas(lista: list, editable: bool = False):
             # y medio correo no sirve para buscar en el CRM, que es justo para lo
             # que está. `word-break` lo parte en dos líneas antes que recortarlo, y
             # `user-select:all` hace que un clic lo seleccione entero para pegarlo.
-            _email_txt, _email_ok = _contacto.para_mostrar(r.get("email_inversor"))
-            if _email_ok:
+            _email_txt = _contacto.valor(r.get("email_inversor"))
+            if not _contacto.es_pendiente(r.get("email_inversor")):
                 st.markdown(
                     f'<div style="background:#f8fafc;border:1px solid #e2e8f0;border-left:3px solid #0284c7;'
                     f'border-radius:6px;padding:6px 12px;margin:4px 0;font-size:0.9rem;color:#0f172a;">'
@@ -1153,7 +1153,7 @@ def render_reservas(lista: list, editable: bool = False):
                 st.markdown(
                     f'<div style="background:#fffbeb;border:1px solid #fde68a;border-left:3px solid #d97706;'
                     f'border-radius:6px;padding:6px 12px;margin:4px 0;font-size:0.9rem;color:#92400e;">'
-                    f'✉️ <b>Email</b> &nbsp;{_email_txt} · <em>rellénalo con «Editar» '
+                    f'✉️ <b>Email</b> &nbsp;<b>⏳ {_email_txt}</b> · <em>rellénalo con «Editar» '
                     f'para poder localizar al inversor en el CRM</em></div>',
                     unsafe_allow_html=True,
                 )
@@ -1266,12 +1266,27 @@ def render_reservas(lista: list, editable: bool = False):
                     )
                     new_notas = col_e3.text_input("Notas", value=r.get("notas", ""), key=f"edit_notas_{r['id']}")
 
-                    new_email = st.text_input(
-                        "Email del inversor" + ("" if r.get("email_inversor") else " (⚠️ falta — rellénalo)"),
-                        value=r.get("email_inversor", ""),
+                    # El email es obligatorio también al editar, pero con una salida
+                    # explícita: las reservas vivas creadas antes de que existiera el
+                    # campo no tienen correo y si no se pudieran guardar sin él,
+                    # tampoco se les podría corregir el precio ni los tokens. La
+                    # casilla obliga a reconocer que falta en vez de dejar un hueco.
+                    _ya_pendiente = _contacto.es_pendiente(r.get("email_inversor"))
+                    col_em, col_ep = st.columns([3, 1])
+                    email_pend = col_ep.checkbox(
+                        "⏳ Pendiente\nde indicar", value=_ya_pendiente,
+                        key=f"edit_email_pend_{r['id']}",
+                        help="Márcalo solo si todavía no se tiene el correo del comprador.",
+                    )
+                    new_email = col_em.text_input(
+                        "Email del inversor *",
+                        value="" if _ya_pendiente else r.get("email_inversor", ""),
                         placeholder="correo@ejemplo.com",
                         key=f"edit_email_{r['id']}",
+                        disabled=email_pend,
                     )
+                    if email_pend:
+                        new_email = _contacto.PENDIENTE
 
                     # Campo wallet (editable si es propuesta pendiente o si quiere corregirla)
                     wallet_actual    = r.get("wallet_inversor", "")
@@ -1290,10 +1305,7 @@ def render_reservas(lista: list, editable: bool = False):
 
                     if guardar:
                         errores_edit = []
-                        # Al editar el email NO es obligatorio: si se exigiera, las
-                        # reservas antiguas que no lo tienen no se podrían tocar para
-                        # nada más —ni corregir tokens ni precio— hasta rellenarlo.
-                        _err_e = _contacto.error(new_email, obligatorio=False)
+                        _err_e = _contacto.error(new_email, permitir_pendiente=True)
                         if _err_e:
                             errores_edit.append(_err_e)
                         wallet_limpia = new_wallet.strip().lower()
@@ -1534,7 +1546,7 @@ if reservas_all:
             "Proyecto ID":      r["proyecto_id"],
             "Comercial":        r["comercial"],
             "Inversor":         r["inversor"],
-            "Email inversor":   r.get("email_inversor", ""),
+            "Email inversor":   _contacto.valor(r.get("email_inversor")),
             "Wallet inversor":  r["wallet_inversor"],
             "Tokens":           r["n_tokens"],
             "Precio acordado":  r["precio_acordado"],
