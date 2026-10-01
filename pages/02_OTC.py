@@ -422,6 +422,10 @@ if ofertas_activas:
             "En colateral":  est["colateral"] if est["ok"] else None,
             "Saldo":         est["saldo_real"] if est["ok"] else None,
             "En oferta":     n_oferta,
+            # Sin esta columna la fila no se puede leer: se ve que oferta 77 y
+            # tiene 67 y parece que falta algo, cuando lo que pasa es que ya
+            # entregó 25 y la oferta viva es de 52.
+            "Entregado":     est.get("entregado", 0.0),
             "Estado":        proj.get("estado", "—"),
             "Ubicación":     proj.get("ubicacion", "—"),
         })
@@ -478,6 +482,7 @@ if ofertas_activas:
             "P. emisión":  "{:,.2f}",
             "P. OTC mín.": "{:,.2f}",
             "En oferta":   "{:,.3f}",
+            "Entregado":   "{:,.3f}",
             # Estas cuatro son None cuando la cadena no se pudo consultar: se
             # muestran como «—» en vez de fingir un cero que se leería como
             # «el inversor no tiene nada».
@@ -491,10 +496,15 @@ if ofertas_activas:
     )
 
     st.caption(
-        "🟢 con tokens libres · 🟡 íntegramente reservada · 🔴 el inversor ya no tiene los tokens "
-        "ofertados · ⚠️ no se ha podido comprobar. **Disponibles** = la cifra menor entre lo ofertado "
-        "y su saldo real, menos lo reservado. **Saldo** = lo que tiene en la wallet más lo que tiene "
-        "colateralizado en Aave, que también puede vender porque sigue siendo suyo."
+        "🟢 con tokens libres · 🟡 íntegramente reservada · 🔵 parte ya está en la wallet OTC de "
+        "Reental, pendiente de entregar al comprador · ⚪ ya entregada entera, conviene cerrarla · "
+        "🔴 al inversor le faltan tokens para cubrir lo que sigue ofertando · ⚠️ no se ha podido "
+        "comprobar en la cadena.  \n"
+        "**En oferta** = lo que se publicó. **Entregado** = lo que ya salió a compradores en "
+        "reservas completadas; la oferta viva es la resta de las dos. **Disponibles** = la cifra "
+        "menor entre esa oferta viva y su saldo real, menos lo reservado. **Saldo** = lo que tiene "
+        "en la wallet más lo que tiene colateralizado en Aave, que también puede vender porque "
+        "sigue siendo suyo."
     )
 
     if avisos_of:

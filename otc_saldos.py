@@ -123,6 +123,27 @@ def reservado_de_oferta(oferta_id: str, reservas: list) -> float:
                and r.get("oferta_id") == oferta_id)
 
 
+def entregado_de_oferta(oferta_id: str, reservas: list) -> float:
+    """Tokens de esta oferta que YA se entregaron al comprador.
+
+    Son los de sus reservas completadas. Se lee `tokens_enviados` cuando existe
+    —un envío pudo ser parcial— y se cae a lo reservado si no consta.
+
+    Existe porque una oferta publicada NO se decrementa al cumplirse una reserva:
+    sigue diciendo que vende lo mismo que el primer día. Comparar ese número con
+    el saldo del inversor después de que haya entregado parte es compararlo con
+    una cifra que ya no describe nada, y marcarlo en rojo por «faltan tokens»
+    cuando lo que pasó es que cumplió.
+    """
+    total = 0.0
+    for r in (reservas or []):
+        if r.get("estado") != "completada" or r.get("oferta_id") != oferta_id:
+            continue
+        env = r.get("tokens_enviados")
+        total += float(env if env is not None else (r.get("n_tokens") or 0))
+    return round(total, 6)
+
+
 def estado_oferta(oferta: dict, reservas: list, api_key: str, en_wallet_fn,
                   recibido: float = 0.0) -> dict:
     """Estado real de una oferta de tercero cruzando lo publicado con la cadena.
@@ -133,7 +154,11 @@ def estado_oferta(oferta: dict, reservas: list, api_key: str, en_wallet_fn,
     hubiera incumplido, justo cuando acababa de hacer lo que tenía que hacer.
     Lo enviado sigue respaldando la oferta: cambia de sitio, no desaparece.
     """
-    n_oferta  = float(oferta.get("n_tokens", 0) or 0)
+    n_publicado = float(oferta.get("n_tokens", 0) or 0)
+    entregado   = entregado_de_oferta(oferta.get("id"), reservas)
+    # Lo que la oferta todavía puede vender. Lo entregado ya salió de la wallet
+    # del inversor, así que exigirle que lo conserve es exigirle lo imposible.
+    n_oferta  = max(0.0, round(n_publicado - entregado, 6))
     recibido  = max(0.0, float(recibido or 0.0))
     sal       = saldo_efectivo(oferta.get("wallet_inversor", ""),
                                (oferta.get("token_address") or "").lower(), api_key, en_wallet_fn)
@@ -143,7 +168,8 @@ def estado_oferta(oferta: dict, reservas: list, api_key: str, en_wallet_fn,
         # Sin lectura fiable no se afirma nada: ni verde ni rojo.
         return {"ok": False, "alerta": "⚠️", "en_wallet": 0.0, "colateral": 0.0,
                 "saldo_real": 0.0, "reservado": reservado, "disponible": 0.0,
-                "recibido": recibido, "respaldo": 0.0,
+                "recibido": recibido, "respaldo": 0.0, "entregado": entregado,
+                "n_vivo": n_oferta, "publicado": n_publicado,
                 "motivo": sal.get("motivo", "No se pudo consultar la cadena.")}
 
     # Lo que respalda la oferta es lo que el inversor conserva MÁS lo que ya ha
@@ -152,10 +178,16 @@ def estado_oferta(oferta: dict, reservas: list, api_key: str, en_wallet_fn,
     disponible = max(0.0, respaldo - reservado)
     falta      = n_oferta - sal["total"] - recibido
 
-    if falta > 0.001:
+    if n_oferta <= 0.001:
+        alerta = "⚪"
+        motivo = (f"La oferta ya se ha entregado entera ({entregado:,.3f} de "
+                  f"{n_publicado:,.3f}). No queda nada que vender: conviene cerrarla.")
+    elif falta > 0.001:
         alerta = "🔴"
+        _pend = (f" (de los {n_publicado:,.3f} publicados ya entregó {entregado:,.3f},"
+                 f" así que la oferta viva es de {n_oferta:,.3f})" if entregado > 0.001 else "")
         motivo = (f"El inversor tiene {sal['total']:,.3f} tokens y la oferta es de "
-                  f"{n_oferta:,.3f}: faltan {falta:,.3f}.")
+                  f"{n_oferta:,.3f}: faltan {falta:,.3f}.{_pend}")
         if recibido > 0.001:
             motivo += f" ({recibido:,.3f} ya están en la custodia.)"
     elif recibido > 0.001:
@@ -172,4 +204,6 @@ def estado_oferta(oferta: dict, reservas: list, api_key: str, en_wallet_fn,
     return {"ok": True, "alerta": alerta, "en_wallet": sal["en_wallet"],
             "colateral": sal["colateral"], "saldo_real": sal["total"],
             "reservado": reservado, "disponible": disponible,
-            "recibido": recibido, "respaldo": respaldo, "motivo": motivo}
+            "recibido": recibido, "respaldo": respaldo,
+            "entregado": entregado, "n_vivo": n_oferta, "publicado": n_publicado,
+            "motivo": motivo}

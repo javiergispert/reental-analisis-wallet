@@ -46,7 +46,7 @@ import otc_contacto as _contacto
 # Se sube cuando cambia lo que devuelve `_catalogo_otc`, en forma o en valor.
 # Aquí no cambió la forma pero sí las cifras: el disponible pasa a descontar
 # los tokens de terceros que ya están en la custodia.
-ESQUEMA_CATALOGO = 2
+ESQUEMA_CATALOGO = 3
 
 
 st.title("📑 Constructor de propuestas")
