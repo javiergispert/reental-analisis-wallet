@@ -31,6 +31,7 @@ import otc_inventario as _inv
 # Avisos de protocolo: los pasos que hay que dar FUERA de la herramienta y en
 # orden. El texto vive en el módulo, no aquí.
 import otc_protocolos as _protocolos
+import otc_contacto as _contacto
 
 # ── Constantes ────────────────────────────────────────────────────────────────
 
@@ -634,7 +635,8 @@ with st.expander("📢 Publicar oferta de token de tercero",
             e = []
             if not of_comercial.strip(): e.append("El campo Comercial es obligatorio.")
             if not of_inversor.strip():  e.append("El campo Inversor es obligatorio.")
-            if not of_email.strip():     e.append("El campo Email es obligatorio.")
+            _err_of_email = _contacto.error(of_email)
+            if _err_of_email:            e.append(_err_of_email)
             if not (of_wallet_clean.startswith("0x") and len(of_wallet_clean) == 42):
                 e.append("La wallet del inversor no es una dirección válida.")
             return e
@@ -663,7 +665,7 @@ with st.expander("📢 Publicar oferta de token de tercero",
                     "id":                f"OFR-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
                     "comercial":         of_comercial.strip(),
                     "inversor":          of_inversor.strip(),
-                    "email_inversor":    of_email.strip(),
+                    "email_inversor":    _contacto.normalizar(of_email),
                     "wallet_inversor":   of_wallet_clean,
                     "token_address":     of_addr,
                     "proyecto_nombre":   of_proj.get("nombre", "—"),
@@ -760,10 +762,20 @@ with _exp_reserva:
         proyecto_sel = fc1.selectbox("Proyecto *", list(opciones_combinadas.keys()), key="nr_proyecto")
         comercial    = fc2.text_input("Comercial *", placeholder="Nombre del comercial", key="nr_comercial")
 
-        fd1, fd2, fd3 = st.columns([2, 2, 1])
-        inversor        = fd1.text_input("Inversor *", placeholder="Nombre del inversor", key="nr_inversor")
-        sin_wallet      = fd3.checkbox("Sin wallet\n(propuesta)", key="nr_sin_wallet")
-        wallet_inv      = fd2.text_input(
+        # El email va en su propia fila y con la mitad del ancho porque es la clave
+        # con la que luego se busca al inversor en el CRM: apretado entre la wallet
+        # y el nombre se teclea mal y un email mal escrito no sirve de nada.
+        fd1, fd2 = st.columns(2)
+        inversor = fd1.text_input("Inversor *", placeholder="Nombre del inversor", key="nr_inversor")
+        email_inv = fd2.text_input(
+            "Email del inversor *", placeholder="correo@ejemplo.com", key="nr_email",
+            help="Con este correo se identifica al inversor en el CRM. Es el del COMPRADOR, "
+                 "no el de quien vende los tokens.",
+        )
+
+        fe1, fe2 = st.columns([3, 1])
+        sin_wallet = fe2.checkbox("Sin wallet\n(propuesta)", key="nr_sin_wallet")
+        wallet_inv = fe1.text_input(
             "Wallet inversor" + (" *" if not sin_wallet else " (pendiente)"),
             placeholder="0x…" if not sin_wallet else "Se rellenará cuando el inversor confirme",
             key="nr_wallet",
@@ -878,6 +890,9 @@ with _exp_reserva:
                 errores.append("El campo Comercial es obligatorio.")
             if not inversor.strip():
                 errores.append("El campo Inversor es obligatorio.")
+            _err_email = _contacto.error(email_inv)
+            if _err_email:
+                errores.append(_err_email)
             if sin_wallet:
                 wallet_inv_clean = "pendiente"
             else:
@@ -937,6 +952,7 @@ with _exp_reserva:
                 "proyecto_id":      sel["id"],
                 "comercial":        comercial.strip(),
                 "inversor":         inversor.strip(),
+                "email_inversor":   _contacto.normalizar(email_inv),
                 "wallet_inversor":  wallet_inv_clean,
                 "wallet_pendiente": sin_wallet,
                 "n_tokens":         float(n_tokens),
@@ -955,7 +971,7 @@ with _exp_reserva:
             reservas_all = _fresh_list(TAB_RESERVAS)
             reservas_all.append(nueva)
             save_reservas(reservas_all)
-            for _k in ["nr_proyecto", "nr_comercial", "nr_inversor", "nr_wallet",
+            for _k in ["nr_proyecto", "nr_comercial", "nr_inversor", "nr_email", "nr_wallet",
                         "nr_ntokens", "nr_precio", "nr_notas", "nr_sin_wallet"]:
                 st.session_state.pop(_k, None)
             aviso = st.success(
@@ -1118,6 +1134,30 @@ def render_reservas(lista: list, editable: bool = False):
             else:
                 i6.markdown(f"**Reservado el**  \n{r['fecha_reserva']}")
 
+            # El email va en una franja a ANCHO COMPLETO y no dentro de una de las
+            # columnas de arriba: en una columna estrecha un correo largo se corta
+            # y medio correo no sirve para buscar en el CRM, que es justo para lo
+            # que está. `word-break` lo parte en dos líneas antes que recortarlo, y
+            # `user-select:all` hace que un clic lo seleccione entero para pegarlo.
+            _email_txt, _email_ok = _contacto.para_mostrar(r.get("email_inversor"))
+            if _email_ok:
+                st.markdown(
+                    f'<div style="background:#f8fafc;border:1px solid #e2e8f0;border-left:3px solid #0284c7;'
+                    f'border-radius:6px;padding:6px 12px;margin:4px 0;font-size:0.9rem;color:#0f172a;">'
+                    f'✉️ <b>Email</b> &nbsp;'
+                    f'<span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;'
+                    f'user-select:all;word-break:break-all;">{_email_txt}</span></div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    f'<div style="background:#fffbeb;border:1px solid #fde68a;border-left:3px solid #d97706;'
+                    f'border-radius:6px;padding:6px 12px;margin:4px 0;font-size:0.9rem;color:#92400e;">'
+                    f'✉️ <b>Email</b> &nbsp;{_email_txt} · <em>rellénalo con «Editar» '
+                    f'para poder localizar al inversor en el CRM</em></div>',
+                    unsafe_allow_html=True,
+                )
+
             # Totales EUR/USD si están guardados
             if r.get("total_eur") or r.get("total_usd"):
                 t_eur  = r.get("total_eur", 0)
@@ -1226,6 +1266,13 @@ def render_reservas(lista: list, editable: bool = False):
                     )
                     new_notas = col_e3.text_input("Notas", value=r.get("notas", ""), key=f"edit_notas_{r['id']}")
 
+                    new_email = st.text_input(
+                        "Email del inversor" + ("" if r.get("email_inversor") else " (⚠️ falta — rellénalo)"),
+                        value=r.get("email_inversor", ""),
+                        placeholder="correo@ejemplo.com",
+                        key=f"edit_email_{r['id']}",
+                    )
+
                     # Campo wallet (editable si es propuesta pendiente o si quiere corregirla)
                     wallet_actual    = r.get("wallet_inversor", "")
                     es_pendiente_w   = r.get("wallet_pendiente", False)
@@ -1243,6 +1290,12 @@ def render_reservas(lista: list, editable: bool = False):
 
                     if guardar:
                         errores_edit = []
+                        # Al editar el email NO es obligatorio: si se exigiera, las
+                        # reservas antiguas que no lo tienen no se podrían tocar para
+                        # nada más —ni corregir tokens ni precio— hasta rellenarlo.
+                        _err_e = _contacto.error(new_email, obligatorio=False)
+                        if _err_e:
+                            errores_edit.append(_err_e)
                         wallet_limpia = new_wallet.strip().lower()
                         # Validar wallet si se ha rellenado o era obligatoria
                         wallet_guardada  = wallet_actual
@@ -1263,6 +1316,7 @@ def render_reservas(lista: list, editable: bool = False):
                                     item["n_tokens"]         = float(new_tokens)
                                     item["precio_acordado"]  = float(new_precio)
                                     item["notas"]            = new_notas.strip()
+                                    item["email_inversor"]   = _contacto.normalizar(new_email)
                                     item["wallet_inversor"]  = wallet_guardada
                                     item["wallet_pendiente"] = pendiente_nueva
                                     break
@@ -1480,6 +1534,7 @@ if reservas_all:
             "Proyecto ID":      r["proyecto_id"],
             "Comercial":        r["comercial"],
             "Inversor":         r["inversor"],
+            "Email inversor":   r.get("email_inversor", ""),
             "Wallet inversor":  r["wallet_inversor"],
             "Tokens":           r["n_tokens"],
             "Precio acordado":  r["precio_acordado"],
@@ -1496,4 +1551,8 @@ if reservas_all:
         data=csv_bytes,
         file_name=f"reservas_otc_{datetime.utcnow().strftime('%Y%m%d')}.csv",
         mime="text/csv",
+    )
+    st.caption(
+        "⚠️ El fichero lleva nombre, email y wallet de inversores reales. No lo subas a "
+        "ningún repositorio ni lo compartas fuera del equipo."
     )

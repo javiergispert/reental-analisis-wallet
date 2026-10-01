@@ -41,6 +41,7 @@ _recarga.refrescar("maestro", "propuesta", "propuesta_pdf", "pool_rnt", "divisas
 API_KEY = os.getenv("ETHERSCAN_API_KEY", "")
 OTC_WALLET = os.getenv("OTC_WALLET", "0xce0719ec1bda336ba069c6961ad167767829301a").lower()
 TAB_RESERVAS, TAB_OFERTAS, TAB_PRECIOS = "Reservas", "Ofertas", "precios_otc"
+import otc_contacto as _contacto
 
 # Se sube cuando cambia lo que devuelve `_catalogo_otc`, en forma o en valor.
 # Aquí no cambió la forma pero sí las cifras: el disponible pasa a descontar
@@ -572,6 +573,15 @@ def _descarga(datos: dict, nombre: str, reservables: list) -> None:
             wallet_def = st.session_state["wallets_analyzed"][0][0]
         wallet_inv = c2.text_input("Wallet del inversor *", value=wallet_def,
                                    key="_wallet_prop", placeholder="0x…")
+        # Las reservas que se crean aquí aparecen en la misma lista que las de la
+        # gestión OTC, así que necesitan el mismo email: sin él, quien revise la
+        # lista no puede localizar al inversor en el CRM y la reserva es un nombre
+        # suelto. Se pide aquí en vez de dejarlo en blanco a propósito.
+        email_inv = st.text_input(
+            "Email del inversor *", value=st.session_state.get("_email_prop", ""),
+            key="_email_prop", placeholder="correo@ejemplo.com",
+            help="Con este correo se identifica al inversor en el CRM.",
+        )
 
         lineas_res = []
         for i, r in enumerate(reservables):
@@ -604,6 +614,9 @@ def _descarga(datos: dict, nombre: str, reservables: list) -> None:
                 errores.append("La wallet del inversor debe ser una dirección válida (0x… 42 caracteres).")
             if not (datos.get("titular") or "").strip():
                 errores.append("Falta el titular de la propuesta.")
+            _err_email = _contacto.error(email_inv)
+            if _err_email:
+                errores.append(_err_email)
             for r in lineas_res:
                 if r["minimo"] and r["precio"] < r["minimo"] - 1e-9:
                     errores.append(f"{r['proyecto']['label']}: el precio {r['precio']:,.2f} está por "
@@ -612,7 +625,8 @@ def _descarga(datos: dict, nombre: str, reservables: list) -> None:
                 st.error(e)
             if not errores:
                 ok, fallo = _guardar_reservas(lineas_res, comercial.strip(),
-                                              datos["titular"].strip(), w, datos["eurusd"])
+                                              datos["titular"].strip(), w, datos["eurusd"],
+                                              _contacto.normalizar(email_inv))
                 if fallo:
                     st.error(f"No se anotó ninguna reserva: {fallo}")
                 else:
@@ -630,7 +644,7 @@ def _descarga(datos: dict, nombre: str, reservables: list) -> None:
 
 
 def _guardar_reservas(lineas: list, comercial: str, inversor: str,
-                      wallet: str, eurusd: float) -> tuple:
+                      wallet: str, eurusd: float, email: str = "") -> tuple:
     """Anota las reservas con el mismo formato que la gestión OTC.
 
     La lista se relee FRESCA justo antes de escribir y se añade encima: si se
@@ -657,6 +671,7 @@ def _guardar_reservas(lineas: list, comercial: str, inversor: str,
             "proyecto_id": p["label"],
             "comercial": comercial,
             "inversor": inversor,
+            "email_inversor": email,
             "wallet_inversor": wallet,
             "wallet_pendiente": False,
             "n_tokens": float(r["n_tokens"]),
