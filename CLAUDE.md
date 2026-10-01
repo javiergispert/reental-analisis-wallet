@@ -273,8 +273,15 @@ escribir**: `_store.read_list(TAB, fresh=True)` y añadir encima.
 - **No recarga los módulos propios tras un despliegue.** Para eso está
   `recarga.refrescar("modulo")`. Limitación: arregla `modulo.funcion()` pero no
   `from modulo import funcion`, que queda enlazado al objeto viejo. Si aparece
-  HTML en crudo o un `AttributeError` raro después de desplegar, es esto: un
-  **Reboot** desde *Manage app* lo resuelve.
+  HTML en crudo, un `AttributeError` raro o un **`TypeError` al llamar a una
+  función a la que acabas de añadir un argumento**, es esto: un **Reboot** desde
+  *Manage app* lo resuelve en caliente.
+  Lo que hay que mirar al desplegar un cambio de firma es si **la página que la
+  llama tiene su `refrescar`**. `pages/02_OTC.py` era la única de las que usan el
+  almacén OTC que no lo tenía, y por eso el fichero de la página llegaba nuevo
+  —se reejecuta siempre— llamando a un `otc_saldos` viejo. **El orden de los
+  nombres importa**: primero las dependencias y después quien las usa, o quien
+  depende se queda apuntando al módulo anterior.
 - **`st.download_button` reejecuta el script entero al pulsarlo.** El fichero se
   baja al instante pero la página se queda pensando varios segundos rehaciendo
   todo. Envuélvelo en `@st.fragment` y pasa los bytes como argumento.

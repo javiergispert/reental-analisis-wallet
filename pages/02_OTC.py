@@ -73,6 +73,19 @@ st.caption(
 # evita que se desincronicen (p.ej. leer solo A1 de un dato que ya ocupa A1+A2).
 import otc_storage as _store
 
+# Recarga de los módulos propios tras un despliegue. Esta página era la única de
+# las que usan el almacén OTC que NO lo hacía, y se notó: al desplegar el cálculo
+# de ofertas contra la cadena, `otc_saldos` se quedó en la versión anterior y la
+# llamada —ya actualizada, porque el fichero de la página sí se reejecuta— reventó
+# con un TypeError por los argumentos nuevos. Ver la trampa 10 de CLAUDE.md.
+#
+# El orden es el de las dependencias: `otc_saldos` usa `aave_lend`, y
+# `otc_inventario` usa `otc_saldos`, así que quien depende se recarga después o
+# se quedaría apuntando al módulo viejo.
+import recarga as _recarga
+_recarga.refrescar("aave_lend", "divisas", "otc_contacto", "otc_saldos",
+                   "otc_inventario", "otc_storage", "otc_protocolos")
+
 def load_reservas() -> list:
     return _store.read_list(TAB_RESERVAS)
 
