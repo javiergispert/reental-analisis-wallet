@@ -44,7 +44,8 @@ import recarga as _recarga
 # Streamlit no reimporta lo que ya está en sys.modules: tras un despliegue esta
 # página puede convivir con una versión anterior de sus módulos. Se refrescan en
 # orden de dependencia (p2p_mercado lo usa mercado_secundario).
-_recarga.refrescar("p2p_mercado", "otc_saldos", "otc_storage", "mercado_secundario")
+_recarga.refrescar("p2p_mercado", "aave_lend", "otc_saldos", "otc_inventario",
+                   "otc_storage", "mercado_secundario")
 import ui_kpi
 from ui_kpi import kpi_card
 import plotly.graph_objects as go

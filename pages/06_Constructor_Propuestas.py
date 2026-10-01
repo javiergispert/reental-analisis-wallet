@@ -35,8 +35,13 @@ import ui_kpi
 from ui_kpi import kpi_card
 
 load_dotenv()
+# Orden de dependencia: `otc_saldos` usa `aave_lend`, y `otc_inventario` usa
+# `otc_saldos`. Si falta uno de los de abajo, recargar `otc_inventario` no sirve:
+# su `import otc_saldos` vuelve a coger el objeto viejo de `sys.modules` y la
+# llamada entre los dos revienta con un TypeError al cambiar una firma.
 _recarga.refrescar("maestro", "propuesta", "propuesta_pdf", "pool_rnt", "divisas",
-                   "otc_inventario", "otc_storage")
+                   "aave_lend", "otc_contacto", "otc_saldos", "otc_inventario",
+                   "otc_storage")
 
 API_KEY = os.getenv("ETHERSCAN_API_KEY", "")
 OTC_WALLET = os.getenv("OTC_WALLET", "0xce0719ec1bda336ba069c6961ad167767829301a").lower()
