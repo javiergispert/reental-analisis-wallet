@@ -2730,6 +2730,12 @@ if aave_lender_filtered:
     H_DEP = ("Suma de TODOS los depósitos del histórico. Si se retiró capital y se volvió a "
              "aportar, ese dinero cuenta varias veces: por eso se indica al lado el máximo "
              "expuesto a la vez, que es el capital realmente puesto en riesgo.")
+    H_POS = ("Capital que sigue prestado en Aave a día de hoy: lo aportado menos lo ya "
+             "retirado. Es la cifra SOBRE LA QUE se están devengando los intereses de al "
+             "lado, y no coincide con el total aportado si ya hubo retiradas.")
+    H_TOT = ("Lo que se recuperaría si se retirase todo ahora mismo: la posición prestada "
+             "más los intereses devengados. Es el saldo del aToken leído del contrato, que "
+             "es el dato medido; las otras dos cifras son sus dos mitades.")
     H_DEV = ("Intereses generados y AÚN NO cobrados: saldo actual del aToken, leído del "
              "contrato, menos el principal que sigue depositado. Un aToken crece solo "
              "según se devenga el interés, sin emitir ninguna transacción, así que este "
@@ -2766,22 +2772,46 @@ if aave_lender_filtered:
         st.markdown(f"<div style='font-size:0.78rem;color:#64748b;font-weight:600;"
                     f"margin:2px 0 6px;'>⏳ Devengado — posición viva</div>",
                     unsafe_allow_html=True)
-        a1, a2, a3, a4 = st.columns(4)
-        # El máximo expuesto se muestra siempre, aunque coincida con el bruto:
-        # su ausencia dejaba al lector sin saber si el dato faltaba o es que no
-        # hubo reciclaje de capital.
-        _vivo = f"{mon} · máx. expuesto: {k['pico']:,.2f}"
-        a1.markdown(kpi_card("💵", "Total aportado (bruto)", f"{k['dep']:,.2f}",
-                             sublabel=_vivo, help=H_DEP), unsafe_allow_html=True)
+        # Primero las tres cifras que se leen juntas: cuánto hay prestado, qué ha
+        # rentado y cuánto se recuperaría hoy. Antes el bloque abría con «Total
+        # aportado (bruto)», que es el histórico de todos los depósitos, así que
+        # los intereses devengados aparecían sin la cifra sobre la que se
+        # devengan: con retiradas de por medio, el bruto no dice qué hay dentro.
+        # Es el mismo ejercicio que «Deuda real» en la pestaña de prestatario.
+        a1, a2, a3 = st.columns(3)
+        a1.markdown(kpi_card("💰", "Posición prestada", f"{k['principal']:,.2f}",
+                             value_color="#1e293b" if k["principal"] > 0.01 else "#94a3b8",
+                             sublabel=f"{mon} · capital vivo en Aave",
+                             help=H_POS), unsafe_allow_html=True)
         a2.markdown(kpi_card("⏳", "Intereses devengados",
                              f"{k['devengado']:,.2f}" if k["medido"] else "—",
                              value_color="#16a34a" if k["devengado"] > 0 else "#94a3b8",
                              sublabel=f"{mon} · pendientes de cobro" if k["medido"] else "no disponible",
                              badge=badge, help=H_DEV), unsafe_allow_html=True)
-        a3.markdown(kpi_card("📈", "Rentabilidad devengada", _pct(k["rent_dev"]),
+        # El total es el saldo LEÍDO del contrato, no la suma de los dos de la
+        # izquierda. Las tres cifras cuadran, pero el saldo es el dato medido y
+        # las otras dos son su reparto: presentar como total una suma calculada
+        # sería dar por bueno el reparto en vez de la medición. Sin lectura
+        # on-chain no se muestra: `saldo` cae al principal y llamarlo «total con
+        # intereses» sería afirmar que no los hay.
+        a3.markdown(kpi_card("🏦", "Total a recuperar hoy",
+                             f"{k['saldo']:,.2f}" if k["medido"] else "—",
+                             value_color="#0284c7" if k["medido"] else "#94a3b8",
+                             sublabel=(f"{mon} · posición + intereses" if k["medido"]
+                                       else "no disponible"),
+                             help=H_TOT), unsafe_allow_html=True)
+
+        a4, a5, a6 = st.columns(3)
+        # El máximo expuesto se muestra siempre, aunque coincida con el bruto:
+        # su ausencia dejaba al lector sin saber si el dato faltaba o es que no
+        # hubo reciclaje de capital.
+        _vivo = f"{mon} · máx. expuesto: {k['pico']:,.2f}"
+        a4.markdown(kpi_card("💵", "Total aportado (bruto)", f"{k['dep']:,.2f}",
+                             sublabel=_vivo, help=H_DEP), unsafe_allow_html=True)
+        a5.markdown(kpi_card("📈", "Rentabilidad devengada", _pct(k["rent_dev"]),
                              value_color=_color(k["rent_dev"]),
                              sublabel="sobre capital vivo", help=H_RDEV), unsafe_allow_html=True)
-        a4.markdown(kpi_card("⚡", "TIR anual devengada",
+        a6.markdown(kpi_card("⚡", "TIR anual devengada",
                              _pct(k["tir_dev"] * 100 if k["tir_dev"] is not None else None),
                              value_color=_color(k["tir_dev"]),
                              sublabel="anualizada", help=H_TDEV), unsafe_allow_html=True)
@@ -2836,6 +2866,19 @@ Los KPIs se separan en dos mitades que **no se solapan**: lo que sigue dentro ge
 y lo que ya salió. Sumadas dan el resultado completo de la posición.
 
 ##### ⏳ Devengado — posición viva
+
+Las tres primeras tarjetas son el desglose de una sola cosa y cuadran entre sí:
+
+**Posición prestada + Intereses devengados = Total a recuperar hoy**
+
+**Posición prestada** — Capital que sigue dentro: lo aportado menos lo ya retirado. Es la cifra
+sobre la que se devengan los intereses, y no coincide con el total aportado en cuanto ha habido
+una retirada.
+
+**Total a recuperar hoy** — El saldo del aToken leído del contrato. Es el dato **medido**, y las
+otras dos cifras son su reparto; por eso se muestra la lectura y no la suma de las otras dos.
+Si la cadena no se puede consultar, esta tarjeta y la de intereses quedan en «—»: el saldo
+decaería al principal y presentarlo como «total con intereses» sería afirmar que no los hay.
 
 **Intereses devengados** — Saldo actual del aToken (leído del contrato) − principal que sigue
 depositado. Un aToken de Aave *rebasa*: su saldo crece solo según se devenga el interés, sin
