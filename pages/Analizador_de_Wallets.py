@@ -1708,6 +1708,26 @@ else:
     st.caption(f"Máximo {MAX_WALLETS} wallets simultáneas (más ralentizaría demasiado la carga).")
 
 filter_date = st.date_input("📅 Filtrar por fecha (opcional — saldo a esa fecha)", value=None)
+
+# Releer el maestro a demanda. La ficha de los proyectos se cachea una hora, así
+# que cuando operaciones corrige el maestro —da de alta un proyecto nuevo o
+# rellena una «Token Address» que faltaba— el cambio tardaba hasta 60 minutos en
+# verse, sin ninguna señal de que lo que había en pantalla era viejo. Pasó con
+# Madrid 7: la dirección ya estaba puesta y la herramienta seguía sin recogerla.
+#
+# Se limpia SOLO la lectura del maestro, no toda la caché: el histórico de la
+# cadena cuesta minutos de consultas y no tiene por qué rehacerse porque haya
+# cambiado una ficha.
+_c1, _c2 = st.columns([1, 3])
+if _c1.button("🔄 Releer el maestro", use_container_width=True,
+              help="Vuelve a descargar la ficha de los proyectos. Úsalo si acabas de "
+                   "corregir el maestro y la herramienta sigue sin reflejarlo."):
+    # Esta página lee la ficha de los proyectos SOLO por `load_tokens`; no usa
+    # `utils.load_master_projects`, así que no hay más cachés del maestro que
+    # limpiar aquí.
+    load_tokens.clear()
+    st.success("Maestro releído. Vuelve a pulsar «Analizar cartera».")
+
 analyze_btn = st.button("🔍 Analizar cartera", type="primary", use_container_width=True)
 
 if analyze_btn:
