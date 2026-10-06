@@ -419,6 +419,17 @@ def label_address(addr: str, wallet: str, atoken_contracts: dict, reental_addres
     return "Wallet de un tercero"
 
 
+# Tokens que la CADENA dice que son de Reental y el maestro no conoce. Se
+# acumulan aquí para avisar en pantalla en vez de descartarlos en silencio.
+#
+# Por qué existe: el universo de tokens sale del maestro, así que un proyecto
+# recién emitido y todavía sin fila —o con la columna «Token Address» vacía— se
+# saltaba con un `continue`. La cartera no mostraba error: mostraba una cartera
+# incompleta, que es peor. Pasó con Madrid 7 (MAD-7) y Miami 6 (MIA-6) en
+# octubre de 2026: una wallet con 250 tokens de Madrid 7 aparecía sin ellos.
+TOKENS_FUERA_DEL_MAESTRO = {}
+
+
 def process_transfers(transfers: list, wallet: str, known_tokens: dict, reental_addresses: set = None,
                        own_wallets: dict = None, wallet_alias: str = None) -> dict:
     wallet = wallet.lower()
@@ -485,6 +496,23 @@ def process_transfers(transfers: list, wallet: str, known_tokens: dict, reental_
             else:
                 aave_match = match_aave_token(tx_symbol, tx_name, known_tokens)
                 if aave_match is None:
+                    # Antes de saltárselo: si la cadena dice que es un token de
+                    # Reental, el problema no es del inversor sino del maestro, y
+                    # callarlo deja una cartera incompleta con aspecto de completa.
+                    # Se excluye el aToken de colateral: representa al MISMO token
+                    # y lo reportaría dos veces. `es_atoken_reental` está importada
+                    # a nivel de módulo; `_is_debt_token` no, que vive anidada en
+                    # otra función y aquí no existe.
+                    if es_token_reental(tx_symbol, tx_name) and not es_atoken_reental(tx_symbol, tx_name):
+                        _dec = int(tx["tokenDecimal"]) if tx["tokenDecimal"] else 18
+                        _val = int(tx["value"]) / (10 ** _dec)
+                        _reg = TOKENS_FUERA_DEL_MAESTRO.setdefault(contract, {
+                            "symbol": tx_symbol, "name": tx_name, "address": contract,
+                            "saldo": 0.0, "movimientos": 0, "wallets": set(),
+                        })
+                        _reg["saldo"] += _val if tx["to"].lower() == wallet else -_val
+                        _reg["movimientos"] += 1
+                        _reg["wallets"].add(wallet_alias or wallet)
                     continue
                 is_aave = True
                 original_info = aave_match
@@ -1787,6 +1815,25 @@ for contract, data in token_data.items():
 # ── Resumen ──────────────────────────────────────────────────────────────────
 st.markdown("---")
 date_label = f" a fecha **{filter_date}**" if use_date_filter else ""
+# El aviso va ANTES del resumen, no al final: si la cartera que se está mirando
+# está incompleta, hay que saberlo antes de leer ninguna cifra.
+if TOKENS_FUERA_DEL_MAESTRO:
+    _fuera = sorted(TOKENS_FUERA_DEL_MAESTRO.values(), key=lambda t: -abs(t["saldo"]))
+    _lineas = "\n".join(
+        f"- **{t['symbol'] or t['name']}** — saldo {t['saldo']:,.4f} · "
+        f"{t['movimientos']} movimiento(s) · `{t['address']}`"
+        for t in _fuera)
+    st.error(
+        "### ⚠️ Esta cartera está INCOMPLETA\n\n"
+        f"La cadena dice que estas wallets tienen tokens de Reental que **no figuran en el "
+        f"maestro de inmuebles**, así que no se han podido analizar y **no entran en ninguna "
+        f"cifra de esta página, ni en el informe fiscal**:\n\n{_lineas}\n\n"
+        "No es un fallo del inversor ni de la cadena: al proyecto le falta su fila en el "
+        "maestro, o la fila existe y tiene vacía la columna «Token Address». En cuanto se "
+        "rellene, aparecerán solos aquí.\n\n"
+        "**Hasta entonces, no uses esta cartera para una propuesta ni para un informe fiscal.**"
+    )
+
 st.subheader(f"📊 Resumen de cartera a la fecha indicada{date_label}")
 if es_multi_wallet:
     _wallets_str = " · ".join(f"«{alias}» `{addr[:8]}…{addr[-4:]}`" for addr, alias in wallets_analyzed)
