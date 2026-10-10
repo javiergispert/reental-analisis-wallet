@@ -499,11 +499,24 @@ def process_transfers(transfers: list, wallet: str, known_tokens: dict, reental_
                     # Antes de saltárselo: si la cadena dice que es un token de
                     # Reental, el problema no es del inversor sino del maestro, y
                     # callarlo deja una cartera incompleta con aspecto de completa.
-                    # Se excluye el aToken de colateral: representa al MISMO token
-                    # y lo reportaría dos veces. `es_atoken_reental` está importada
-                    # a nivel de módulo; `_is_debt_token` no, que vive anidada en
-                    # otra función y aquí no existe.
-                    if es_token_reental(tx_symbol, tx_name) and not es_atoken_reental(tx_symbol, tx_name):
+                    # Dos exclusiones, las dos necesarias:
+                    #
+                    #  - El aToken de colateral representa al MISMO token y lo
+                    #    reportaría dos veces. (`es_atoken_reental` está importada a
+                    #    nivel de módulo; `_is_debt_token` no, vive anidada en otra
+                    #    función y aquí no existe.)
+                    #  - El ecosistema RNT. El token de utilidad se llama en la
+                    #    cadena «Reental Utility Token», así que `es_token_reental`
+                    #    lo da por bueno, pero NO es un inmueble: no tiene por qué
+                    #    estar en el maestro y se analiza en su propia sección. Sin
+                    #    esta exclusión, cualquier wallet con RNT salía marcada como
+                    #    cartera incompleta y el aviso se volvía ruido —que es la
+                    #    forma más rápida de que deje de leerse cuando sí importe—.
+                    #    Se filtra por DIRECCIÓN y no por nombre: un proyecto nuevo
+                    #    con una nomenclatura inesperada tiene que seguir saltando.
+                    if (es_token_reental(tx_symbol, tx_name)
+                            and not es_atoken_reental(tx_symbol, tx_name)
+                            and contract not in RNT_ECOSYSTEM_CONTRACTS):
                         _dec = int(tx["tokenDecimal"]) if tx["tokenDecimal"] else 18
                         _val = int(tx["value"]) / (10 ** _dec)
                         _reg = TOKENS_FUERA_DEL_MAESTRO.setdefault(contract, {
